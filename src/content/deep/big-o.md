@@ -1,4 +1,4 @@
-## 從一個具體問題開始：測試時一秒，上線後好幾分鐘
+## 具體問題：測試時一秒，上線後好幾分鐘
 
 每天凌晨有一支工作，把合作廠商給的會員 CSV 和資料庫裡的會員對照，找出「新的」與「已存在的」：
 
@@ -15,18 +15,14 @@ for row in csv_rows:
 
 開發環境的 CSV 有 200 筆、資料庫有 300 位會員，一秒內跑完。上線後兩邊各 2 萬筆，這支工作跑了好幾分鐘，還讓資料庫在凌晨多了一波查詢尖峰。
 
-程式邏輯沒錯，錯在它的成本怎麼隨資料量成長：
-
 - `row["email"] in existing` 在 list 裡找，最壞要比對整個 list。2 萬筆 CSV、每筆最多比 2 萬次，最壞約 4 億次比較。資料各變 100 倍，比較次數變 1 萬倍。
 - 迴圈裡每一筆都送一句 SQL，2 萬筆就是 2 萬次網路往返。每次就算只要 1 ms，光等網路就是 20 秒。
 
-第一個是 **O(n²)** 的記憶體運算，第二個是 O(n) 次 I/O。Big-O 用來在寫程式時、還沒上線前，就看出這種「資料一大就爆」的寫法。
+第一個是 **O(n²)** 的記憶體運算，第二個是 O(n) 次 I/O。
 
-## Big-O 在講什麼
+## Big-O：資料變十倍，時間變幾倍
 
 Big-O 描述的是**成長率**：輸入大小 n 變大時，工作量最多以什麼速度增加。它不是秒數，所以要拿掉常數和次要的項：`3n² + 100n + 7` 寫成 O(n²)，因為 n 夠大時 n² 那一項主導一切。
-
-最直接的讀法是問：**資料變十倍，時間變幾倍？**
 
 | 複雜度 | 名稱 | n 從 1,000 變 10,000 | 後端裡的典型例子 |
 |---|---|---|---|
@@ -36,59 +32,11 @@ Big-O 描述的是**成長率**：輸入大小 n 變大時，工作量最多以�
 | O(n log n) | 線性對數 | 約 13 倍 | 排序（`sorted()`、沒有索引可用的 `ORDER BY`） |
 | O(n²) | 平方 | 100 倍 | 巢狀迴圈對照兩個 list、每筆都和其他每筆比 |
 
-log 的成長慢到幾乎感覺不到：log₂ 1,000 ≈ 10、log₂ 1,000,000 ≈ 20、log₂ 1,000,000,000 ≈ 30。資料從一千筆長到十億筆，二分搜尋的步數只從 10 步變 30 步，所以索引查詢在大表上依然很快。
-
-### 平均、最壞與攤銷
-
-同一個操作常常有不只一個複雜度，要看講的是哪一種：
-
-- **平均**：Python 的 dict / set 查找平均是 O(1)。
-- **最壞**：大量 key 的 hash 撞在一起時，dict 查找會退化成 O(n)。這曾被拿來攻擊網站（送出大量刻意碰撞的參數名稱，讓伺服器解析時卡住）。Python 3.3 起預設對 `str` 與 `bytes` 的 hash 加上隨機種子，降低這種攻擊的可行性。
-- **攤銷**（amortized）：`list.append` 偶爾要把整個陣列搬到更大的記憶體，那一次是 O(n)，但平均分攤到每次 append 是 O(1)。
-
-### 空間也是複雜度
-
-把一個 list 轉成 set 是用 O(n) 的記憶體換 O(1) 的查找。後端常見的取捨：多用記憶體（set、dict、快取、索引）換時間。索引本身也是空間換時間，而且每次寫入都要多維護一份，見 [索引](#/skill/indexes) 的寫入成本一段。
-
-## 後端常見操作的複雜度
-
-### Python 內建結構
-
-| 操作 | 複雜度 | 備註 |
-|---|---|---|
-| `lst[i]`、`len(lst)` | O(1) | list 是連續陣列 |
-| `x in lst`、`lst.index(x)`、`lst.remove(x)` | O(n) | 從頭比到尾 |
-| `x in s`（set）、`d[k]`（dict） | 平均 O(1) | 最壞 O(n) |
-| `lst.append(x)`、`lst.pop()` | 攤銷 O(1) | 在尾端操作 |
-| `lst.insert(0, x)`、`lst.pop(0)` | O(n) | 後面的元素全部要搬一格；當佇列用要換 `collections.deque` |
-| `deque.appendleft`、`deque.popleft` | O(1) | 兩端都快，中間的索引存取是 O(n) |
-| `sorted(lst)`、`lst.sort()` | O(n log n) | 已經接近排好的資料會快很多 |
-| `heapq.heappush`、`heapq.heappop` | O(log n) | 取最小值 `heap[0]` 是 O(1) |
-| `bisect.bisect_left`（已排序 list） | O(log n) | 但 `bisect.insort` 插入要搬元素，是 O(n) |
-| 迴圈裡 `s = s + t` 累加字串 | 可能 O(n²) | Python 文件說明重複串接不可變序列的成本是平方；CPython 對某些情況有最佳化，但不保證。用 `"".join(parts)` |
-
-### SQL 查詢
-
-資料庫也一樣有複雜度，`EXPLAIN` 的每個節點都能對應回去（怎麼讀 EXPLAIN 見 [索引](#/skill/indexes)）：
-
-| 計畫節點 | 大致的複雜度 | 什麼時候出現 |
-|---|---|---|
-| `Index Scan`（等值） | O(log n) 找到位置，再加上取回的 k 筆 | `WHERE` 欄位有索引且條件夠篩選 |
-| `Seq Scan` | O(n) | 沒有可用的索引，或表很小、要取大部分的列 |
-| `Sort` | O(n log n) | `ORDER BY` 沒有索引可以照順序讀 |
-| `Sort`（top-N heapsort） | 約 O(n log k) | `ORDER BY … LIMIT k`，只保留前 k 名 |
-| `Nested Loop` | O(n × m)；內層走索引時約 O(n log m) | 外層很少列，或內層有索引 |
-| `Hash Join` | 約 O(n + m) | 等值 JOIN、兩邊都不小 |
-| `OFFSET k LIMIT 10` | O(k + 10) | 深分頁：要先產生並丟掉前 k 筆 |
-| `SELECT count(*)` | O(n) | PostgreSQL 因為 MVCC 不存現成的總筆數，要數過一遍 |
-
-最後兩行在列表 API 裡很常見：第 9,000 頁的 OFFSET 分頁和「共有幾筆」的總數，都會隨資料量線性變慢。解法見設計情境 [列表 API 的分頁](#/scenario/pagination)。
+資料從一千筆長到十億筆，二分搜尋的步數只從 10 步變 30 步（log₂ 1,000 ≈ 10、log₂ 1,000,000,000 ≈ 30），所以索引查詢在大表上依然很快。
 
 ## 後端的成本模型：先數 I/O 次數
 
-演算法課的 Big-O 數的是 CPU 運算次數。後端程式大部分時間在等 I/O，所以要先數另一個東西：**一次請求要做幾次網路或磁碟往返**。
-
-數量級（示意，實際值依硬體與網路而定）：
+後端程式大部分時間在等 I/O，所以先數**一次請求要做幾次網路或磁碟往返**。數量級（示意，實際值依硬體與網路而定）：
 
 | 動作 | 大約的時間數量級 |
 |---|---|
@@ -96,13 +44,12 @@ log 的成長慢到幾乎感覺不到：log₂ 1,000 ≈ 10、log₂ 1,000,000 �
 | 同機房一次資料庫或 Redis 往返 | 數百微秒到數毫秒 |
 | 跨區域的一次 API 呼叫 | 數十到數百毫秒 |
 
-一次資料庫往返的時間，夠 CPU 做幾萬到幾十萬次記憶體運算。所以：
+一次資料庫往返的時間，夠 CPU 做幾萬到幾十萬次記憶體運算。算一個請求的成本用兩層：
 
-- **O(n) 次查詢比 O(n²) 次記憶體運算更容易出事**。開頭的例子裡，2 萬次查詢光往返就是幾十秒等級；把 list 換成 set 只省掉 CPU 時間，往返次數不會變。
-- **N+1 查詢**是最常見的 O(n) 次 I/O：取 n 筆清單，再對每筆各查一次關聯資料。ORM 的延遲載入會在你看不到 SQL 的地方製造它，怎麼從 log 認出來、用 eager loading 改成 2 句，見 [ORM 與 Migration](#/skill/orm-migrations)。
-- **批次化**把 O(n) 次 I/O 變成 O(1) 次：`WHERE id = ANY(%s)` 一次取回、`executemany` / `COPY` 一次寫入、Redis 用 pipeline 或 `MGET`。
+1. **I/O 次數 × 每次往返的時間**。
+2. 每次 I/O 裡資料庫做的事的 Big-O（那句 SQL 是 Index Scan 還是 Seq Scan）。
 
-算一個請求的成本，用兩層：先算 **I/O 次數 × 每次往返的時間**，再對每次 I/O 裡資料庫做的事算 Big-O（例如那句 SQL 是 Index Scan 還是 Seq Scan）。開頭的工作改成「一次取回所有 email 放進 set、比對完再批次寫入」，兩層都下降：記憶體運算 O(n)、查詢次數 O(1)。
+開頭的工作改成「一次取回所有 email 放進 set、比對完再批次寫入」，兩層都下降：記憶體運算 O(n)、查詢次數 O(1)。
 
 ## 實際程式：量給自己看
 
@@ -154,9 +101,74 @@ for n in (1_000, 100_000, 10_000_000):
     print(f"{n:>10,} {math.log2(n):>7.0f} {n * math.log2(n):>12,.0f} {n * n:>16,}")
 ```
 
-在本機 CPython 3.11 上跑，巢狀 list 那欄從 n = 1,000 的幾毫秒長到 n = 8,000 的幾百毫秒；set 那欄一直在 1 毫秒以下。瀏覽器裡的 Pyodide 比較慢，絕對數字會不同，但倍數關係一樣。小 n 時三者的差距不明顯，這也是開發環境看不出問題的原因。
+小 n 時三者的差距不明顯，這也是開發環境看不出問題的原因。
 
-### SQL：在計畫裡找到複雜度
+### 最常見的兩個錯誤
+
+複雜度問題通常以「逾時」的樣子出現：
+
+- **`canceling statement due to statement timeout`**（PostgreSQL，設了 `statement_timeout` 時）：單句 SQL 太慢，例如大表 Seq Scan、深 OFFSET、沒有索引的 JOIN。用 `EXPLAIN (ANALYZE, BUFFERS)` 找 `actual rows` 很大的節點。
+- **`[CRITICAL] WORKER TIMEOUT (pid:…)`**（Gunicorn）：一個請求做太久，例如迴圈裡打查詢、在請求裡處理整份大檔。打開 SQL log，一個請求有幾十、幾百句相似的查詢，就是 N+1 或迴圈裡打查詢。
+
+:::stop 讀到這裡可以先停：會估一段程式的成長倍數、先數 I/O 次數，並用計時量出 O(n²) 與 O(n) 的差別。後面的平均與最壞、常見操作的複雜度表、SQL 計畫、常數與小 n，在要查某個操作的複雜度、讀 `EXPLAIN` 或判斷某段 O(n²) 值不值得改時再回來讀。
+
+## 平均、最壞、攤銷與空間
+
+log 的成長慢到幾乎感覺不到：log₂ 1,000,000 ≈ 20。
+
+同一個操作常常有不只一個複雜度，要看講的是哪一種：
+
+- **平均**：Python 的 dict / set 查找平均是 O(1)。
+- **最壞**：大量 key 的 hash 撞在一起時，dict 查找會退化成 O(n)。這曾被拿來攻擊網站（送出大量刻意碰撞的參數名稱，讓伺服器解析時卡住）。Python 3.3 起預設對 `str` 與 `bytes` 的 hash 加上隨機種子，降低這種攻擊的可行性。
+- **攤銷**（amortized）：`list.append` 偶爾要把整個陣列搬到更大的記憶體，那一次是 O(n)，但平均分攤到每次 append 是 O(1)。
+
+### 空間也是複雜度
+
+把一個 list 轉成 set 是用 O(n) 的記憶體換 O(1) 的查找。後端常見的取捨：多用記憶體（set、dict、快取、索引）換時間。索引本身也是空間換時間，而且每次寫入都要多維護一份，見 [索引](#/skill/indexes) 的寫入成本一段。
+
+## 後端常見操作的複雜度
+
+### Python 內建結構
+
+| 操作 | 複雜度 | 備註 |
+|---|---|---|
+| `lst[i]`、`len(lst)` | O(1) | list 是連續陣列 |
+| `x in lst`、`lst.index(x)`、`lst.remove(x)` | O(n) | 從頭比到尾 |
+| `x in s`（set）、`d[k]`（dict） | 平均 O(1) | 最壞 O(n) |
+| `lst.append(x)`、`lst.pop()` | 攤銷 O(1) | 在尾端操作 |
+| `lst.insert(0, x)`、`lst.pop(0)` | O(n) | 後面的元素全部要搬一格；當佇列用要換 `collections.deque` |
+| `deque.appendleft`、`deque.popleft` | O(1) | 兩端都快，中間的索引存取是 O(n) |
+| `sorted(lst)`、`lst.sort()` | O(n log n) | 已經接近排好的資料會快很多 |
+| `heapq.heappush`、`heapq.heappop` | O(log n) | 取最小值 `heap[0]` 是 O(1) |
+| `bisect.bisect_left`（已排序 list） | O(log n) | 但 `bisect.insort` 插入要搬元素，是 O(n) |
+| 迴圈裡 `s = s + t` 累加字串 | 可能 O(n²) | Python 文件說明重複串接不可變序列的成本是平方；CPython 對某些情況有最佳化，但不保證。用 `"".join(parts)` |
+
+### SQL 查詢
+
+資料庫也一樣有複雜度，`EXPLAIN` 的每個節點都能對應回去（怎麼讀 EXPLAIN 見 [索引](#/skill/indexes)）：
+
+| 計畫節點 | 大致的複雜度 | 什麼時候出現 |
+|---|---|---|
+| `Index Scan`（等值） | O(log n) 找到位置，再加上取回的 k 筆 | `WHERE` 欄位有索引且條件夠篩選 |
+| `Seq Scan` | O(n) | 沒有可用的索引，或表很小、要取大部分的列 |
+| `Sort` | O(n log n) | `ORDER BY` 沒有索引可以照順序讀 |
+| `Sort`（top-N heapsort） | 約 O(n log k) | `ORDER BY … LIMIT k`，只保留前 k 名 |
+| `Nested Loop` | O(n × m)；內層走索引時約 O(n log m) | 外層很少列，或內層有索引 |
+| `Hash Join` | 約 O(n + m) | 等值 JOIN、兩邊都不小 |
+| `OFFSET k LIMIT 10` | O(k + 10) | 深分頁：要先產生並丟掉前 k 筆 |
+| `SELECT count(*)` | O(n) | PostgreSQL 因為 MVCC 不存現成的總筆數，要數過一遍 |
+
+最後兩行在列表 API 裡很常見：第 9,000 頁的 OFFSET 分頁和「共有幾筆」的總數，都會隨資料量線性變慢。解法見設計情境 [列表 API 的分頁](#/scenario/pagination)。
+
+## N+1 與批次化
+
+- **O(n) 次查詢比 O(n²) 次記憶體運算更容易出事**。開頭的例子裡，2 萬次查詢光往返就是幾十秒等級；把 list 換成 set 只省掉 CPU 時間，往返次數不會變。
+- **N+1 查詢**是最常見的 O(n) 次 I/O：取 n 筆清單，再對每筆各查一次關聯資料。ORM 的延遲載入會在你看不到 SQL 的地方製造它，怎麼從 log 認出來、用 eager loading 改成 2 句，見 [ORM 與 Migration](#/skill/orm-migrations)。
+- **批次化**把 O(n) 次 I/O 變成 O(1) 次：`WHERE id = ANY(%s)` 一次取回、`executemany` / `COPY` 一次寫入、Redis 用 pipeline 或 `MGET`。
+
+## SQL：在計畫裡找到複雜度
+
+Python 那段在本機 CPython 3.11 上跑，巢狀 list 那欄從 n = 1,000 的幾毫秒長到 n = 8,000 的幾百毫秒；set 那欄一直在 1 毫秒以下。瀏覽器裡的 Pyodide 比較慢，絕對數字會不同，但倍數關係一樣。
 
 用 `generate_series` 做出 10 萬筆資料，看排序、深分頁、索引與 JOIN 在計畫裡長什麼樣（本站的 PGlite 是 PostgreSQL 18）：
 
@@ -190,8 +202,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM events WHERE user_id = 42;
 - 建索引前是 `Seq Scan on events` 加 `Filter`，建索引後是 `Index Scan using events_user_id_idx`。
 
 規劃器依統計資料與成本估計選計畫，資料分佈或設定不同時，計畫可能不一樣，這是正常的。
-
-:::stop 讀到這裡可以先停：會估一段程式的成長倍數、先數 I/O 次數，並在 Python 與 `EXPLAIN` 裡量給自己看。後面的常數與小 n、常見錯誤，在要判斷某段 O(n²) 值不值得改時再回來讀。
 
 ## 常數與小 n：什麼時候不用在意
 

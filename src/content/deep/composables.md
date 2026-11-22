@@ -1,4 +1,4 @@
-## 從一個具體問題開始：三個元件、三份抓資料的程式
+## 具體問題：三個元件、三份抓資料的程式
 
 門診系統有三個頁面都要抓資料：看板抓今天的診間、掛號頁抓可掛號的時段、病人頁抓病歷。每個元件各自寫了一份：
 
@@ -25,11 +25,9 @@ onMounted(load)
 
 把這段邏輯抽成 `useFetch`，三個元件各呼叫一次，bug 只修一處。
 
-## 運作原理
+## composable 是在 setup 裡呼叫的函式
 
-### composable 只是函式
-
-composable 是名稱以 `use` 開頭、在 setup 裡呼叫的函式。它裡面可以用任何 Composition API：
+composable 是名稱以 `use` 開頭、在 setup 裡呼叫的函式，裡面可以用任何 Composition API：
 
 ```js
 // useNow.js：每秒更新一次的目前時間
@@ -50,19 +48,17 @@ export function useNow() {
 2. `onMounted`、`onUnmounted` 註冊到「目前正在建立的元件」上，元件卸載時計時器跟著清掉。
 3. `watch`、`computed` 也綁在這個元件上，卸載時自動停止。
 
-第 2、3 點要求 composable 在 setup 期間呼叫。Vue 只在執行 `<script setup>`（或 `setup()`）時知道目前是哪個元件；放在 click 處理函式或 `setTimeout` 裡，鉤子找不到元件，Console 出現 `[Vue warn]: onMounted is called when there is no active component instance to be associated with.`。`<script setup>` 頂層的 `await` 之後是例外，編譯器會替你接回元件的上下文。
+第 2、3 點要求 composable 在 setup 期間呼叫。Vue 只在執行 `<script setup>`（或 `setup()`）時知道目前是哪個元件；放在 click 處理函式或 `setTimeout` 裡，鉤子找不到元件，Console 出現 `[Vue warn]: onMounted is called when there is no active component instance to be associated with.`。
 
-### 回傳值：ref 組成的一般物件
+## 回傳 ref 組成的物件，參數收 getter
+
+回傳一般物件、每個值是 ref，元件解構或改名（`const { data: slots } = useFetch(…)`）後仍會更新：
 
 | composable 回傳 | 元件寫 `const { now } = useNow()` 之後 |
 |---|---|
 | `{ now }`，`now` 是 ref | `now` 是 ref，會更新 |
 | `reactive({ now: new Date() })` | 解構拿到當下的 `Date`，之後不更新 |
 | `{ now: now.value }` | 拿到當下的值，之後不更新 |
-
-慣例是回傳一般物件、每個值是 ref。元件可以解構、可以改名（`const { data: slots } = useFetch(…)`）；想用 `obj.x` 的寫法，就自己包一層 `reactive(useFetch(…))`，ref 會被自動拆開。
-
-### 參數：值、ref 或 getter
 
 composable 要在參數改變時重新執行，就不能只收一個當下的值：
 
@@ -73,22 +69,9 @@ composable 要在參數改變時重新執行，就不能只收一個當下的值
 | `useFetch(() => '/api/slots?date=' + date.value)` | getter | 在 watch 裡呼叫它就會追蹤 |
 | `useFetch('/api/slots?date=' + date.value)` | 當下的字串 | 不會重抓：呼叫時就算好了 |
 
-Vue 3.3 起的 `toValue()` 把三種情況統一：是 ref 就讀 `.value`，是函式就呼叫它，其他原樣回傳。關鍵是在哪裡呼叫它：在 `watchEffect` 或 `watch` 的 getter 裡呼叫，讀取才會被追蹤；在 composable 的最外層呼叫，只會拿到當下的值。TypeScript 的型別寫成 `MaybeRefOrGetter<string>`。
+Vue 3.3 起的 `toValue()` 把三種情況統一：是 ref 就讀 `.value`，是函式就呼叫它，其他原樣回傳。要在 `watchEffect` 或 `watch` 的 getter 裡呼叫，讀取才會被追蹤；在 composable 的最外層呼叫，只會拿到當下的值。
 
-### 和 mixin、元件、Pinia 的差別
-
-Vue 2 用 mixin 共用邏輯：把一包 `data`、`methods`、鉤子混進元件。Vue 官方文件列出它的三個問題：用了好幾個 mixin 時看不出 `loading` 是誰提供的；兩個 mixin 用了同一個名稱會互相蓋掉；mixin 之間只能靠共用的屬性名互相溝通。composable 是一般的函式呼叫，回傳值自己命名，一個 composable 的輸出可以當成另一個的參數。Vue 3 只為了遷移保留 mixin。
-
-| 要共用的是 | 用 |
-|---|---|
-| 有狀態的邏輯，每個元件各一份（抓資料、計時、監聽視窗大小） | composable |
-| 一塊畫面加上它的行為 | 元件（需要客製畫面就加 slot） |
-| 好幾個頁面共用同一份狀態 | [Pinia](#/skill/pinia) store |
-| 沒有狀態的計算（格式化日期、算年齡） | 一般函式，不用 `use` 開頭 |
-
-在 composable 函式外面（模組頂層）宣告的 `ref`，所有元件共用同一份。小專案拿它當簡易的全域狀態可以，但它不會出現在 Vue DevTools 的 Pinia 分頁，伺服器端渲染時還會被不同使用者的請求共用。
-
-## 實際程式：useFetch
+## 最小範例：useFetch
 
 ```ts
 // src/composables/useFetch.ts
@@ -147,9 +130,28 @@ const { data: slots, error, loading, refresh } = useFetch<{ id: number; time: st
 
 `watchEffect` 依賴兩樣東西：`version` 與 `toValue(url)` 裡讀到的 `date`。改日期或按重試都會重新執行，上一次還沒回來的請求被 `onWatcherCleanup` 取消。
 
+:::stop 讀到這裡可以先停：會把重複的狀態與副作用抽成 composable，回傳 ref 組成的物件，參數接受 getter。後面的 mixin 與 Pinia 的分工、React 對照、錯誤訊息表，在決定邏輯該放哪裡或排查錯誤時再回來讀。
+
+## 和 mixin、元件、Pinia 的分工
+
+Vue 2 用 mixin 共用邏輯：把一包 `data`、`methods`、鉤子混進元件。Vue 官方文件列出它的三個問題：用了好幾個 mixin 時看不出 `loading` 是誰提供的；兩個 mixin 用了同一個名稱會互相蓋掉；mixin 之間只能靠共用的屬性名互相溝通。composable 是一般的函式呼叫，回傳值自己命名，一個 composable 的輸出可以當成另一個的參數。Vue 3 只為了遷移保留 mixin。
+
+| 要共用的是 | 用 |
+|---|---|
+| 有狀態的邏輯，每個元件各一份（抓資料、計時、監聽視窗大小） | composable |
+| 一塊畫面加上它的行為 | 元件（需要客製畫面就加 slot） |
+| 好幾個頁面共用同一份狀態 | [Pinia](#/skill/pinia) store |
+| 沒有狀態的計算（格式化日期、算年齡） | 一般函式，不用 `use` 開頭 |
+
+在 composable 函式外面（模組頂層）宣告的 `ref`，所有元件共用同一份。小專案拿它當簡易的全域狀態可以，但它不會出現在 Vue DevTools 的 Pinia 分頁，伺服器端渲染時還會被不同使用者的請求共用。
+
 很多常見需求不用自己寫。VueUse（`@vueuse/core`，2026-09 發布 15.0）有 `useLocalStorage`、`useEventListener`、`useDebounceFn`、`watchDebounced`、`useWindowSize` 等，元件卸載時都會自己清理；它也有自己的 `useFetch`，選項比上面這個多。
 
-:::stop 讀到這裡可以先停：會把重複的狀態與副作用抽成 composable，回傳 ref 組成的物件，參數接受 getter。後面的 React 對照與錯誤訊息表，在讀自訂 hook 時再回來讀。
+## 細節：頂層 await、reactive 包裝、型別
+
+- `<script setup>` 頂層的 `await` 之後呼叫 composable 是例外，編譯器會替你接回元件的上下文。
+- 想用 `obj.x` 的寫法，自己包一層 `reactive(useFetch(…))`，ref 會被自動拆開。
+- 參數的 TypeScript 型別寫成 `MaybeRefOrGetter<string>`。
 
 ## React 對照
 

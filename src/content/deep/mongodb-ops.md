@@ -10,9 +10,9 @@ db.orders.find({ status: "paid", created_at: { $gte: ISODate("2026-09-01") } })
 
 collection 上已經有索引 `{ created_at: 1, status: 1 }`，兩個查詢條件都在裡面，但這個查詢要 3 秒。`explain("executionStats")` 顯示：索引確實有用到，但掃了 60 萬個索引鍵、讀了 60 萬份文件，然後在記憶體裡排序，最後只回傳 20 份。
 
-索引欄位都對，**順序**錯了。把索引改成 `{ status: 1, amount: -1, created_at: 1 }` 後，同一個查詢只讀幾十份文件就結束。要知道為什麼，得先看 MongoDB 查詢怎麼表達條件、索引怎麼被使用。
+索引欄位都對，**順序**錯了。把索引改成 `{ status: 1, amount: -1, created_at: 1 }` 後，同一個查詢只讀幾十份文件就結束。
 
-## 查詢運算子
+## 查詢運算子：filter 是一份文件
 
 `find()` 的第一個參數是 filter 文件，欄位對應條件：
 
@@ -23,6 +23,70 @@ collection 上已經有索引 `{ created_at: 1, status: 1 }`，兩個查詢條�
 | 邏輯 | `$and` `$or` `$not` `$nor` | `{ $or: [{ city: "台北" }, { vip: true }] }` | `OR` |
 | 欄位 | `$exists` `$type` | `{ deleted_at: { $exists: false } }` | `deleted_at IS NULL`（不完全等價） |
 | 陣列 | `$elemMatch` `$all` `$size` | `{ items: { $elemMatch: { sku: "A", qty: { $gte: 2 } } } }` | 對子表 `EXISTS` |
+
+## 複合索引的欄位順序：ESR 原則
+
+MongoDB 的索引是 B-tree，規則跟 [索引與查詢計畫](#/skill/indexes) 一樣：複合索引 `{a: 1, b: 1, c: 1}` 依 a、再依 b、再依 c 排序，查詢要用到**最左前綴**。複合索引的欄位順序，MongoDB 文件建議依 **ESR 原則**：
+
+1. **Equality（等值）**：`status: "paid"` 這種精確比對的欄位放最前面。等值條件把範圍縮到索引裡**連續的一段**，而且這一段內部仍然依後面的欄位排序。
+2. **Sort（排序）**：`sort` 用的欄位放中間。在等值那一段裡，索引已經依 amount 排好，依序讀出來就是排序結果，不用另外排序；取前 20 筆讀到第 20 筆就停。
+3. **Range（範圍）**：`$gte`、`$lt`、`$in`（多值時常被當作範圍）這類條件放最後，在讀索引時順便過濾。
+
+開頭的索引 `{created_at: 1, status: 1}` 把範圍放第一個，符合條件的鍵散在 9 月以後的每一天裡，而且不是依 amount 排序，只能全部讀出來、在記憶體裡排序。
+
+PostgreSQL 的 B-tree 遵守相同的規則，可以用 `EXPLAIN` 直接看到差別：查詢計畫裡有沒有 `Sort` 節點，就是 MongoDB explain 裡有沒有 `SORT` 階段。
+
+```sql run
+-- 5 萬筆訂單，同一個查詢分別搭配三種欄位順序的複合索引
+CREATE TABLE big_orders AS
+SELECT g AS id,
+       (ARRAY['pending','paid','shipped','cancelled'])[1 + g % 4] AS status,
+       (g * 37 % 10000)::numeric AS amount,
+       timestamptz '2026-01-01' + (g % 300) * interval '1 day' AS created_at
+FROM generate_series(1, 50000) g;
+ANALYZE big_orders;
+
+-- 1. 範圍欄位在前：要讀出所有符合的列再排序（計畫裡有 Sort）
+CREATE INDEX idx_rs ON big_orders (created_at, status);
+EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
+WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
+DROP INDEX idx_rs;
+
+-- 2. 等值、範圍、排序（E-R-S）：等值之後接範圍，排序欄位的順序被打亂，仍然要 Sort
+CREATE INDEX idx_ers ON big_orders (status, created_at, amount DESC);
+EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
+WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
+DROP INDEX idx_ers;
+
+-- 3. 等值、排序、範圍（ESR）：直接依索引順序讀，讀滿 20 筆就停，沒有 Sort
+CREATE INDEX idx_esr ON big_orders (status, amount DESC, created_at);
+EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
+WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
+```
+
+ESR 是經驗法則。範圍條件很窄（例如只查最近 1 小時）時，範圍欄位放前面可能更好，因為要排序的文件本來就很少。以 explain 的數字為準。
+
+## 用 explain 的三個數字確認
+
+```js
+db.orders.find({ status: "paid", created_at: { $gte: ISODate("2026-09-01") } })
+         .sort({ amount: -1 }).limit(20)
+         .explain("executionStats")
+```
+
+輸出很長，看這幾個地方：
+
+| 位置 | 看什麼 | 好的訊號 | 壞的訊號 |
+|---|---|---|---|
+| `winningPlan` 的 stage | 執行計畫的階段樹 | `IXSCAN` → `FETCH`（→ `LIMIT`） | `COLLSCAN`（全表掃描）；出現 `SORT`（記憶體排序） |
+| `executionStats.nReturned` | 回傳幾份 | 與下面兩個數字接近 | |
+| `totalKeysExamined` | 讀了幾個索引鍵 | 接近 nReturned | 遠大於 nReturned：索引順序或選擇性不佳 |
+| `totalDocsExamined` | 讀了幾份文件 | 接近 nReturned；涵蓋查詢時為 0 | 遠大於 nReturned：大部分文件讀了又丟掉 |
+| `executionTimeMillis` | 花多久 | | 搭配上面三個數字判斷原因 |
+
+:::stop 讀到這裡可以先停：會寫 filter 的查詢運算子，依 ESR 排複合索引，並用 explain 的三個數字確認。後面的陣列條件與更新運算子在寫入或查陣列欄位時回來讀，aggregation pipeline 在要分組統計或 `$lookup` 時讀；交易、writeConcern 與讀取偏好，在跨文件寫入或用到 replica set 時再讀。
+
+## 陣列條件、更新運算子與注入
 
 陣列有一個容易踩的語意差異。`items` 是 `[{sku: "A", qty: 1}, {sku: "B", qty: 5}]` 時：
 
@@ -156,71 +220,11 @@ r3 = aggregate(orders, [
 print("  ", {d["_id"]: d["total"] for d in r3})
 ```
 
-## 索引與 ESR 原則
+## 其他索引類型與 explain 的版本差異
 
-MongoDB 的索引是 B-tree，規則跟 [索引與查詢計畫](#/skill/indexes) 一樣：複合索引 `{a: 1, b: 1, c: 1}` 依 a、再依 b、再依 c 排序，查詢要用到**最左前綴**。陣列欄位上的索引叫 multikey index，陣列的每個元素各有一個索引鍵。另外還有唯一索引、部分索引（`partialFilterExpression`）、TTL 索引（到期自動刪文件）。
-
-複合索引的欄位順序，MongoDB 文件建議依 **ESR 原則**：
-
-1. **Equality（等值）**：`status: "paid"` 這種精確比對的欄位放最前面。等值條件把範圍縮到索引裡**連續的一段**，而且這一段內部仍然依後面的欄位排序。
-2. **Sort（排序）**：`sort` 用的欄位放中間。在等值那一段裡，索引已經依 amount 排好，依序讀出來就是排序結果，不用另外排序；取前 20 筆讀到第 20 筆就停。
-3. **Range（範圍）**：`$gte`、`$lt`、`$in`（多值時常被當作範圍）這類條件放最後，在讀索引時順便過濾。
-
-開頭的索引 `{created_at: 1, status: 1}` 把範圍放第一個，符合條件的鍵散在 9 月以後的每一天裡，而且不是依 amount 排序，只能全部讀出來、在記憶體裡排序。
-
-PostgreSQL 的 B-tree 遵守完全相同的規則，可以在瀏覽器裡用 `EXPLAIN` 直接看到差別：查詢計畫裡有沒有 `Sort` 節點，就是 MongoDB explain 裡有沒有 `SORT` 階段。
-
-```sql run
--- 5 萬筆訂單，同一個查詢分別搭配三種欄位順序的複合索引
-CREATE TABLE big_orders AS
-SELECT g AS id,
-       (ARRAY['pending','paid','shipped','cancelled'])[1 + g % 4] AS status,
-       (g * 37 % 10000)::numeric AS amount,
-       timestamptz '2026-01-01' + (g % 300) * interval '1 day' AS created_at
-FROM generate_series(1, 50000) g;
-ANALYZE big_orders;
-
--- 1. 範圍欄位在前：要讀出所有符合的列再排序（計畫裡有 Sort）
-CREATE INDEX idx_rs ON big_orders (created_at, status);
-EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
-WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
-DROP INDEX idx_rs;
-
--- 2. 等值、範圍、排序（E-R-S）：等值之後接範圍，排序欄位的順序被打亂，仍然要 Sort
-CREATE INDEX idx_ers ON big_orders (status, created_at, amount DESC);
-EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
-WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
-DROP INDEX idx_ers;
-
--- 3. 等值、排序、範圍（ESR）：直接依索引順序讀，讀滿 20 筆就停，沒有 Sort
-CREATE INDEX idx_esr ON big_orders (status, amount DESC, created_at);
-EXPLAIN (COSTS OFF) SELECT id, amount FROM big_orders
-WHERE status = 'paid' AND created_at >= '2026-09-01' ORDER BY amount DESC LIMIT 20;
-```
-
-ESR 是經驗法則，不是定律。範圍條件很窄（例如只查最近 1 小時）時，範圍欄位放前面反而可能更好，因為要排序的文件本來就很少。最後以 explain 的數字為準。
-
-### 用 explain 確認
-
-```js
-db.orders.find({ status: "paid", created_at: { $gte: ISODate("2026-09-01") } })
-         .sort({ amount: -1 }).limit(20)
-         .explain("executionStats")
-```
-
-輸出很長，要看的是這幾個地方：
-
-| 位置 | 看什麼 | 好的訊號 | 壞的訊號 |
-|---|---|---|---|
-| `winningPlan` 的 stage | 執行計畫的階段樹 | `IXSCAN` → `FETCH`（→ `LIMIT`） | `COLLSCAN`（全表掃描）；出現 `SORT`（記憶體排序） |
-| `executionStats.nReturned` | 回傳幾份 | 與下面兩個數字接近 | |
-| `totalKeysExamined` | 讀了幾個索引鍵 | 接近 nReturned | 遠大於 nReturned：索引順序或選擇性不佳 |
-| `totalDocsExamined` | 讀了幾份文件 | 接近 nReturned；涵蓋查詢時為 0 | 遠大於 nReturned：大部分文件讀了又丟掉 |
-| `executionTimeMillis` | 花多久 | | 搭配上面三個數字判斷原因 |
+陣列欄位上的索引叫 multikey index，陣列的每個元素各有一個索引鍵。另外還有唯一索引、部分索引（`partialFilterExpression`）、TTL 索引（到期自動刪文件）。
 
 不同版本的 explain 輸出排列不完全一樣（例如啟用 slot-based 執行引擎時，計畫的結構會不同），但 stage 名稱與 executionStats 這幾個數字的意義相同。aggregation 也可以 explain：`db.orders.explain("executionStats").aggregate([...])`，看開頭的 `$match` / `$sort` 有沒有變成 IXSCAN。
-
-:::stop 讀到這裡可以先停：會寫查詢運算子與 aggregation pipeline，依 ESR 排複合索引，並用 explain 的三個數字確認。後面的交易、writeConcern 與讀取偏好，在跨文件寫入或用到 replica set 時再回來讀。
 
 ## 交易、writeConcern 與讀取偏好
 

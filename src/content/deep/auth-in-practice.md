@@ -21,11 +21,11 @@ def get_order(order_id: int, request: Request):
 - token 過期時有的回 `401`、有的回 `500`（`jwt.decode` 丟出的例外沒被處理）、有的回 `403`。
 - 帳號停用後，只有一半的 endpoint 檢查 `user.is_active`。
 
-驗證與授權的邏輯本身不難（前幾課都講過），難的是**每個 endpoint 都一致、都沒漏**。框架提供的 middleware、dependency、decorator、guard 用來把這段邏輯寫一次、在每個 endpoint 用一行掛上，並且讓「漏掛」變得容易被發現。
+難的是**每個 endpoint 都一致、都沒漏**。框架的 middleware、dependency、decorator、guard 把這段邏輯寫一次、在每個 endpoint 用一行掛上，並且讓「漏掛」容易被發現。
 
-## 運作原理：一個請求經過的關卡
+## 一個請求經過的六道關卡
 
-一個受保護的請求，從進來到執行業務邏輯，依序經過：
+受保護的請求從進來到執行業務邏輯，依序經過：
 
 | 關卡 | 做什麼 | 失敗時 |
 |---|---|---|
@@ -36,26 +36,9 @@ def get_order(order_id: int, request: Request):
 | 5. 載入資源 + 資源層授權 | 查訂單，檢查是不是這個人的、狀態允不允許 | 不存在或不該知道其存在：`404`；知道存在但不能做：`403` |
 | 6. 業務邏輯 | | |
 
-1～3 是**驗證**，結果是「目前使用者是誰」；4～5 是**授權**（見 [RBAC 與 ABAC](#/skill/rbac-abac)）。框架裡的對應：
+1～3 是**驗證**，結果是「目前使用者是誰」；4～5 是**授權**（見 [RBAC 與 ABAC](#/skill/rbac-abac)）。FastAPI 兩者都用 dependency 做。
 
-| 框架 | 驗證（1～3） | 授權（4～5） |
-|---|---|---|
-| FastAPI | dependency：`Depends(get_current_user)` | dependency 工廠：`Depends(require_role("admin"))`；資源層 dependency |
-| Django REST framework | `authentication_classes` | `permission_classes`；物件層級用 `has_object_permission` |
-| NestJS | Guard（常搭配 Passport） | Guard + 自訂 decorator（例如 `@Roles('admin')`） |
-| Express | middleware：`(req, res, next)` 把使用者放到 `req.user` | 路由上掛的 middleware |
-
-### middleware 還是 dependency
-
-**middleware** 包住整個應用，每個請求都經過，適合做「與路由無關、每個請求都要做」的事：產生 request id、記錄 log、解析憑證後把結果附在請求上（可能是匿名）。
-
-**dependency**（或 guard、decorator）掛在個別路由上，適合做「這個路由需要什麼」：必須登入、必須是 admin、必須是這張訂單的擁有者。
-
-常見的分工是：middleware 只解析，不拒絕（沒有 token 就標成匿名），由 dependency 決定這個路由要不要拒絕匿名。原因是：middleware 很難知道哪些路由是公開的（健康檢查、登入頁、公開文件），在 middleware 裡維護一份「公開路由清單」很容易和實際路由不同步。
-
-FastAPI 有一個細節：在 `@app.middleware("http")` 裡丟出 `HTTPException` 不會被轉成正常的 HTTP 錯誤回應，因為處理 `HTTPException` 的例外處理器位在使用者 middleware 的內層。middleware 要拒絕請求時，直接回傳 `JSONResponse`。
-
-### 401、403、404
+## 401、403、404 各在什麼時候回
 
 | 狀態碼 | 意思 | 什麼時候用 | 回應要帶 |
 |---|---|---|---|
@@ -63,7 +46,7 @@ FastAPI 有一個細節：在 `@app.middleware("http")` 裡丟出 `HTTPException
 | `403 Forbidden` | 知道你是誰，但你不能做這件事 | 角色或 scope 不足、資源狀態不允許 | 可以說明缺什麼權限；Bearer 時可帶 `error="insufficient_scope"` |
 | `404 Not Found` | 這個資源（對你而言）不存在 | 資源不存在，**或**存在但你不該知道它存在（別人的訂單、別的租戶的資料） | 和真的不存在時一模一樣的回應 |
 
-客戶端依狀態碼做不同的事：`401` 代表「重新取得憑證」（用 refresh token 換發或導去登入），`403` 代表「換發也沒用，不要重試」。如果權限不足卻回 401，客戶端會陷入「換發 → 再試 → 401 → 換發」的迴圈。
+客戶端依狀態碼做不同的事：`401` 代表「重新取得憑證」（用 refresh token 換發或導去登入），`403` 代表「換發也沒用，不要重試」。權限不足卻回 401，客戶端會陷入「換發 → 再試 → 401 → 換發」的迴圈。
 
 Bearer token 的錯誤回應長這樣（RFC 6750）：
 
@@ -83,7 +66,7 @@ Content-Type: application/json
 {"detail": "requires scope orders.write"}
 ```
 
-## 實際程式：FastAPI 的 dependency
+## 最小的完整程式：FastAPI 的 dependency
 
 以下需要安裝 `fastapi` 與 `PyJWT`，不能在瀏覽器裡跑。`db` 是示意用的資料存取物件。
 
@@ -154,15 +137,12 @@ def list_users():
     return db.list_users()
 ```
 
-幾個設計重點：
-
-- **dependency 會在同一個請求內快取**。`read_order` 依賴 `get_own_order`，`get_own_order` 又依賴 `get_current_user`；如果同一個請求裡有好幾個 dependency 都依賴 `get_current_user`，FastAPI 預設只執行它一次。
-- **不需要使用者物件的 endpoint**，用 `dependencies=[Depends(...)]` 掛上檢查，不必在參數列宣告。
 - **整組路由都要登入**時，掛在 router 上：`APIRouter(prefix="/admin", dependencies=[Depends(require_role("admin"))])`。新加的路由自動繼承，不會漏。
-- **`HTTPBearer` 在缺少 header 時的預設行為**依 FastAPI 版本不同（舊版回 403），上面用 `auto_error=False` 自己決定，確保一律回 401。
-- 支援 cookie session 與 Bearer 兩種時，在 `get_current_user` 裡依序嘗試，後面的 endpoint 完全不用知道差別。
+- **`HTTPBearer` 在缺少 header 時的預設行為**依 FastAPI 版本不同（舊版回 403，回應是 `{"detail": "Not authenticated"}`），上面用 `auto_error=False` 自己決定，確保一律回 401。
 
-### 測試：每個受保護的 endpoint 三種身分
+:::stop 讀到這裡可以先停：會用 FastAPI 的 dependency 寫取得目前使用者、角色檢查與資源層檢查，也分得出 401、403、404。後面的三種身分測試在替受保護的路由補測試時回來讀；middleware 與 dependency 的分工、純函式模擬，在要理解檢查的執行順序或換框架時再讀。
+
+## 測試：每個受保護的 endpoint 三種身分
 
 ```python
 from fastapi.testclient import TestClient
@@ -196,11 +176,36 @@ def test_admin_route_forbidden_for_member():
 
 還可以加一個**掃描型測試**：列出 `app.routes`，對每個不在「公開清單」裡的路由，不帶 token 發一次請求，斷言回 `401`。新加的 endpoint 忘了掛檢查，這個測試就會失敗，開頭那個匯出 endpoint 會在 CI 被抓到。
 
-:::stop 讀到這裡可以先停：會用 FastAPI 的 dependency 寫取得目前使用者與角色檢查，分得出 401、403、404，也會替每個受保護的路由寫三種身分的測試。後面用純函式模擬 middleware，在要理解檢查的執行順序時再回來讀。
+## dependency 的其他用法
+
+- **dependency 會在同一個請求內快取**。`read_order` 依賴 `get_own_order`，`get_own_order` 又依賴 `get_current_user`；同一個請求裡有好幾個 dependency 都依賴 `get_current_user` 時，FastAPI 預設只執行它一次。
+- **不需要使用者物件的 endpoint**，用 `dependencies=[Depends(...)]` 掛上檢查，不必在參數列宣告。
+- 支援 cookie session 與 Bearer 兩種時，在 `get_current_user` 裡依序嘗試，後面的 endpoint 不用知道差別。
+
+## middleware 與 dependency 的分工
+
+### 各框架的對應
+
+| 框架 | 驗證（1～3） | 授權（4～5） |
+|---|---|---|
+| FastAPI | dependency：`Depends(get_current_user)` | dependency 工廠：`Depends(require_role("admin"))`；資源層 dependency |
+| Django REST framework | `authentication_classes` | `permission_classes`；物件層級用 `has_object_permission` |
+| NestJS | Guard（常搭配 Passport） | Guard + 自訂 decorator（例如 `@Roles('admin')`） |
+| Express | middleware：`(req, res, next)` 把使用者放到 `req.user` | 路由上掛的 middleware |
+
+### middleware 還是 dependency
+
+**middleware** 包住整個應用，每個請求都經過，適合做「與路由無關、每個請求都要做」的事：產生 request id、記錄 log、解析憑證後把結果附在請求上（可能是匿名）。
+
+**dependency**（或 guard、decorator）掛在個別路由上，適合做「這個路由需要什麼」：必須登入、必須是 admin、必須是這張訂單的擁有者。
+
+常見的分工是：middleware 只解析，不拒絕（沒有 token 就標成匿名），由 dependency 決定這個路由要不要拒絕匿名。原因是：middleware 很難知道哪些路由是公開的（健康檢查、登入頁、公開文件），在 middleware 裡維護一份「公開路由清單」很容易和實際路由不同步。
+
+FastAPI 有一個細節：在 `@app.middleware("http")` 裡丟出 `HTTPException` 不會被轉成正常的 HTTP 錯誤回應，因為處理 `HTTPException` 的例外處理器位在使用者 middleware 的內層。middleware 要拒絕請求時，直接回傳 `JSONResponse`。
 
 ## 實際程式：用純函式模擬 middleware 鏈
 
-框架裡的 middleware 與 dependency 是一串函式：每一層拿到請求，決定要「往下傳」還是「直接回應」。下面不用任何框架，把上面的關卡寫成可以組合的函式，跑過各種身分的請求，最後用同樣的三種身分寫測試。
+框架裡的 middleware 與 dependency 是一串函式：每一層拿到請求，決定要「往下傳」還是「直接回應」。下面不用任何框架，把六道關卡寫成可以組合的函式，跑過各種身分的請求，最後用同樣的三種身分寫測試。
 
 ```python run
 from dataclasses import dataclass, field

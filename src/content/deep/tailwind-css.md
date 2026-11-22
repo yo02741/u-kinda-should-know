@@ -1,4 +1,4 @@
-## 從一個具體問題開始：狀態徽章在 build 之後沒有顏色
+## 具體問題：狀態徽章在 build 之後沒有顏色
 
 門診系統的「我的掛號」改用 Tailwind CSS 4。掛號狀態徽章是 AI 產生的元件：
 
@@ -20,13 +20,29 @@ const color = { booked: 'blue', 'checked-in': 'green', missed: 'amber' }
 - 按鈕元件預設 `px-4`，呼叫端傳 `class="px-2"` 想縮小，結果有時有效、有時沒效。
 - 有人在按鈕的 `<style scoped>` 寫了 `.btn { background: var(--color-primary) }`，之後在模板加的 `bg-danger` 怎樣都蓋不過去。
 
-三個問題都來自 Tailwind 的運作方式：它在建置時把原始碼當文字掃描、只產生完整出現的 class；產生的 CSS 放在 `@layer` 裡；同一屬性的兩個 class 誰勝出，看的是 CSS 的順序。開發時偶爾看得到顏色，是因為專案別處剛好有人寫了完整的 `bg-blue-100`。
+## Tailwind 怎麼運作：掃描原始碼，只產生完整出現的 class
 
-各種 CSS 組織方式的比較見 [CSS 的組織方式](#/skill/css-architecture)，這課講 Tailwind 的實際寫法與驗收。
+每個 class 拆成「變體（條件）＋工具（一個屬性）」，從左到右讀：
 
-## 運作原理
+```text
+md:hover:bg-clinic/50
+│  │     │        └─ 透明度 50%
+│  │     └─ 工具：background-color: var(--color-clinic)
+│  └─ 變體：:hover（包在 @media (hover: hover) 裡）
+└─ 變體：@media (width >= 48rem)
+```
 
-### 安裝（v4）
+斷點全部是 `min-width`：沒有前綴的 class 是最窄的版本，`sm:`（640px）、`md:`（768px）、`lg:`（1024px）、`xl:`（1280px）往寬的方向加。`sm:hidden` 的意思是「640px 以上隱藏」。
+
+建置時的步驟：
+
+1. Tailwind 讀每個原始檔的文字，切出所有「長得像 class」的片段。它不執行程式，也不懂 Vue 的模板語法。
+2. 片段是合法的 class 才產生對應的 CSS，放進 `@layer utilities`。
+3. 元素上兩個 class 設同一個屬性時，勝出的是 CSS 檔裡排在後面的那條，和 class 屬性裡的先後無關。
+
+開頭的徽章元件裡，原始碼出現的片段是 `bg-`、`-100`、`text-`、`-800`、`blue`、`green`，沒有完整的 `bg-blue-100`，所以 CSS 裡沒有它。開發時偶爾看得到顏色，是因為專案別處剛好有人寫了完整的 `bg-blue-100`。
+
+## 最小範例：安裝 v4，徽章改用完整字串的對照表
 
 2026 年 11 月 npm 上的版本是 `tailwindcss` 4.3.5、`@tailwindcss/vite` 4.3.5；外掛的 peer dependency 是 Vite 5.2 以上到 8。
 
@@ -50,6 +66,39 @@ export default defineConfig({
 @import "tailwindcss";
 ```
 
+```vue
+<!-- StatusBadge.vue -->
+<script setup>
+const props = defineProps({ status: { type: String, required: true } })
+
+// 每個 class 都完整寫出來，Tailwind 掃描得到
+const STATUS = {
+  booked: { label: '已預約', cls: 'bg-blue-100 text-blue-800' },
+  'checked-in': { label: '已報到', cls: 'bg-green-100 text-green-800' },
+  missed: { label: '過號', cls: 'bg-amber-100 text-amber-800' },
+}
+const FALLBACK = { label: '未知', cls: 'bg-gray-100 text-gray-700' }
+</script>
+
+<template>
+  <span
+    class="inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium"
+    :class="(STATUS[props.status] || FALLBACK).cls"
+  >
+    {{ (STATUS[props.status] || FALLBACK).label }}
+  </span>
+</template>
+```
+
+## 最常見的兩個錯誤
+
+- **某個顏色在 build 後消失，沒有錯誤**：class 用字串組出來，原始碼裡沒有完整的字串。改成完整字串的對照表。
+- **所有 class 都沒有樣式，沒有錯誤**：CSS 入口還是 v3 的 `@tailwind base;`，或 CSS 檔沒被 import。改成 `@import "tailwindcss";`，確認 `main.js` 匯入了它。
+
+:::stop 讀到這裡可以先停：會讀一個 class、裝好 v4、寫出掃描得到的完整 class 字串。後面的 `@theme`、層與 `cn()`、狀態變體與暗色主題，在要定 token、呼叫端傳的 class 蓋不過元件的預設樣式或要做元件庫時再回來讀。
+
+## v3 與 v4 的差別
+
 v4 和 v3 最大的不同是設定的位置：
 
 | 項目 | v3 | v4 |
@@ -62,17 +111,9 @@ v4 和 v3 最大的不同是設定的位置：
 
 在 v4.3.5 實測：CSS 入口只寫 v3 的 `@tailwind base; @tailwind utilities;`，CLI 沒有任何錯誤，輸出只有一行版權註解，所有 class 都沒有樣式。
 
-### 讀一個 class
+各種 CSS 組織方式的比較見 [CSS 的組織方式](#/skill/css-architecture)。
 
-每個 class 拆成「變體（條件）＋工具（一個屬性）」，從左到右讀：
-
-```text
-md:hover:bg-clinic/50
-│  │     │        └─ 透明度 50%
-│  │     └─ 工具：background-color: var(--color-clinic)
-│  └─ 變體：:hover（包在 @media (hover: hover) 裡）
-└─ 變體：@media (width >= 48rem)
-```
+## 常用 class 產生的 CSS
 
 v4.3.5 實際產生的 CSS（節錄）：
 
@@ -96,9 +137,9 @@ v4.3.5 實際產生的 CSS（節錄）：
 | `w-[37px]` | 任意值：`width: 37px` |
 | `bg-red-500!` | `background-color: … !important`（v4 的 `!` 寫在最後，舊的前綴寫法 `!bg-red-500` 也還能用） |
 
-斷點全部是 `min-width`：沒有前綴的 class 是最窄的版本，`sm:`（640px）、`md:`（768px）、`lg:`（1024px）、`xl:`（1280px）往寬的方向加（換算以預設字級 16px 計）。`sm:hidden` 的意思是「640px 以上隱藏」，要在手機隱藏寫 `max-sm:hidden`，或預設 `hidden` 再加 `sm:block`。mobile-first 的概念見 [RWD 與斷點](#/skill/rwd)。
+斷點的換算以預設字級 16px 計。要在手機隱藏寫 `max-sm:hidden`，或預設 `hidden` 再加 `sm:block`。mobile-first 的概念見 [RWD 與斷點](#/skill/rwd)。
 
-### `@theme`：token 變成 class
+## `@theme`：token 變成 class
 
 ```css
 @import "tailwindcss";
@@ -118,9 +159,7 @@ v4.3.5 實際產生的 CSS（節錄）：
 
 專案已經有 design token 時，`@theme` 的值指向既有的 token 或把 token 檔改寫成 `@theme`，同一個值只維護一份（見 [design token 與主題](#/skill/design-tokens)）。
 
-### 掃描：只認完整的字串
-
-Tailwind 不執行程式，也不懂 Vue 的模板語法。它讀每個檔案的文字，切出所有「長得像 class」的片段，再看哪些是合法的 class。開頭的徽章元件裡，原始碼出現的片段是 `bg-`、`-100`、`text-`、`-800`、`blue`、`green`，沒有一個是完整的 `bg-blue-100`，所以 CSS 裡沒有它。
+## 掃描的模擬與另外兩種修法
 
 下面這段在 Worker 裡用簡化的規則模擬這件事：
 
@@ -161,9 +200,7 @@ const statusClass = {
 
 `bg-(--badge-bg)` 是 v4 的寫法，產生 `background-color: var(--badge-bg)`。
 
-:::stop 讀到這裡可以先停：會讀一個 class、用 `@theme` 定 token，寫出掃描得到的完整 class 字串。後面的層與 class 順序，在呼叫端傳的 class 蓋不過元件的預設樣式時再回來讀。
-
-### 層：誰蓋過誰
+## 層：scoped CSS 為什麼蓋過工具類別
 
 Tailwind 產出的 CSS 開頭是：
 
@@ -211,7 +248,7 @@ v4.3.5 實測：`.btn { @apply rounded-md px-4 py-2; }` 寫在 `@layer` 外面�
 
 `@tailwindcss/browser` 是給原型與 Playground 用的：它在瀏覽器裡掃的是執行當下 DOM 上的 class，所以用字串組出來的 class 在這裡也會產生，用 `@tailwindcss/vite` 建置時不會。正式專案不要依賴這個差異。
 
-### 兩個同類的 class：看 CSS 的順序
+## 兩個同類的 class：看 CSS 的順序，用 `cn()` 合併
 
 元素上同時有 `px-4` 與 `px-2` 時，兩條規則在同一層、權重一樣，勝出的是 **CSS 檔裡排在後面的那條**。Tailwind 依自己的規則排序產出的 CSS，class 屬性裡誰寫在後面不影響結果。v4.3.5 實測 `bg-green-500` 排在 `bg-red-500` 前面，所以 `class="bg-red-500 bg-green-500"` 顯示紅色。
 
@@ -233,35 +270,7 @@ cn('rounded-md', false, { 'opacity-50': true })    // 'rounded-md opacity-50'
 
 這些結果是在 Node 用上面兩個版本實際跑出來的。`tailwind-merge` 預設認得 Tailwind 的預設主題；自訂了 `@theme` 的字級或間距名稱（例如 `text-caption`）時，它可能把字級誤判成顏色，要用 `extendTailwindMerge` 告訴它。
 
-## 實際程式
-
-### 狀態徽章（完整字串的對照表）
-
-```vue
-<!-- StatusBadge.vue -->
-<script setup>
-const props = defineProps({ status: { type: String, required: true } })
-
-// 每個 class 都完整寫出來，Tailwind 掃描得到
-const STATUS = {
-  booked: { label: '已預約', cls: 'bg-blue-100 text-blue-800' },
-  'checked-in': { label: '已報到', cls: 'bg-green-100 text-green-800' },
-  missed: { label: '過號', cls: 'bg-amber-100 text-amber-800' },
-}
-const FALLBACK = { label: '未知', cls: 'bg-gray-100 text-gray-700' }
-</script>
-
-<template>
-  <span
-    class="inline-flex items-center rounded-full px-2 py-0.5 text-sm font-medium"
-    :class="(STATUS[props.status] || FALLBACK).cls"
-  >
-    {{ (STATUS[props.status] || FALLBACK).label }}
-  </span>
-</template>
-```
-
-### 按鈕：狀態變體與 `cn()`
+## 按鈕：狀態變體與 `cn()`
 
 ```vue
 <!-- AppButton.vue -->
@@ -297,7 +306,7 @@ const cls = computed(() => cn(
 
 `aria-busy:` 在元素有 `aria-busy="true"` 時成立；Vue 綁定 `undefined` 時不輸出屬性。用 ARIA 屬性當樣式的條件，狀態與無障礙資訊只有一個來源。
 
-### 下拉選單：`aria-expanded` 與 `data-state`
+## 下拉選單：`aria-expanded` 與 `data-state`
 
 ```vue
 <button type="button" :aria-expanded="open" aria-controls="dept-menu" class="group inline-flex items-center gap-1" @click="open = !open">
@@ -309,7 +318,7 @@ const cls = computed(() => cn(
 
 `group-aria-expanded:` 讓子元素依父元素的 `aria-expanded` 變化；`group` 要寫在父元素上。
 
-### 暗色主題用 `data-theme` 切換
+## 暗色主題用 `data-theme` 切換
 
 ```css
 @import "tailwindcss";
@@ -318,7 +327,7 @@ const cls = computed(() => cn(
 
 這行改寫之後，`dark:` 只看 `<html data-theme="dark">`，不再看系統設定；要「沒選時跟隨系統」，就由 JavaScript 在載入時依 `matchMedia('(prefers-color-scheme: dark)')` 設定 `data-theme`。
 
-### 和 scoped CSS 混用
+## 和 scoped CSS 混用
 
 Tailwind 為主的專案裡，偶爾需要寫 CSS（第三方元件的內部、`v-html` 的內容）。放進 `components` 層，工具類別才蓋得過：
 
@@ -334,16 +343,14 @@ Tailwind 為主的專案裡，偶爾需要寫 CSS（第三方元件的內部、`
 
 沒有 `@reference` 時，SFC 的 `<style>` 是獨立處理的，`@apply` 會失敗（訊息見下一節）。`@apply` 用多了等於回到自己取 class 名稱；同一組 class 在模板裡重複三次以上，先抽成 Vue 元件。
 
-### 任意值的節制
+## 任意值的節制
 
 `w-[37px]`、`mt-[13px]`、`bg-[#3a7bd4]` 都能產生，代價是每個都偏離刻度。規則可以寫進專案規範：只允許在 token 表沒有、而且只用一次的地方使用；出現第二次就加進 `@theme`。在專案裡搜尋 `-\[` 能列出所有任意值。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與訊息
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-| 某個顏色在 build 後消失，沒有錯誤 | class 用字串組出來，原始碼裡沒有完整的字串 | 完整字串的對照表，或 `@source inline()` |
-| 所有 class 都沒有樣式，沒有錯誤 | CSS 入口還是 v3 的 `@tailwind base;`，或 CSS 檔沒被 import | 改成 `@import "tailwindcss";`，確認 `main.js` 匯入了它 |
 | `It looks like you're trying to use \`tailwindcss\` directly as a PostCSS plugin. The PostCSS plugin has moved to a separate package…` | v4 的 PostCSS 外掛是另一個套件 | Vite 專案改用 `@tailwindcss/vite`；一定要 PostCSS 就裝 `@tailwindcss/postcss` |
 | `Cannot apply unknown utility class \`text-sm\`. Are you using CSS modules or similar and missing \`@reference\`?` | SFC 或 CSS Modules 裡的 `@apply` 不知道主題 | 在 `<style>` 開頭加 `@reference "…/main.css";` |
 | `Cannot apply unknown utility class \`text-foo\`` | `@apply` 了一個不存在的 class（拼錯，或 `@theme` 沒定義） | 查 `@theme` 的命名空間與名稱 |

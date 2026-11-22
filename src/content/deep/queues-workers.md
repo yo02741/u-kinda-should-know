@@ -1,6 +1,6 @@
-## 從一個具體問題開始：搬到佇列之後，出現了三個新 bug
+## 具體問題：搬到佇列之後，出現了三個新 bug
 
-註冊 API 原本在請求裡直接寄歡迎信。郵件服務慢的時候，註冊要等好幾秒，偶爾還逾時失敗，使用者以為沒註冊成功又按了一次。於是改成：API 把「寄歡迎信」丟進佇列就回應，背景的 worker 去寄。
+註冊 API 原本在請求裡直接寄歡迎信。郵件服務慢的時候，註冊要等好幾秒，偶爾還逾時失敗。於是改成：API 把「寄歡迎信」丟進佇列就回應，背景的 worker 去寄。
 
 ```python
 def register(email, password):
@@ -12,13 +12,13 @@ def register(email, password):
 
 API 變快了，但接著出現三種新狀況：
 
-1. **偶爾找不到使用者**：worker 的 log 有時出現「user 123 not found」。任務在交易 commit **之前**就進了佇列，worker 動作太快，去查的時候那筆使用者資料還沒 commit，看不到。
+1. **偶爾找不到使用者**：worker 的 log 有時出現「user 123 not found」。任務在交易 commit **之前**就進了佇列，worker 去查的時候那筆使用者資料還沒 commit，看不到。
 2. **偶爾寄兩封**：部署時 worker 被重啟，正在寄的那封信已經送出，但還沒向佇列確認（ack），佇列把任務重新投遞，另一個 worker 又寄了一次。
 3. **某天佇列積了幾萬筆**：郵件服務的 API 金鑰過期，每個任務都失敗、立刻重試、再失敗，佇列裡全是同一批任務在打轉，新的任務排不到。
 
-這三個問題分別對應佇列的三個基本性質：入列與資料庫交易不是同一件事、投遞是 at-least-once、失敗要有退避與終點。
+對應佇列的三個性質：入列與資料庫交易不是同一件事、投遞是 at-least-once、失敗要有退避與終點。
 
-## 運作原理：生產者、broker、消費者
+## 運作原理：生產者、broker、消費者與 ack
 
 ```text
  API（生產者）──enqueue──▶ broker（佇列）──deliver──▶ worker（消費者）
@@ -36,82 +36,22 @@ API 變快了，但接著出現三種新狀況：
 | acked | worker 確認完成，從佇列移除 | 沒影響 |
 | dead-lettered | 重試太多次，移到死信佇列 | 等人處理 |
 
-「等多久才重新投遞」各家說法不同：
+什麼時候 ack 決定了語意：
 
-| 系統 | 機制 |
-|---|---|
-| RabbitMQ | 消費者手動 ack；連線或 channel 關閉時，未 ack 的訊息會回到佇列 |
-| Amazon SQS | visibility timeout：訊息被取走後在這段時間內對其他消費者隱藏，時間到還沒刪除就再次可見；可設定 redrive policy 在收到一定次數後移到死信佇列 |
-| Redis Streams | consumer group 的 pending entries list 記錄已投遞未確認的訊息；`XACK` 確認，`XAUTOCLAIM`（Redis 6.2 起）把閒置太久的訊息轉給別的消費者 |
-| Celery | 預設在任務**開始執行前**就 ack；設 `task_acks_late = True` 才改成做完再 ack。用 Redis 當 broker 時另有 `visibility_timeout`（文件寫的預設是 1 小時） |
-| PostgreSQL 當佇列 | 沒有內建機制，要自己記 `locked_at`，由排程把卡太久的任務放回去（下面的 SQL 範例） |
-
-什麼時候 ack 決定了語意：先 ack 再做，worker 中途掛掉任務就沒了（at-most-once）；做完才 ack，worker 在「做完」與「ack」之間掛掉，任務會被做兩次（at-least-once）。大部分背景工作要的是後者，所以**消費者一定要冪等**。三種語意的完整說明見 [分散式基礎](#/skill/distributed-basics) 的訊息傳遞一段。
-
-還有一個常被忽略的條件：**visibility timeout（或同等的設定）必須比任務最長的執行時間長**。一個匯出要跑 40 分鐘，visibility timeout 卻是 30 分鐘，第 30 分鐘時佇列會以為 worker 死了，把同一個任務交給另一個 worker，兩個 worker 同時在跑同一份匯出。
-
-## 消費者要冪等
-
-冪等的意思是：同一個任務執行兩次，結果和執行一次一樣。做法依副作用的種類而定：
-
-- **操作本身就冪等**：`UPDATE orders SET status = 'shipped' WHERE id = 7` 做兩次結果一樣；`balance = balance + 100` 做兩次就多加一次。能把任務改寫成「設定成某個狀態」，就不用額外去重。
-- **去重紀錄和效果放在同一個資料庫交易**：建一張 `processed_jobs(job_id PRIMARY KEY)`，處理時先插入任務 id，插入失敗（已經存在）就跳過。因為去重紀錄與「加點數」在同一個交易，兩者一起成功或一起失敗，不會有「記了已處理但沒加到」的中間狀態。
-- **外部副作用（寄信、扣款、呼叫第三方）**：沒辦法和自己的資料庫放在同一個交易。能做的是：
-  - 對方支援冪等鍵時（很多金流 API 支援），用任務 id 當冪等鍵，重送時對方會認出來。
-  - 對方不支援時（例如多數 SMTP 寄信），先寫一筆 `(user_id, 'welcome')` 的唯一紀錄再寄。這能擋掉絕大多數的重複，但「寄出之後、寫入完成狀態之前」掛掉的那一瞬間，仍然無法確定信到底寄出去沒有。這時要選擇偏向「可能重寄」或「可能漏寄」，並明確寫下來。
-
-## 交易與入列：commit 之前別讓 worker 看到
-
-開頭的第一個 bug：在交易裡 `enqueue`，任務比資料先到。反過來也一樣糟：任務已經進了佇列，交易卻 rollback 了，worker 會對一個不存在的使用者寄信。
-
-| 做法 | 做法說明 | 風險 |
+| 順序 | worker 中途掛掉 | 語意 |
 |---|---|---|
-| 交易裡入列 | 開頭的寫法 | worker 看不到未 commit 的資料；交易 rollback 時任務已經送出 |
-| commit 之後入列 | 例如 Django 的 `transaction.on_commit(lambda: send_welcome_email.delay(user.id))` | commit 成功、入列前程序掛掉，任務就遺失了 |
-| outbox | 同一個交易裡寫入業務資料與一筆「待送出的任務」，另一個程序讀 outbox 再送進 broker | 多一個要維運的程序；可能重送，所以消費者仍要冪等 |
-| 佇列就在同一個資料庫 | 任務表和業務資料在同一個 PostgreSQL，入列就是同一個交易裡的 `INSERT` | 佇列的吞吐量受限於資料庫；適合中小量的背景工作 |
+| 先 ack 再做 | 任務就沒了 | at-most-once |
+| 做完才 ack | 在「做完」與「ack」之間掛掉，任務會被做兩次 | at-least-once |
 
-「commit 之後入列」大多數時候夠用；不能接受遺失時用 outbox 或資料庫佇列。outbox 在跨服務流程裡的角色，見 [分散式基礎](#/skill/distributed-basics) 的 saga 一段。
+大部分背景工作要的是後者，所以**消費者一定要冪等**：同一個任務執行兩次，結果和執行一次一樣。
 
-## 重試、退避與死信
-
-不是所有失敗都該重試：
-
-- **該重試**：逾時、連線錯誤、對方回 5xx 或 429。這些是暫時性的，過一會兒可能就好。
-- **不該重試**：參數錯誤、找不到資料、對方回 400 / 401 / 403、API 金鑰失效。重試一百次結果都一樣，只會佔住 worker。
-
-重試要有三個東西：
-
-1. **指數退避**：第 n 次失敗後等 `base × 2^(n−1)` 秒，並設上限。
-2. **抖動**（jitter）：在等待時間裡加隨機。一大批任務同時失敗（例如對方服務掛了五分鐘）時，沒有抖動就會在同一個時間點一起重試，又把剛恢復的服務打掛。退避與抖動的細節見 [錯誤處理與韌性](#/skill/resilience)。
-3. **次數上限與死信佇列**：超過上限的任務移到死信佇列（DLQ），保留原始內容與最後的錯誤訊息。DLQ 的筆數要有告警，也要有「修好後重新投遞」的工具。一直失敗、怎麼重試都不會成功的訊息叫 **poison message**，沒有上限時它會永遠在佇列裡打轉。
-
-用 Celery 時，這些設定大致是（需要 Redis 與 Celery，不能在瀏覽器裡跑）：
-
-```python
-from celery import Celery
-
-app = Celery("app", broker="redis://localhost:6379/0")
-app.conf.task_acks_late = True                 # 做完才 ack：worker 中途掛掉會重新投遞
-app.conf.task_reject_on_worker_lost = True     # worker 程序被砍掉時，任務退回佇列
-app.conf.broker_transport_options = {"visibility_timeout": 3600}   # 秒，要比最長的任務還長
-
-@app.task(
-    autoretry_for=(TimeoutError, ConnectionError),   # 只對暫時性錯誤自動重試
-    retry_backoff=True,                              # 指數退避
-    retry_backoff_max=600,                           # 最多等 10 分鐘
-    retry_jitter=True,                               # 加抖動
-    retry_kwargs={"max_retries": 5},
-)
-def send_welcome_email(user_id: int):
-    ...
-```
-
-## 實際程式
+## 實際程式：冪等的消費者
 
 ### 重新投遞與冪等的消費者
 
-用一個 at-least-once 的簡化 broker 模擬「處理完、ack 前 worker 被砍掉」，比較兩種消費者。去重紀錄與加點數在同一個 sqlite 交易裡：
+去重的做法：建一張 `processed_jobs(job_id PRIMARY KEY)`，處理時先插入任務 id，插入失敗（已經存在）就跳過。去重紀錄與「加點數」在同一個交易，兩者一起成功或一起失敗，不會有「記了已處理但沒加到」的中間狀態。
+
+用一個 at-least-once 的簡化 broker 模擬「處理完、ack 前 worker 被砍掉」，比較兩種消費者：
 
 ```python run
 import sqlite3
@@ -192,7 +132,85 @@ for attempt in range(1, 5):
 print("第 5 次失敗：不再重試，移到死信佇列等人處理")
 ```
 
-### PostgreSQL 當佇列：FOR UPDATE SKIP LOCKED
+### 最常見的兩個錯誤
+
+- **worker 查不到剛建立的資料（例如 `DoesNotExist`、`user not found`）**：在交易 commit 前入列。改成 commit 之後入列，例如 Django 的 `transaction.on_commit(lambda: send_welcome_email.delay(user.id))`；不能接受遺失時用 outbox 或資料庫佇列。
+- **同一封信寄兩次、點數加兩次**：at-least-once 重新投遞，消費者不冪等。去重紀錄與效果放同一交易；外部呼叫帶冪等鍵。
+
+:::stop 讀到這裡可以先停：說得出任務在佇列裡的狀態與 ack 的時機，會寫冪等的消費者，知道要在 commit 之後才入列。後面各家 broker 的重新投遞機制、入列與交易的四種做法、退避與死信、PostgreSQL 佇列、監控與選工具，在要設重試、佇列開始積壓或要決定用哪一套 broker 時再回來讀。
+
+## 各家 broker 等多久才重新投遞
+
+| 系統 | 機制 |
+|---|---|
+| RabbitMQ | 消費者手動 ack；連線或 channel 關閉時，未 ack 的訊息會回到佇列 |
+| Amazon SQS | visibility timeout：訊息被取走後在這段時間內對其他消費者隱藏，時間到還沒刪除就再次可見；可設定 redrive policy 在收到一定次數後移到死信佇列 |
+| Redis Streams | consumer group 的 pending entries list 記錄已投遞未確認的訊息；`XACK` 確認，`XAUTOCLAIM`（Redis 6.2 起）把閒置太久的訊息轉給別的消費者 |
+| Celery | 預設在任務**開始執行前**就 ack；設 `task_acks_late = True` 才改成做完再 ack。用 Redis 當 broker 時另有 `visibility_timeout`（文件寫的預設是 1 小時） |
+| PostgreSQL 當佇列 | 沒有內建機制，要自己記 `locked_at`，由排程把卡太久的任務放回去（下面的 SQL 範例） |
+
+三種投遞語意的完整說明見 [分散式基礎](#/skill/distributed-basics) 的訊息傳遞一段。
+
+**visibility timeout（或同等的設定）必須比任務最長的執行時間長**。一個匯出要跑 40 分鐘，visibility timeout 卻是 30 分鐘，第 30 分鐘時佇列會以為 worker 死了，把同一個任務交給另一個 worker，兩個 worker 同時在跑同一份匯出。
+
+## 消費者冪等的三種做法
+
+做法依副作用的種類而定：
+
+- **操作本身就冪等**：`UPDATE orders SET status = 'shipped' WHERE id = 7` 做兩次結果一樣；`balance = balance + 100` 做兩次就多加一次。能把任務改寫成「設定成某個狀態」，就不用額外去重。
+- **去重紀錄和效果放在同一個資料庫交易**：必讀裡 `processed_jobs` 的做法。
+- **外部副作用（寄信、扣款、呼叫第三方）**：沒辦法和自己的資料庫放在同一個交易。能做的是：
+  - 對方支援冪等鍵時（很多金流 API 支援），用任務 id 當冪等鍵，重送時對方會認出來。
+  - 對方不支援時（例如多數 SMTP 寄信），先寫一筆 `(user_id, 'welcome')` 的唯一紀錄再寄。這能擋掉絕大多數的重複，但「寄出之後、寫入完成狀態之前」掛掉的那一瞬間，仍然無法確定信到底寄出去沒有。這時要選擇偏向「可能重寄」或「可能漏寄」，並明確寫下來。
+
+## 交易與入列：commit 之前別讓 worker 看到
+
+開頭的第一個 bug：在交易裡 `enqueue`，任務比資料先到。反過來也一樣糟：任務已經進了佇列，交易卻 rollback 了，worker 會對一個不存在的使用者寄信。
+
+| 做法 | 做法說明 | 風險 |
+|---|---|---|
+| 交易裡入列 | 開頭的寫法 | worker 看不到未 commit 的資料；交易 rollback 時任務已經送出 |
+| commit 之後入列 | 例如 Django 的 `transaction.on_commit(lambda: send_welcome_email.delay(user.id))` | commit 成功、入列前程序掛掉，任務就遺失了 |
+| outbox | 同一個交易裡寫入業務資料與一筆「待送出的任務」，另一個程序讀 outbox 再送進 broker | 多一個要維運的程序；可能重送，所以消費者仍要冪等 |
+| 佇列就在同一個資料庫 | 任務表和業務資料在同一個 PostgreSQL，入列就是同一個交易裡的 `INSERT` | 佇列的吞吐量受限於資料庫；適合中小量的背景工作 |
+
+「commit 之後入列」大多數時候夠用；不能接受遺失時用 outbox 或資料庫佇列。outbox 在跨服務流程裡的角色，見 [分散式基礎](#/skill/distributed-basics) 的 saga 一段。
+
+## 重試、退避與死信
+
+不是所有失敗都該重試：
+
+- **該重試**：逾時、連線錯誤、對方回 5xx 或 429。這些是暫時性的，過一會兒可能就好。
+- **不該重試**：參數錯誤、找不到資料、對方回 400 / 401 / 403、API 金鑰失效。重試一百次結果都一樣，只會佔住 worker。
+
+重試要有三個東西：
+
+1. **指數退避**：第 n 次失敗後等 `base × 2^(n−1)` 秒，並設上限。
+2. **抖動**（jitter）：在等待時間裡加隨機。一大批任務同時失敗（例如對方服務掛了五分鐘）時，沒有抖動就會在同一個時間點一起重試，又把剛恢復的服務打掛。退避與抖動的細節見 [錯誤處理與韌性](#/skill/resilience)。
+3. **次數上限與死信佇列**：超過上限的任務移到死信佇列（DLQ），保留原始內容與最後的錯誤訊息。DLQ 的筆數要有告警，也要有「修好後重新投遞」的工具。一直失敗、怎麼重試都不會成功的訊息叫 **poison message**，沒有上限時它會永遠在佇列裡打轉。
+
+用 Celery 時，這些設定大致是（需要 Redis 與 Celery，不能在瀏覽器裡跑）：
+
+```python
+from celery import Celery
+
+app = Celery("app", broker="redis://localhost:6379/0")
+app.conf.task_acks_late = True                 # 做完才 ack：worker 中途掛掉會重新投遞
+app.conf.task_reject_on_worker_lost = True     # worker 程序被砍掉時，任務退回佇列
+app.conf.broker_transport_options = {"visibility_timeout": 3600}   # 秒，要比最長的任務還長
+
+@app.task(
+    autoretry_for=(TimeoutError, ConnectionError),   # 只對暫時性錯誤自動重試
+    retry_backoff=True,                              # 指數退避
+    retry_backoff_max=600,                           # 最多等 10 分鐘
+    retry_jitter=True,                               # 加抖動
+    retry_kwargs={"max_retries": 5},
+)
+def send_welcome_email(user_id: int):
+    ...
+```
+
+## PostgreSQL 當佇列：FOR UPDATE SKIP LOCKED
 
 任務量不大、又想讓「入列」和業務資料在同一個交易時，可以直接用資料表當佇列。`FOR UPDATE SKIP LOCKED`（PostgreSQL 9.5 起）讓多個 worker 同時取任務時，跳過別人已經鎖住的列，不用排隊。本站的 PGlite 只有一條連線，看不到兩個 worker 搶同一列，但可以看完整的生命週期：
 
@@ -249,8 +267,6 @@ SELECT id, kind, status, attempts, last_error FROM jobs ORDER BY id;
 ```
 
 成功時把 `status` 設成 `done`（或直接刪掉）。這張表會一直有更新與刪除，要注意 autovacuum 跟不跟得上，見 [資料庫維運](#/skill/db-operations)。
-
-:::stop 讀到這裡可以先停：會寫冪等的消費者、在 commit 之後才入列、設退避與死信，並用 `FOR UPDATE SKIP LOCKED` 做 PostgreSQL 佇列。後面的監控、分流與選工具，在佇列開始積壓或要決定用哪一套 broker 時再回來讀。
 
 ## 監控、容量與分流
 

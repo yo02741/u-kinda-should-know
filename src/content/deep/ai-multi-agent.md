@@ -7,13 +7,11 @@
 - 有一個 subagent 方向錯了，想直接跟它說「不是這樣」，只能請上層的 agent 轉達，轉達的過程又多一層誤解。
 - 兩個 subagent 都改了 `api/routes.py`，它們在同一個工作目錄裡，後寫的蓋掉了先寫的，誰也沒發現。
 
-這裡有兩個不同的問題。一個是資訊：所有人的脈絡混在一起，人看不清楚、也進不去任何一個。另一個是工作區：大家改的是同一份檔案，彼此覆蓋。
+這裡有兩個問題。一個是資訊：所有人的脈絡混在一起，人看不清楚、也進不去任何一個。另一個是工作區：大家改同一份檔案，彼此覆蓋。
 
 ## 運作原理：一個 agent 一條分支、一個 worktree
 
-### git worktree：同一個 repo，多個工作目錄
-
-一般的 clone 只有一個工作目錄，一次只能 checkout 一條分支。`git worktree` 讓同一個 repo 同時有好幾個工作目錄，每個 checkout 各自的分支：
+`git worktree` 讓同一個 repo 同時有好幾個工作目錄，每個 checkout 各自的分支：
 
 ```text
 /work/clinic/                 ← 主工作目錄（main）
@@ -24,12 +22,10 @@
 /work/wt-admin-log/           ← worktree：agent/admin-log 分支
 ```
 
-- **共用**：物件庫與分支。在任一個 worktree 裡 commit，其他 worktree 馬上看得到那條分支的新 commit，不需要 push 或 fetch。比起每個 agent 一份完整 clone，省空間也省同步。
-- **各自獨立**：工作目錄裡的檔案、`HEAD`、暫存區（index）。agent A 改檔案，agent B 的目錄完全不受影響。
-- **一條分支同時只能被一個 worktree checkout**。這是 git 的限制，正好符合「一個 agent 一條分支」。
-- **未追蹤的檔案不共用**：`.venv`、`node_modules`、`.env` 都不在 git 裡，新的 worktree 是乾淨的，要各自安裝依賴。
-
-### 指令
+- **共用**：物件庫與分支。在任一個 worktree 裡 commit，其他 worktree 馬上看得到，不需要 push 或 fetch。
+- **各自獨立**：工作目錄裡的檔案、`HEAD`、暫存區（index）。agent A 改檔案，agent B 的目錄不受影響。
+- **一條分支同時只能被一個 worktree checkout**，正好符合「一個 agent 一條分支」。
+- **未追蹤的檔案不共用**：`.venv`、`node_modules`、`.env` 不在 git 裡，新的 worktree 要各自安裝依賴。
 
 ```bash
 # 從最新的 main 開三個 worktree，各自一條新分支
@@ -62,8 +58,6 @@ git worktree prune
 
 ## meta-agent 分派，成員 agent 做事
 
-工作區分開之後，還要解決「誰分派、誰彙整、人怎麼看」：
-
 ```text
                          ┌──────────────┐
                人  <───> │  meta-agent  │  拆工作、分派、收報告、決定下一步
@@ -79,25 +73,18 @@ git worktree prune
       每個成員：一張票、一條分支、一個 worktree、一個獨立 session
 ```
 
-- **meta-agent** 依票（見[把需求拆成垂直切片](#/skill/ai-vertical-slices)）與阻擋關係分派工作：前線上的票先派，某張票完成後再派被它阻擋的票。它負責彙整，不需要自己寫程式。
-- **成員 agent** 只做一張票，做完寄出報告，卡住時提出問題並等待回覆。它是一個獨立的 session，有自己的脈絡，不會被別人的輸出淹沒。
-- **人看得到每一個成員**：狀態、diff、最近的輸出；要介入時直接進到那個成員的 session 裡說話，不必透過 meta-agent 轉達。
+- **meta-agent** 依票（見[把需求拆成垂直切片](#/skill/ai-vertical-slices)）與阻擋關係分派：前線上的票先派，某張票完成後再派被它阻擋的票。它負責彙整，不需要自己寫程式。
+- **成員 agent** 只做一張票，做完寄出報告，卡住時提出問題並等待回覆。它是獨立的 session，有自己的脈絡。
+- **人看得到每一個成員**：狀態、diff、最近的輸出；要介入時直接進到那個成員的 session 裡說話。
 
-[Noopher-AI/oat-agents](https://github.com/Noopher-AI/oat-agents) 是這種結構的一個實作：一個 meta-agent 只帶一層成員 agent，每個成員都是原生的 Claude Code 或 Codex session，各自有自己的分支、git worktree 與 tmux session；成員做完寄報告、卡住時提問，人可以選一個成員直接進到它的 session 裡打字。它的文件也明白寫出：worktree 只把每個 agent 的工作分開，**不會限制 agent 能碰到什麼**，所以只該在放心交給 agent 的機器上、用放心交給它的憑證來跑。
-
-worktree 是工作區隔離，不是**安全隔離**。agent 仍然以同一個使用者執行，讀得到家目錄、環境變數裡的憑證。執行環境與憑證的隔離是另一層問題，見[模型擋不住工具層的洞](#/skill/agent-credential-isolation)。
+worktree 是工作區隔離，不是**安全隔離**。agent 仍然以同一個使用者執行，讀得到家目錄與環境變數裡的憑證，見[模型擋不住工具層的洞](#/skill/agent-credential-isolation)。
 
 ## 避免合併衝突：在分派時就處理
 
-worktree 讓 agent 在**工作期間**不會互相覆蓋，但分支最後都要合回 main，兩條分支改了同一段程式，合併時一樣會衝突。衝突最便宜的處理時機是分派之前。
+分支最後都要合回 main，兩條分支改了同一段程式，合併時一樣會衝突。兩個做法：
 
-### 1. 介面先定好、先合併
-
-票 2–5 都依賴票 1 建立的「取消狀態」：狀態字串叫什麼、API 回傳的形狀、資料表欄位。如果四個 agent 同時開始，各自猜一次，合併時就有四種版本。做法是先讓票 1（或一張專門的「介面」票）把這些約定定下來並合進 main，其他分支從新的 main 開始。
-
-### 2. 每張票寫出擁有的檔案
-
-分派時列出每張票預計會改的檔案或目錄，找出重疊：
+- **介面先定好、先合併**：票 2–5 都依賴票 1 建立的「取消狀態」（狀態字串、API 回傳的形狀、資料表欄位）。先讓票 1 或一張專門的「介面」票把約定合進 main，其他分支從新的 main 開始。
+- **每張票寫出擁有的檔案**，分派時找出重疊：
 
 ```python run
 from fnmatch import fnmatch
@@ -142,9 +129,18 @@ for a, b, overlap in conflicts:
 - **把共用的部分移到介面票**：路由註冊先在介面票裡加好兩條空的路由，兩個 agent 各自只改自己的 handler 檔。
 - **指定唯一擁有者**：某些檔案只允許一個 agent 改，其他人需要改時提出來，由擁有者處理。
 
-:::stop 讀到這裡可以先停：會替每個 agent 開分支與 worktree，在分派前用檔案清單找出重疊，決定排先後或先做介面票。後面的熱點檔案與合併順序，在要把多條分支合回 main 時再回來讀。
+:::stop 讀到這裡可以先停：會替每個 agent 開分支與 worktree，在分派前用檔案清單找出重疊，決定排先後或先做介面票。後面是 worktree 的補充、oat-agents 這個實作、熱點檔案、合併順序與錯誤訊息；要把多條分支合回 main 或 worktree 指令報錯時回來讀。
 
-### 3. 認得幾個常見的熱點
+## worktree 與完整 clone 的差別
+
+一般的 clone 只有一個工作目錄，一次只能 checkout 一條分支。比起每個 agent 一份完整 clone，worktree 共用物件庫，省空間也省同步。「一條分支同時只能被一個 worktree checkout」是 git 的限制。
+
+## 一個實作：oat-agents
+
+[Noopher-AI/oat-agents](https://github.com/Noopher-AI/oat-agents) 是這種結構的一個實作：一個 meta-agent 只帶一層成員 agent，每個成員都是原生的 Claude Code 或 Codex session，各自有自己的分支、git worktree 與 tmux session；成員做完寄報告、卡住時提問，人可以選一個成員直接進到它的 session 裡打字。它的文件也明白寫出：worktree 只把每個 agent 的工作分開，**不會限制 agent 能碰到什麼**，所以只該在放心交給 agent 的機器上、用放心交給它的憑證來跑。
+
+## 常見的熱點檔案
+
 
 | 檔案 | 為什麼常衝突 | 做法 |
 |---|---|---|
@@ -153,7 +149,8 @@ for a, b, overlap in conflicts:
 | `pyproject.toml` 與 `uv.lock` | 兩個 agent 各加一個依賴，lock 檔衝突很難手動合 | 依賴改動集中由一個 agent 做；衝突時重新 `uv lock`，不要手動合 lock 檔 |
 | `CHANGELOG.md` | 大家都在最上面加一行 | 由合併的人或 meta-agent 統一寫 |
 
-### 4. 合併順序與 rebase
+## 合併順序與 rebase
+
 
 依阻擋關係的順序合併。每合進一條分支，其他還在進行的分支就 `git rebase origin/main`（或 merge main）並重跑測試，衝突越早發現越小。每條分支都要在**合併前的最新 main 上**通過 CI，才算綠燈。
 

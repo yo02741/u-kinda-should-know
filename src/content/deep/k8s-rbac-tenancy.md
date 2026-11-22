@@ -1,6 +1,6 @@
-## 從一個具體問題開始：五個人共用一份 admin.conf
+## 五個人共用一份 admin.conf，正式環境的 namespace 被刪了
 
-資訊室用 kubeadm 建了兩座地端叢集：測試叢集 `lab` 與正式叢集 `prod`，兩座都有 `clinic` namespace，跑門診掛號的 `clinic-api`（[實作路線第 10 階段](#/project/k8s) 的那套 manifest）。建叢集的工程師把兩座控制平面上的 `/etc/kubernetes/admin.conf` 合併成一份 kubeconfig，放進共用資料夾；GitLab 的部署 job 也用這一份。
+資訊室用 kubeadm 建了測試叢集 `lab` 與正式叢集 `prod`，兩座都有 `clinic` namespace，跑門診掛號的 `clinic-api`。兩座控制平面上的 `/etc/kubernetes/admin.conf` 被合併成一份 kubeconfig 放進共用資料夾，GitLab 的部署 job 也用這一份。
 
 某天下午，一位工程師為了查正式環境的 log 切到 `prod`。傍晚他要重建測試環境：
 
@@ -11,7 +11,7 @@ $ kubectl delete namespace clinic
 namespace "clinic" deleted
 ```
 
-刪除 namespace 會連帶刪掉裡面的每一個物件，包括不在 Git 裡的 `clinic-api-secret` 與 TLS 憑證 `clinic-tls`。manifest 重新套用只要幾分鐘，Secret 得從保管的地方找回來，門診掛號停了 50 分鐘。事後資安組要求說清楚四件事，現在一件都答不出來：
+namespace 裡的每一個物件跟著被刪，包括不在 Git 裡的 `clinic-api-secret` 與 TLS 憑證 `clinic-tls`，門診掛號停了 50 分鐘。資安組問的四件事，一件都答不出來：
 
 | 稽核的問題 | 現況 |
 |---|---|
@@ -19,10 +19,6 @@ namespace "clinic" deleted
 | 這份權限給了誰 | 五台筆電、共用資料夾、GitLab 變數，還有一位上個月調走的同事 |
 | 能不能收回 | client 憑證效期一年，Kubernetes 不支援撤銷 client 憑證 |
 | 正式環境的 Secret 誰讀得到 | 所有拿到這份檔案的人，以及 CI 的每一個 job |
-
-kubeadm 的文件寫明 `admin.conf` 要留在控制平面節點，不要分給其他使用者。kubeadm 1.29 起，`admin.conf` 的權限來自 `kubeadm:cluster-admins` 群組的 ClusterRoleBinding，刪掉綁定能讓外流的副本失效，但控制平面上 kubeadm 自己用的那份也一起失效。新建叢集時同時產生的 `super-admin.conf` 屬於 `system:masters` 群組，完全繞過 RBAC，外流了只能等憑證到期或換叢集的 CA。
-
-這一課照稽核的四個問題，依序補上身分、授權、隔離與紀錄。應用程式內的授權模型在 [RBAC 與 ABAC 授權模型](#/skill/rbac-abac)，這裡講 Kubernetes 自己的 RBAC 怎麼寫、哪裡容易給太多。
 
 ## 身分：叢集裡沒有「使用者」物件
 
@@ -34,7 +30,86 @@ API server 處理每個請求時先驗證（這是誰），再授權（能不能
 | OIDC（院內的 IdP） | ID token 的 claim，例如 `preferred_username`、`groups` | IdP 停用帳號；已發出的 ID token 等它到期 | 人 |
 | ServiceAccount | `system:serviceaccount:<namespace>:<名稱>` | 刪除 ServiceAccount；短期 token 自己到期 | 程式 |
 
-### 人：用 OIDC 接院內的 IdP
+人的權限綁在 OIDC 帶來的群組上；一個程式一個 ServiceAccount，不共用 `default`。
+
+## 授權：Role、RoleBinding 與 kubectl auth can-i
+
+| 物件 | 範圍 | 內容 |
+|---|---|---|
+| Role | 一個 namespace | 規則：哪些 API 群組的哪些資源，可以做哪些動作 |
+| ClusterRole | 整個叢集 | 同上；還能涵蓋 nodes、namespaces 這類叢集層級的資源 |
+| RoleBinding | 一個 namespace | 把 Role 或 ClusterRole 給主體（User、Group、ServiceAccount），只在這個 namespace 生效 |
+| ClusterRoleBinding | 整個叢集 | 把 ClusterRole 給主體，所有 namespace 都生效 |
+
+一條規則是三個清單的組合：`apiGroups`（core group 寫成 `""`，Deployment 在 `apps`、Job 在 `batch`）、`resources`（子資源寫成 `pods/log`、`pods/exec`）、`verbs`。下面是正式環境 on-call 用的 Role，能看 Pod 與 log、重啟 Deployment：
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clinic-oncall
+  namespace: clinic
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["patch"]                      # kubectl rollout restart 是對 Deployment 做 patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clinic-oncall
+  namespace: clinic
+subjects:
+  - kind: Group
+    name: "oidc:k8s-clinic-oncall"        # AD 的群組名稱，加上 API server 設定的前綴
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: clinic-oncall
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**RBAC 只有允許，沒有拒絕**：權限取聯集，沒有任何 binding 允許就是拒絕。套用後用 `kubectl auth can-i` 驗證：
+
+```bash
+$ kubectl auth can-i delete namespaces                    # 自己能不能做
+no
+# 以別人的身分檢查：執行的人要有 impersonate 權限，通常是平台組
+$ kubectl auth can-i get secrets -n clinic \
+    --as=oidc:chen.yiting --as-group=oidc:k8s-clinic-dev
+no
+$ kubectl auth can-i create pods --subresource=exec -n clinic \
+    --as=system:serviceaccount:clinic:gitlab-deployer
+no
+# 列出某個身分在某個 namespace 的全部權限（已節錄）
+$ kubectl auth can-i --list -n clinic --as=system:serviceaccount:clinic:gitlab-deployer
+Resources          Non-Resource URLs   Resource Names   Verbs
+deployments.apps   []                  []               [get list watch create patch]
+jobs.batch         []                  []               [get list watch create patch]
+configmaps         []                  []               [get create patch]
+```
+
+`--as` 只換使用者名稱，不會去 IdP 查群組。權限綁在群組上時要自己加 `--as-group`，否則常常全部是 `no`。檢查 ServiceAccount 時，API server 會自動補上它固定的群組。
+
+審一份 binding 時先找三種權限：`secrets` 的 `get`、`list`、`watch`（`list` 的回應就帶著內容）、`pods/exec`，以及規則裡的 `*`。
+
+:::stop 停靠點 1：角色。交付一組 Role 與 RoleBinding，加上 `kubectl auth can-i --as` 的輸出，證明那個身分能做該做的事、不能讀 secrets、不能 exec。做到這裡就能審一份 binding 有沒有給出危險的權限。
+
+## admin.conf 與 super-admin.conf 為什麼不能外流
+
+`clinic-api` 的 manifest 來自 [實作路線第 10 階段](#/project/k8s)。事故當天 manifest 重新套用只要幾分鐘，時間花在把 Secret 從保管的地方找回來。
+
+kubeadm 的文件寫明 `admin.conf` 要留在控制平面節點，不要分給其他使用者。kubeadm 1.29 起，`admin.conf` 的權限來自 `kubeadm:cluster-admins` 群組的 ClusterRoleBinding，刪掉綁定能讓外流的副本失效，但控制平面上 kubeadm 自己用的那份也一起失效。新建叢集時同時產生的 `super-admin.conf` 屬於 `system:masters` 群組，完全繞過 RBAC，外流了只能等憑證到期或換叢集的 CA。
+
+應用程式內的授權模型在 [RBAC 與 ABAC 授權模型](#/skill/rbac-abac)，這裡講 Kubernetes 自己的 RBAC 怎麼寫、哪裡容易給太多。
+
+## 人的身分：用 OIDC 接院內的 IdP
 
 院內的帳號在 AD，前面有一個 IdP（見 [企業身分：LDAP、AD、SAML 與 SCIM](#/skill/enterprise-identity)）。叢集把它當成 OIDC 的發行者：工程師用院內帳號加 MFA 登入拿到 ID token，API server 檢查簽章、`iss`、`aud` 與效期（見 [OAuth 2.0 與 OpenID Connect](#/skill/oauth-oidc)）。
 
@@ -84,7 +159,7 @@ Groups      [oidc:k8s-clinic-dev system:authenticated]
 
 這份 kubeconfig 沒有秘密，可以放在內部 wiki。權限綁在群組上，群組由 AD 管：調職時改 AD 群組，下一次取得 token 就生效。ID token 不能撤銷，效期設短，常見是幾分鐘到一小時。`super-admin.conf` 移到離線保管，只在 RBAC 設壞、所有人都進不去時取用，取用要留紀錄。
 
-### 程式：ServiceAccount 與投射 token
+## 程式的身分：ServiceAccount 與投射 token
 
 每個 namespace 都有一個 `default` ServiceAccount，Pod 沒指定 `serviceAccountName` 就用它。Pod 拿到的是投射（projected）token：kubelet 透過 TokenRequest API 申請，掛在 `/var/run/secrets/kubernetes.io/serviceaccount/token`，綁定這個 Pod，效期預設一小時、到期前自動換新，Pod 刪除就失效。
 
@@ -98,48 +173,7 @@ Groups      [oidc:k8s-clinic-dev system:authenticated]
 - 不要手動建立 `kubernetes.io/service-account-token` 型別的 Secret 拿不會過期的 token。叢集外的程式用 `kubectl create token <名稱> --duration=…` 申請有期限的，管法見 [金鑰的範圍與壽命](#/skill/key-scope-lifetime)。
 - 一個程式一個 ServiceAccount，不共用 `default`，權限才分得開，稽核日誌也看得出是誰。
 
-## 授權：Role、Binding 與 kubectl auth can-i
-
-| 物件 | 範圍 | 內容 |
-|---|---|---|
-| Role | 一個 namespace | 規則：哪些 API 群組的哪些資源，可以做哪些動作 |
-| ClusterRole | 整個叢集 | 同上；還能涵蓋 nodes、namespaces 這類叢集層級的資源 |
-| RoleBinding | 一個 namespace | 把 Role 或 ClusterRole 給主體（User、Group、ServiceAccount），只在這個 namespace 生效 |
-| ClusterRoleBinding | 整個叢集 | 把 ClusterRole 給主體，所有 namespace 都生效 |
-
-一條規則是三個清單的組合：`apiGroups`（core group 寫成 `""`，Deployment 在 `apps`、Job 在 `batch`）、`resources`（子資源寫成 `pods/log`、`pods/exec`）、`verbs`。下面是正式環境 on-call 用的 Role，能看 Pod 與 log、重啟 Deployment：
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: clinic-oncall
-  namespace: clinic
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "events"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["patch"]                      # kubectl rollout restart 是對 Deployment 做 patch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: clinic-oncall
-  namespace: clinic
-subjects:
-  - kind: Group
-    name: "oidc:k8s-clinic-oncall"        # AD 的群組名稱，加上 API server 設定的前綴
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: Role
-  name: clinic-oncall
-  apiGroup: rbac.authorization.k8s.io
-```
+## kubectl 指令需要哪些動詞
 
 RBAC 只管到「動詞 × 資源」，管不到欄位：給了 Deployment 的 `patch`，能 `rollout restart`，也能改 image。
 
@@ -152,7 +186,7 @@ RBAC 只管到「動詞 × 資源」，管不到欄位：給了 Deployment 的 `
 | `kubectl logs` | `pods/log` 的 `get` |
 | `kubectl exec` | `pods/exec` 的 `create` |
 
-### 四種組合與內建角色
+## Role 與 Binding 的四種組合、內建角色
 
 | 角色 | Binding | 生效範圍 |
 |---|---|---|
@@ -172,31 +206,10 @@ ClusterRole 加 RoleBinding 最常用：權限寫一次，每個 namespace 各�
 
 門診系統的分法：開發群組在測試環境拿 `edit`，在正式的 `clinic` 只拿 `view`；on-call 群組拿上面的 `clinic-oncall`；`cluster-admin` 只用 ClusterRoleBinding 給平台組兩個人的 OIDC 身分。
 
-兩條規則要記得。第一，**RBAC 只有允許，沒有拒絕**：權限取聯集，沒有任何 binding 允許就是拒絕，[RBAC 與 ABAC](#/skill/rbac-abac) 的「拒絕優先」在這裡寫不出來；需要禁止規則時，要在 admission 層加政策（例如 1.30 起正式提供的 ValidatingAdmissionPolicy）。第二，binding 的 `roleRef` 建立後不能改，要換角色就刪掉重建，管理主體清單的人因此不能順手把 binding 指到更大的角色。
+- RBAC 只有允許：[RBAC 與 ABAC](#/skill/rbac-abac) 的「拒絕優先」在這裡寫不出來；需要禁止規則時，要在 admission 層加政策（例如 1.30 起正式提供的 ValidatingAdmissionPolicy）。
+- binding 的 `roleRef` 建立後不能改，要換角色就刪掉重建，管理主體清單的人因此不能順手把 binding 指到更大的角色。
 
-### 用 kubectl auth can-i 驗證
-
-```bash
-$ kubectl auth can-i delete namespaces                    # 自己能不能做
-no
-# 以別人的身分檢查：執行的人要有 impersonate 權限，通常是平台組
-$ kubectl auth can-i get secrets -n clinic \
-    --as=oidc:chen.yiting --as-group=oidc:k8s-clinic-dev
-no
-$ kubectl auth can-i create pods --subresource=exec -n clinic \
-    --as=system:serviceaccount:clinic:gitlab-deployer
-no
-# 列出某個身分在某個 namespace 的全部權限（已節錄）
-$ kubectl auth can-i --list -n clinic --as=system:serviceaccount:clinic:gitlab-deployer
-Resources          Non-Resource URLs   Resource Names   Verbs
-deployments.apps   []                  []               [get list watch create patch]
-jobs.batch         []                  []               [get list watch create patch]
-configmaps         []                  []               [get create patch]
-```
-
-`--as` 只換使用者名稱，不會去 IdP 查群組。權限綁在群組上時要自己加 `--as-group`，否則常常全部是 `no`。檢查 ServiceAccount 時，API server 會自動補上它固定的群組。
-
-### 危險的權限
+## 危險的權限
 
 | 權限 | 實際能做什麼 |
 |---|---|
@@ -209,8 +222,6 @@ configmaps         []                  []               [get create patch]
 | `serviceaccounts/token` 的 `create` | 替既有的 ServiceAccount 發 token |
 | namespace 的 `patch` | 改 namespace 的標籤，把 Pod Security 的等級調低 |
 | 規則裡的 `*` | 涵蓋現在與以後的所有動詞或資源，之後裝的 CRD 也算；`resources` 與 `verbs` 都寫 `*`，上面每一項都在內 |
-
-:::stop 停靠點 1：角色。交付一組 Role 與 RoleBinding，加上 `kubectl auth can-i --as` 的輸出，證明那個身分能做該做的事、不能讀 secrets、不能 exec。做到這裡就能審一份 binding 有沒有給出危險的權限。
 
 ## CI 的部署帳號
 

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：同一個 commit，昨天綠燈、今天紅燈
+## 具體問題：同一個 commit，昨天綠燈、今天紅燈
 
 專案的依賴只寫在 `requirements.txt`：
 
@@ -11,7 +11,7 @@ httpx>=0.27
 
 同樣的機制也造成「我這台可以跑」：同事三個月前裝的環境停在舊版本，新進成員今天裝到新版本，兩邊跑同一份程式，結果不同。
 
-問題的根源是只記錄了**想要什麼**（直接依賴與大概的版本範圍），沒有記錄**實際裝了什麼**（整棵依賴樹的精確版本）。uv 把這兩件事分成兩個檔案，再加上虛擬環境與 Python 版本，一起管理。
+問題的根源是只記錄了**想要什麼**（直接依賴與大概的版本範圍），沒有記錄**實際裝了什麼**（整棵依賴樹的精確版本）。
 
 ## 四樣東西，各管一件事
 
@@ -31,39 +31,6 @@ pyproject.toml ──(uv lock：查套件索引、解出整棵樹)──→ uv.l
                                                        （版本號僅為示意）
 ```
 
-`uv.lock` 是**跨平台**的：它把 macOS、Linux、Windows、不同 Python 版本可能需要的套件都解出來，用環境標記（marker，例如 `python_full_version < '3.13'`）標示適用條件。所以在 macOS 上產生的 lock，Linux 的 CI 與 Docker 也直接能用。這一點和 `pip freeze` 不同：`pip freeze` 列出的是「目前這台機器這個環境裡裝了什麼」，換平台就可能不適用，也會把手動裝進去、沒用到的套件一起凍結。
-
-### 虛擬環境是什麼
-
-虛擬環境就是一個資料夾：
-
-- `pyvenv.cfg`：記錄它是從哪個 Python 建出來的（`home = …`、`version_info = …`）
-- `bin/python`：指向真正直譯器的連結（Windows 是 `Scripts\python.exe`）
-- `lib/python3.12/site-packages/`：這個專案專屬的套件
-
-用 `.venv/bin/python` 啟動時，Python 讀到 `pyvenv.cfg`，就把 `sys.prefix` 設成 `.venv`，從它的 `site-packages` 找套件；`sys.base_prefix` 仍然指向原本的 Python 安裝位置。傳統的 `source .venv/bin/activate` 只是把 `.venv/bin` 放到 `PATH` 最前面，讓 `python` 這個指令解析到虛擬環境裡那一個。`uv run` 直接用虛擬環境裡的直譯器執行，所以不需要 activate。
-
-## 版本範圍怎麼寫
-
-`pyproject.toml` 的 `dependencies` 用的是 PEP 440 的版本規格（version specifier）：
-
-| 寫法 | 意思 | 允許 | 不允許 |
-|---|---|---|---|
-| `>=2.7` | 2.7 以上 | 2.7.0、2.9.1、3.0.0 | 2.6.9 |
-| `>=2.7,<3` | 2.7 以上、3 以下 | 2.7.0、2.99 | 3.0.0 |
-| `~=2.7` | 等同 `>=2.7, ==2.*` | 2.7、2.12 | 3.0 |
-| `~=2.7.1` | 等同 `>=2.7.1, ==2.7.*` | 2.7.1、2.7.9 | 2.8.0 |
-| `==2.7.*` | 2.7 系列任何版本 | 2.7.0、2.7.5 | 2.8.0 |
-| `==2.7.1` | 只有這一版 | 2.7.1 | 其他全部 |
-
-`^2.7` 這種「插入號」寫法是 Poetry 在自己的 `[tool.poetry.dependencies]` 區段裡用的語法，不是 PEP 440。放進 `[project] dependencies` 會被當成不合法的依賴字串，產生套件中繼資料時就失敗（以 setuptools 為建置後端時，訊息會包含 `must be pep508`）。
-
-怎麼選：
-
-- **應用程式（API 服務）**：`pyproject.toml` 寫寬鬆的下限（`uv add` 預設就是 `>=目前版本`），可重現性交給 `uv.lock`。升級是刻意的動作（`uv lock --upgrade-package httpx`），在 PR 裡看得到 lock 的差異、CI 會驗。
-- **函式庫（給別人 import 的套件）**：lock 檔不會跟著套件發布，使用者的環境會和其他套件一起解析，所以範圍要寫得夠寬，避免和使用者的其他依賴衝突。
-- **0.x 版的套件**：很多套件在 0.x 階段次版號（0.27 → 0.28）就可能有不相容的變更，必要時加上上限（`>=0.27,<0.29`）。這是慣例，不是規範，以該套件的變更紀錄為準。
-
 ## 指令與它們動到的檔案
 
 | 指令 | 改 pyproject | 改 uv.lock | 改 .venv | 用在什麼時候 |
@@ -80,9 +47,7 @@ pyproject.toml ──(uv lock：查套件索引、解出整棵樹)──→ uv.l
 
 `uv sync` 預設是「精確同步」：lock 裡沒有的套件會從 `.venv` 移除，所以手動 `pip install` 進去的東西下一次 sync 就不見了。需要保留時有 `--inexact`，但通常代表那個套件應該 `uv add` 進專案。
 
-## 實際程式
-
-### 從零建立專案
+## 最小範例：從零建立專案，與最常見的兩個錯誤
 
 ```bash
 uv init api && cd api              # 產生 pyproject.toml、.python-version、main.py
@@ -113,7 +78,58 @@ dev = [
 ]
 ```
 
-### CI 與 Docker
+### 最常見的兩個錯誤
+
+以下訊息取自 uv 0.8，不同版本措辭可能略有不同。
+
+**lock 過期**（CI 用了 `--locked`）：
+
+```text
+The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+```
+
+有人改了 `pyproject.toml`（手改，或在另一個分支 `uv add`）卻沒有提交更新後的 `uv.lock`。在本機跑 `uv lock`，把 lock 的差異一起 commit。
+
+**`ModuleNotFoundError: No module named 'fastapi'`**，但 `uv add` 明明成功了：執行時用的是系統的 `python3`，不是 `.venv` 裡的。改用 `uv run python …`；編輯器也要把直譯器指到 `.venv/bin/python`，不然型別檢查與自動完成會找不到套件。
+
+:::stop 讀到這裡可以先停：會從零建專案，分得清 `pyproject.toml`、`uv.lock`、`.venv` 各管什麼，知道每個指令動到哪個檔案。後面的虛擬環境、版本範圍寫法、CI 與 Docker、和 pip／Poetry 的對照，在要寫版本範圍、接 CI 或搬舊專案時再回來讀。
+
+## `uv.lock` 跨平台，和 `pip freeze` 不同
+
+`uv.lock` 是**跨平台**的：它把 macOS、Linux、Windows、不同 Python 版本可能需要的套件都解出來，用環境標記（marker，例如 `python_full_version < '3.13'`）標示適用條件。所以在 macOS 上產生的 lock，Linux 的 CI 與 Docker 也直接能用。這一點和 `pip freeze` 不同：`pip freeze` 列出的是「目前這台機器這個環境裡裝了什麼」，換平台就可能不適用，也會把手動裝進去、沒用到的套件一起凍結。
+
+## 虛擬環境是什麼
+
+虛擬環境就是一個資料夾：
+
+- `pyvenv.cfg`：記錄它是從哪個 Python 建出來的（`home = …`、`version_info = …`）
+- `bin/python`：指向真正直譯器的連結（Windows 是 `Scripts\python.exe`）
+- `lib/python3.12/site-packages/`：這個專案專屬的套件
+
+用 `.venv/bin/python` 啟動時，Python 讀到 `pyvenv.cfg`，就把 `sys.prefix` 設成 `.venv`，從它的 `site-packages` 找套件；`sys.base_prefix` 仍然指向原本的 Python 安裝位置。傳統的 `source .venv/bin/activate` 只是把 `.venv/bin` 放到 `PATH` 最前面，讓 `python` 這個指令解析到虛擬環境裡那一個。`uv run` 直接用虛擬環境裡的直譯器執行，所以不需要 activate。
+
+## 版本範圍怎麼寫
+
+`pyproject.toml` 的 `dependencies` 用的是 PEP 440 的版本規格（version specifier）：
+
+| 寫法 | 意思 | 允許 | 不允許 |
+|---|---|---|---|
+| `>=2.7` | 2.7 以上 | 2.7.0、2.9.1、3.0.0 | 2.6.9 |
+| `>=2.7,<3` | 2.7 以上、3 以下 | 2.7.0、2.99 | 3.0.0 |
+| `~=2.7` | 等同 `>=2.7, ==2.*` | 2.7、2.12 | 3.0 |
+| `~=2.7.1` | 等同 `>=2.7.1, ==2.7.*` | 2.7.1、2.7.9 | 2.8.0 |
+| `==2.7.*` | 2.7 系列任何版本 | 2.7.0、2.7.5 | 2.8.0 |
+| `==2.7.1` | 只有這一版 | 2.7.1 | 其他全部 |
+
+`^2.7` 這種「插入號」寫法是 Poetry 在自己的 `[tool.poetry.dependencies]` 區段裡用的語法，不是 PEP 440。放進 `[project] dependencies` 會被當成不合法的依賴字串，產生套件中繼資料時就失敗（以 setuptools 為建置後端時，訊息會包含 `must be pep508`）。
+
+怎麼選：
+
+- **應用程式（API 服務）**：`pyproject.toml` 寫寬鬆的下限（`uv add` 預設就是 `>=目前版本`），可重現性交給 `uv.lock`。升級是刻意的動作（`uv lock --upgrade-package httpx`），在 PR 裡看得到 lock 的差異、CI 會驗。
+- **函式庫（給別人 import 的套件）**：lock 檔不會跟著套件發布，使用者的環境會和其他套件一起解析，所以範圍要寫得夠寬，避免和使用者的其他依賴衝突。
+- **0.x 版的套件**：很多套件在 0.x 階段次版號（0.27 → 0.28）就可能有不相容的變更，必要時加上上限（`>=0.27,<0.29`）。這是慣例，不是規範，以該套件的變更紀錄為準。
+
+## CI 與 Docker：照 lock 安裝
 
 ```bash
 # CI：lock 必須和 pyproject 一致，否則直接失敗
@@ -135,9 +151,7 @@ CMD ["uv", "run", "--no-sync", "uvicorn", "main:app", "--host", "0.0.0.0"]
 
 `--no-dev` 不裝 dev 群組；`--no-install-project` 先只裝依賴、不裝專案本身，讓依賴那一層的快取不受程式碼變動影響。正式環境建議把 uv 映像的標籤釘成特定版本，而不是 `latest`；Dockerfile 的分層快取細節見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
 
-:::stop 讀到這裡可以先停：會從零建專案，在 CI 與 Docker 用 lock 裝出同一組版本。後面的版本比對與沒有 lock 時的解析差異，在版本範圍解出意外的結果時再回來讀。
-
-### 在瀏覽器裡看版本規格怎麼比對
+## 動手跑：版本規格怎麼比對
 
 ```python run
 # PEP 440 版本規格的極簡版：只處理純數字版本（真正的實作請用 packaging 套件）
@@ -172,7 +186,7 @@ for spec in (">=2.7", ">=2.7,<3", "~=2.7", "~=2.7.1", "==2.7.*"):
     print(f"{spec:10} → {ok}，解析時會挑 {max(ok, key=parse) if ok else '（無解）'}")
 ```
 
-### 沒有 lock 時，同一份 pyproject 會解出不同結果
+## 動手跑：沒有 lock 時，同一份 pyproject 會解出不同結果
 
 ```python run
 import tomllib
@@ -242,17 +256,9 @@ if project["dependencies"] != lock["requirements"]:
 
 舊專案搬到 uv：`uv init` 之後 `uv add -r requirements.txt`，再刪掉舊檔。需要給不認得 `uv.lock` 的工具一份 requirements 時，可以用 `uv export --format requirements-txt` 匯出。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
-以下訊息取自 uv 0.8，不同版本措辭可能略有不同。
-
-**lock 過期**（CI 用了 `--locked`）：
-
-```text
-The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
-```
-
-有人改了 `pyproject.toml`（手改，或在另一個分支 `uv add`）卻沒有提交更新後的 `uv.lock`。在本機跑 `uv lock`，把 lock 的差異一起 commit。
+以下訊息同樣取自 uv 0.8。
 
 **解不出來**：
 
@@ -274,8 +280,6 @@ error: The Python request from `.python-version` resolved to Python 3.10.20, whi
 ```
 
 `.python-version` 和 `requires-python` 互相矛盾。用 `uv python pin 3.12` 改成相容的版本。
-
-**`ModuleNotFoundError: No module named 'fastapi'`**，但 `uv add` 明明成功了：執行時用的是系統的 `python3`，不是 `.venv` 裡的。改用 `uv run python …`；編輯器也要把直譯器指到 `.venv/bin/python`，不然型別檢查與自動完成會找不到套件。
 
 不會報錯、但會出事的情況：
 

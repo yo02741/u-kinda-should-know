@@ -6,7 +6,7 @@
 ALTER TABLE orders ADD COLUMN note text;
 ```
 
-在 PostgreSQL 11 之後，加一個沒有預設值（或預設值是常數）的欄位只改系統目錄，不會重寫整張表，平常幾毫秒就跑完。但這次部署後，所有跟訂單有關的 API 開始逾時，持續了 40 秒。事後查到的時間線：
+PostgreSQL 11 之後，加一個沒有預設值（或預設值是常數）的欄位只改系統目錄，平常幾毫秒就跑完。這次部署後，訂單相關的 API 逾時了 40 秒：
 
 | 時間 | 連線 1：報表工作 | 連線 2：migration | 連線 3…N：API 請求 |
 |---|---|---|---|
@@ -15,13 +15,11 @@ ALTER TABLE orders ADD COLUMN note text;
 | 15:00:01 | | 等待中 | `SELECT * FROM orders WHERE id = …` 要 ACCESS SHARE，排在 ALTER 後面，**也開始等** |
 | 15:00:40 | 報表 commit，釋放鎖 | 拿到鎖，幾毫秒完成 | 全部一起放行 |
 
-ALTER 本身只花幾毫秒，卡住服務的是**它在排隊**：PostgreSQL 的鎖請求會排隊，一個在等強鎖的請求，會擋住後面所有跟它衝突的請求，即使那些請求跟目前持有鎖的人並不衝突。這一課講 PostgreSQL 有哪些鎖、誰會拿、怎麼設逾時、死結怎麼來，以及出事時怎麼查是誰擋住誰。交易與隔離等級的基礎在 [交易、ACID 與隔離等級](#/skill/transactions)。
+ALTER 本身只花幾毫秒，卡住服務的是**它在排隊**：鎖請求會排隊，一個在等強鎖的請求，會擋住後面所有跟它衝突的請求，即使那些請求跟目前持有鎖的人並不衝突。交易與隔離等級的基礎在 [交易、ACID 與隔離等級](#/skill/transactions)。
 
-## 運作原理：表鎖與列鎖是兩層
+## 表鎖：每一句 SQL 都會拿
 
-### 表鎖：每一句 SQL 都會拿
-
-就算只是 `SELECT`，也會對表拿一個最弱的鎖，避免讀到一半表被刪掉。常見模式由弱到強：
+PostgreSQL 的鎖有兩層。表鎖每一句 SQL 都會拿，就算只是 `SELECT`，也會拿最弱的一種，避免讀到一半表被刪掉。列鎖只有改資料或 `SELECT … FOR UPDATE` 才拿，決定同一列能不能同時被兩個交易改。表鎖常見模式由弱到強：
 
 | 表鎖模式 | 誰會拿 | 擋 SELECT？ | 擋 INSERT / UPDATE / DELETE？ |
 |---|---|---|---|
@@ -32,15 +30,44 @@ ALTER 本身只花幾毫秒，卡住服務的是**它在排隊**：PostgreSQL �
 | SHARE | `CREATE INDEX`（沒有 CONCURRENTLY） | 否 | **是** |
 | ACCESS EXCLUSIVE | 多數 `ALTER TABLE`、`DROP TABLE`、`TRUNCATE`、`VACUUM FULL`、`LOCK TABLE` 預設 | **是** | **是** |
 
-前三種彼此不衝突，所以一般的讀寫不會互相擋在表這一層。要注意的是最後三列：
+前三種彼此不衝突，一般的讀寫不會在表這一層互擋。會出事的是最後三列：
 
 - `CREATE INDEX` 拿 SHARE：建索引期間可以讀、**不能寫**。大表建索引要幾分鐘，寫入就停幾分鐘。
-- `CREATE INDEX CONCURRENTLY` 拿 SHARE UPDATE EXCLUSIVE：讀寫都不擋，代價是要掃表兩次、比較慢，而且**不能放在交易區塊裡**。失敗時會留下一個標記為 INVALID 的索引，要手動 `DROP INDEX` 再重建。
-- 多數 `ALTER TABLE` 拿 ACCESS EXCLUSIVE：就算本身很快，也會遇到上面的排隊問題。少數子命令拿比較弱的鎖（例如 `VALIDATE CONSTRAINT`），每個子命令拿什麼鎖，以官方文件 `ALTER TABLE` 頁為準。
+- `CREATE INDEX CONCURRENTLY` 拿 SHARE UPDATE EXCLUSIVE：讀寫都不擋，代價是掃表兩次、比較慢，而且**不能放在交易區塊裡**。
+- 多數 `ALTER TABLE` 拿 ACCESS EXCLUSIVE：本身很快，也會遇到開頭的排隊問題。
 
-### 列鎖：只有改資料或明確要求時才拿
+## 逾時：讓等鎖有上限
 
-列鎖決定「同一列能不能同時被兩個交易改」。四種強度：
+| 設定 | 限制什麼 | 超過時的錯誤 |
+|---|---|---|
+| `lock_timeout` | **每一次**等鎖的時間 | `canceling statement due to lock timeout`（`55P03`） |
+| `statement_timeout` | 單一句 SQL 的總執行時間（含等鎖） | `canceling statement due to statement timeout`（`57014`） |
+| `idle_in_transaction_session_timeout` | 交易開著卻沒在執行任何查詢的時間 | 連線被中斷 |
+| `transaction_timeout`（PostgreSQL 17 起） | 整個交易的總時間 | 連線被中斷 |
+
+開頭的事故，migration 先設 `lock_timeout` 就能避免：拿不到鎖就放棄、稍後重試，不會無限期排隊拖住所有人。
+
+```sql
+-- migration 開頭：等鎖最多 3 秒，拿不到就失敗（之後由部署腳本重試幾次）
+SET lock_timeout = '3s';
+ALTER TABLE orders ADD COLUMN note text;
+
+-- 建索引不擋寫入；不能放在 BEGIN … COMMIT 裡
+CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders (created_at);
+```
+
+應用程式的帳號也可以設預設值（數值依服務特性調整）：
+
+```sql
+ALTER ROLE app_user SET statement_timeout = '30s';
+ALTER ROLE app_user SET idle_in_transaction_session_timeout = '60s';
+```
+
+:::stop 讀到這裡可以先停：看得懂哪些語句拿哪種表鎖、為什麼排隊的 ALTER 會擋住讀取，也會替 migration 設 lock_timeout 並用 CONCURRENTLY 建索引。後面的列鎖與 SKIP LOCKED 在寫工作佇列或搶同一列時讀；死結與查誰擋住誰，在出現 `deadlock detected` 或請求卡住時再回來讀。
+
+## 列鎖：只有改資料或明確要求時才拿
+
+四種強度：
 
 | 列鎖 | 誰會拿 | 跟誰衝突 |
 |---|---|---|
@@ -72,9 +99,7 @@ COMMIT;
 
 當別的交易**在等**這一列時，pg_locks 裡才會出現它：它在等的是「持有者的交易編號」（`locktype = 'transactionid'`，`granted = false`）。
 
-## 實際程式
-
-### NOWAIT 與 SKIP LOCKED
+## 用列鎖做工作佇列：NOWAIT 與 SKIP LOCKED
 
 `SELECT … FOR UPDATE` 遇到被鎖的列預設會等。兩個修飾詞改變這個行為：
 
@@ -122,35 +147,6 @@ SELECT id, payload, status, priority FROM jobs ORDER BY id;
 2. **整個處理過程都在交易裡**，處理完才 commit。worker 當掉時連線斷開、交易 rollback，工作自動回到可取的狀態。代價是處理多久就握著交易多久，不適合處理時間長或要呼叫外部服務的工作。
 
 `SKIP LOCKED` 看到的是「刻意不一致」的資料，只適合佇列這類「拿到哪一件都可以」的場景，不要拿來做一般查詢。
-
-### 逾時：讓等待有上限
-
-| 設定 | 限制什麼 | 超過時的錯誤 |
-|---|---|---|
-| `lock_timeout` | **每一次**等鎖的時間 | `canceling statement due to lock timeout`（`55P03`） |
-| `statement_timeout` | 單一句 SQL 的總執行時間（含等鎖） | `canceling statement due to statement timeout`（`57014`） |
-| `idle_in_transaction_session_timeout` | 交易開著卻沒在執行任何查詢的時間 | 連線被中斷 |
-| `transaction_timeout`（PostgreSQL 17 起） | 整個交易的總時間 | 連線被中斷 |
-
-回到開頭的事故，migration 的標準寫法是先設 `lock_timeout`，拿不到鎖就放棄、稍後重試，而不是無限期排隊、拖住所有人：
-
-```sql
--- migration 開頭：等鎖最多 3 秒，拿不到就失敗（之後由部署腳本重試幾次）
-SET lock_timeout = '3s';
-ALTER TABLE orders ADD COLUMN note text;
-
--- 建索引不擋寫入；不能放在 BEGIN … COMMIT 裡
-CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders (created_at);
-```
-
-應用程式用的帳號也可以設預設值，避免某句失控的查詢拖住連線池（數值依服務特性調整）：
-
-```sql
-ALTER ROLE app_user SET statement_timeout = '30s';
-ALTER ROLE app_user SET idle_in_transaction_session_timeout = '60s';
-```
-
-:::stop 讀到這裡可以先停：會分辨表鎖與列鎖，用 SKIP LOCKED 寫工作佇列，也會替 migration 設 lock_timeout。後面的死結與查誰擋住誰，在出現 `deadlock detected` 或請求卡住時再回來讀。
 
 ## 死結：互相等對方
 
@@ -237,6 +233,8 @@ print("一律依 id 由小到大：", run({"A": [1, 2], "B": [1, 2]}))
 | `could not obtain lock on row in relation "…"` | `55P03` | 用了 `NOWAIT`，該列正被鎖 | 預期中的結果，回應「處理中，請稍後」 |
 | `canceling statement due to statement timeout` | `57014` | 查詢（含等鎖）超過 `statement_timeout` | 先看是慢在執行還是慢在等鎖（`wait_event_type = 'Lock'`） |
 | `CREATE INDEX CONCURRENTLY cannot run inside a transaction block` | `25001` | 把 CONCURRENTLY 放進 `BEGIN … COMMIT`，或 migration 工具預設包了交易 | 把這個 migration 設成不包交易 |
+
+`CREATE INDEX CONCURRENTLY` 失敗時會留下一個標記為 INVALID 的索引，要手動 `DROP INDEX` 再重建。`ALTER TABLE` 少數子命令拿比較弱的鎖（例如 `VALIDATE CONSTRAINT`），每個子命令拿什麼鎖，以官方文件 `ALTER TABLE` 頁為準。
 
 ### 出事時：查誰擋住誰
 

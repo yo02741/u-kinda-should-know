@@ -1,4 +1,4 @@
-## 從一個具體問題開始：一個 PR 裡的六個風險
+## 一個三十行的 PR 裡有六類風險
 
 一個 PR 新增了「訂單收據」功能，程式碼不到三十行：
 
@@ -17,7 +17,7 @@ def on_error(request, exc):
     return JSONResponse({"error": repr(exc), "trace": traceback.format_exc()}, status_code=500)
 ```
 
-功能測試全部通過，審查者卻在裡面看到了好幾類不同的問題：
+功能測試全部通過，審查者卻看到六類問題：
 
 | 程式片段 | 問題 | 對應的類別（2021 版編號） |
 |---|---|---|
@@ -28,13 +28,13 @@ def on_error(request, exc):
 | 沒有任何紀錄誰下載了哪張收據 | 出事時無法追查 | A09 日誌與監控失效 |
 | `render_pdf` 用的 PDF 函式庫三年沒更新 | 可能有已知漏洞 | A06 有漏洞與過時的元件 |
 
-OWASP Top 10 是一份**分類好的問題清單**：審查時可以有系統地逐類問「這段程式在每一類上有沒有問題」，不必只憑經驗想到什麼看什麼。
+OWASP Top 10 把這些問題分成十類，審查時逐類問「這段程式在這一類上有沒有問題」。
 
-## 這份清單是什麼
+## OWASP Top 10 的十個類別（2021 版編號）
 
-OWASP（Open Worldwide Application Security Project）是一個開放的資安社群。Top 10 是它最知名的文件：根據多個組織提供的漏洞資料與社群調查，整理出 Web 應用程式最常見、影響最大的十類風險。每一類底下對應一組 CWE（Common Weakness Enumeration，弱點分類編號），所以它是「類別」而不是「單一漏洞」。
+OWASP（Open Worldwide Application Security Project）是開放的資安社群。Top 10 根據多個組織提供的漏洞資料與社群調查，整理出 Web 應用程式最常見、影響最大的十類風險。每一類對應一組 CWE（Common Weakness Enumeration，弱點分類編號），所以它是類別，不是單一漏洞。
 
-本課使用 **2021 版**的編號，這是目前文章、工具、稽核文件最常引用的版本。OWASP 之後發布了 2025 版，主要變化包括：軟體供應鏈失效成為獨立類別並升到 A03、SSRF 併入 A01 存取控制失效、新增「例外狀況處理不當」。看到編號時先確認是哪一版；各版的完整內容以 [OWASP Top 10 官方頁面](https://owasp.org/www-project-top-ten/) 的最新版為準。觀念本身沒有改變。
+本課使用 **2021 版**的編號，文章、工具、稽核文件最常引用這一版。2025 版的編號不同（見選讀「2021 版與 2025 版的差異」），看到編號先確認是哪一版。
 
 | 編號 | 名稱 | 一句話 |
 |---|---|---|
@@ -49,9 +49,57 @@ OWASP（Open Worldwide Application Security Project）是一個開放的資安�
 | A09 | Security Logging and Monitoring Failures 日誌與監控失效 | 出事時看不到、查不到 |
 | A10 | Server-Side Request Forgery 伺服器端請求偽造 | 伺服器被誘導去請求攻擊者指定的位址 |
 
-API 為主的服務可以再對照 [OWASP API Security Top 10](https://owasp.org/www-project-api-security/)，它把物件層級授權（BOLA）、資源消耗等 API 特有的問題拆得更細；agent 與 MCP 的風險見 [OWASP MCP Top 10](#/skill/owasp-mcp-top10)。
+## A01 的修法：把擁有權放進查詢
 
-## 十類逐一說明
+A01 排第一，修法是查詢直接帶上擁有者條件。先查出來再判斷擁有者，容易漏掉某一條路徑。
+
+```python run
+import sqlite3
+
+db = sqlite3.connect(":memory:")
+db.executescript("""
+CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, amount INTEGER);
+INSERT INTO orders VALUES (1001, 1, 2400), (1002, 2, 7990), (1003, 1, 890);
+""")
+
+class NotFound(Exception): ...
+
+def get_order_unsafe(current_user_id: int, order_id: int):
+    # 只看 id：任何登入的人改網址就能讀別人的訂單（IDOR）
+    row = db.execute("SELECT id, user_id, amount FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if row is None:
+        raise NotFound()
+    return row
+
+def get_order(current_user_id: int, order_id: int):
+    # 擁有者條件直接寫進查詢；不存在與不是你的，對外都是 404
+    row = db.execute(
+        "SELECT id, user_id, amount FROM orders WHERE id = ? AND user_id = ?",
+        (order_id, current_user_id),
+    ).fetchone()
+    if row is None:
+        raise NotFound()
+    return row
+
+alice = 1
+for oid in (1001, 1002, 9999):
+    for fn in (get_order_unsafe, get_order):
+        try:
+            print(f"{fn.__name__:17} alice 讀 {oid} → {fn(alice, oid)}")
+        except NotFound:
+            print(f"{fn.__name__:17} alice 讀 {oid} → 404")
+```
+
+最常見的兩個錯誤：
+
+| 做法 | 會發生什麼 | 修正 |
+|---|---|---|
+| 沒權限回 403、不存在回 404 | 攻擊者可以列舉哪些 id 存在 | 對外統一 404；內部日誌記錄真正原因 |
+| 權限檢查只放在前端或閘道 | 直接呼叫後端，或閘道設定漏一條路由，就繞過 | 每個服務在處理資源時自己檢查擁有權 |
+
+:::stop 讀到這裡可以先停：會用十類的名稱認出一段程式的風險，並用擁有權條件修好 A01。後面是十類各自的例子與對策、SSRF 位址檢查、審查清單，在審 PR 或處理使用者給的網址時再回來讀。
+
+## 十類各自的例子與對策
 
 ### A01 存取控制失效
 
@@ -113,50 +161,13 @@ API 為主的服務可以再對照 [OWASP API Security Top 10](https://owasp.org
 
 **對策**：能用允許清單就用允許清單（只允許特定網域）；不能時，解析 DNS 後檢查 IP 不是私有、回送、鏈路本地位址，並用這個 IP 連線（避免檢查和連線之間 DNS 被換掉）；不自動跟隨轉址，或對每次轉址重新檢查；網路層限制應用程式的出站連線；雲端中繼資料服務改用需要 token 的版本（例如 AWS 的 IMDSv2）。
 
-## 實際程式
+## 2021 版與 2025 版的差異
 
-### A01：把擁有權放進查詢
+OWASP 在 2021 版之後發布了 2025 版，主要變化包括：軟體供應鏈失效成為獨立類別並升到 A03、SSRF 併入 A01 存取控制失效、新增「例外狀況處理不當」。各版的完整內容以 [OWASP Top 10 官方頁面](https://owasp.org/www-project-top-ten/) 的最新版為準。觀念本身沒有改變。
 
-```python run
-import sqlite3
+API 為主的服務可以再對照 [OWASP API Security Top 10](https://owasp.org/www-project-api-security/)，它把物件層級授權（BOLA）、資源消耗等 API 特有的問題拆得更細；agent 與 MCP 的風險見 [OWASP MCP Top 10](#/skill/owasp-mcp-top10)。
 
-db = sqlite3.connect(":memory:")
-db.executescript("""
-CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, amount INTEGER);
-INSERT INTO orders VALUES (1001, 1, 2400), (1002, 2, 7990), (1003, 1, 890);
-""")
-
-class NotFound(Exception): ...
-
-def get_order_unsafe(current_user_id: int, order_id: int):
-    # 只看 id：任何登入的人改網址就能讀別人的訂單（IDOR）
-    row = db.execute("SELECT id, user_id, amount FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        raise NotFound()
-    return row
-
-def get_order(current_user_id: int, order_id: int):
-    # 擁有者條件直接寫進查詢；不存在與不是你的，對外都是 404
-    row = db.execute(
-        "SELECT id, user_id, amount FROM orders WHERE id = ? AND user_id = ?",
-        (order_id, current_user_id),
-    ).fetchone()
-    if row is None:
-        raise NotFound()
-    return row
-
-alice = 1
-for oid in (1001, 1002, 9999):
-    for fn in (get_order_unsafe, get_order):
-        try:
-            print(f"{fn.__name__:17} alice 讀 {oid} → {fn(alice, oid)}")
-        except NotFound:
-            print(f"{fn.__name__:17} alice 讀 {oid} → 404")
-```
-
-:::stop 讀到這裡可以先停：會用十類的名稱認出一段程式的風險，並用擁有權條件修好 A01。後面的 SSRF 位址檢查、審查清單與常見錯誤，在要處理使用者給的網址或審一個 PR 時再回來讀。
-
-### A10：檢查要連的位址
+## A10 的修法：檢查要連的位址
 
 瀏覽器裡沒辦法解析 DNS，下面只示範「拿到 IP 之後怎麼判斷」。正式的實作要在解析之後檢查**所有**回傳的 IP，並用檢查過的 IP 連線。
 
@@ -200,7 +211,7 @@ for url, ips in cases:
 
 ## 用它做程式碼審查清單
 
-把十類轉成審查時要問的問題，貼在 PR 範本或審查指南裡。不是每個 PR 都要全部過一遍：先看變更碰到哪些東西，再挑相關的列。
+把十類轉成審查時要問的問題，貼在 PR 範本或審查指南裡。先看變更碰到哪些東西，再挑相關的列。
 
 | 變更碰到 | 要問的問題 | 類別 |
 |---|---|---|
@@ -218,14 +229,12 @@ for url, ips in cases:
 
 審查清單的效果取決於兩件事：問題要具體到能回答「有／沒有」，以及最常見的問題（A01、A03）最好有自動化的輔助，例如每個 endpoint 都要有「用別的使用者存取」的測試，或靜態分析工具標出 `execute` 前的字串格式化。
 
-## 常見錯誤
+## 其他常見錯誤
 
 | 錯誤想法或做法 | 會發生什麼 | 修正 |
 |---|---|---|
 | 把 Top 10 當成「全部的資安」 | 清單外的風險（業務邏輯、資源耗盡）被忽略 | 它是起點；API 服務再對照 API Security Top 10，並針對自己的業務做威脅建模 |
 | 只在上線前做一次掃描 | 之後每個 PR 都可能引入新問題 | 審查清單進 PR 範本；靜態分析與依賴掃描進 CI |
-| 權限檢查放在前端或閘道「就好」 | 直接呼叫後端、或閘道設定遺漏一條路由就繞過 | 每個服務在處理資源時自己檢查擁有權 |
-| 沒權限回 403、不存在回 404 | 攻擊者可以列舉哪些 id 存在 | 對外統一 404；內部日誌記錄真正原因 |
 | 正式環境的錯誤處理回傳 `repr(exc)` 或 traceback | 洩露 SQL、路徑、版本 | 回傳通用訊息與 request id，細節只進日誌 |
 | SSRF 只檢查網址字串裡的主機名稱 | 網域可以解析到內網 IP，轉址也能繞過 | 解析後檢查 IP、用檢查過的 IP 連線、轉址重新檢查 |
 | 不確定是哪一版的編號就引用 | 2021 與 2025 版的同一個編號指的是不同類別 | 引用時寫出版本與名稱，例如「A01:2021 存取控制失效」 |

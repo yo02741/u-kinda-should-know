@@ -1,14 +1,111 @@
-## 從一個具體問題開始：上雲第一個月
+## 具體問題：上雲第一個月，資料庫被掃、帳單超支
 
-一個三人團隊把產品搬上公有雲：一個 API、一個 PostgreSQL、一個 SPA 前端。為了快，他們開了一台有公網 IP 的虛擬機，API、資料庫、nginx 全部裝在上面；防火牆規則開了 22（SSH）與 5432（方便從筆電連資料庫），來源都是 `0.0.0.0/0`；API 上傳檔案到物件儲存用的是一組具有完整管理權限的存取金鑰，寫在主機的 `.env` 裡。
-
-一個月後：
+一個三人團隊把 API、PostgreSQL、SPA 前端搬上公有雲，開了一台有公網 IP 的虛擬機，API、資料庫、nginx 全部裝在上面。防火牆規則開了 22（SSH）與 5432（方便從筆電連資料庫），來源都是 `0.0.0.0/0`。API 上傳檔案到物件儲存用的是一組具有完整管理權限的存取金鑰，寫在主機的 `.env` 裡。
 
 - 資料庫的 log 裡每分鐘都有來自世界各地的登入失敗：`FATAL:  password authentication failed for user "postgres"`。5432 對整個網際網路開放，自動化掃描幾分鐘內就會找到它。
-- 帳單比估算高了一截，明細裡有幾項沒預料到：建立網路時精靈順手建的 **NAT gateway**（按小時計費加上流量處理費）、開發與測試環境的虛擬機 24 小時開著、使用者直接從主機下載圖片產生的**對外流量**。
+- 帳單比估算高了一截：建立網路時精靈順手建的 **NAT gateway**（按小時計費加上流量處理費）、24 小時開著的開發與測試虛擬機、使用者直接從主機下載圖片產生的**對外流量**。
 - 主機的磁碟壞了一次，從快照還原時發現最新的快照是三週前的。
 
-這些問題出在沒有用到雲端提供的基本元件：私有網路與子網、安全群組、受管資料庫、IAM 角色、負載平衡器。這一課逐一講這些元件；放在地端、雲端還是混合的取捨，見 [地端、雲端還是混合雲](#/skill/hosting-models)。
+## 調整後的架構：每個元件放在哪一層
+
+同一個系統改用雲端的基本元件之後：
+
+```text
+                  Internet
+                     │ 443 (80 → redirect)
+          ┌──────────▼──────────┐
+          │    Load balancer    │  public subnets, AZ-a + AZ-b, managed cert
+          └──────────┬──────────┘
+                     │ 8000, only from lb-sg
+          ┌──────────▼──────────┐
+          │  API containers x2  │  private subnets, AZ-a + AZ-b, IAM role
+          └──────────┬──────────┘
+                     │ 5432, only from app-sg
+          ┌──────────▼──────────┐
+          │ Managed PostgreSQL  │  db subnets, primary AZ-a + standby AZ-b
+          └─────────────────────┘
+
+  API ── VPC endpoint ──▶ object storage (browsers use presigned URLs)
+  API ── NAT gateway ───▶ external APIs (payments, email)
+  SPA static files: object storage + CDN
+```
+
+| 元件 | 取代開頭的什麼 |
+|---|---|
+| VPC 與子網 | 一台公網 IP 的主機 |
+| 安全群組 | 對 `0.0.0.0/0` 開的 22 與 5432 |
+| 負載平衡器（受管，終結 TLS、跨 AZ 分派） | 主機上的 nginx |
+| 受管資料庫（備份、修補、故障切換變成設定） | 自己裝的 PostgreSQL 與三週前的快照 |
+| 物件儲存 | 主機的磁碟與對外流量 |
+| IAM 角色（平台發給工作負載的短效憑證） | `.env` 裡的管理員金鑰 |
+
+## 子網與安全群組：誰可以連誰
+
+**VPC**（Virtual Private Cloud）用一個 CIDR 位址範圍定義，例如 `10.20.0.0/16`，再切成**子網**（subnet）。子網的差別在路由表：
+
+| 子網類型 | 路由表裡 `0.0.0.0/0` 指向 | 放什麼 |
+|---|---|---|
+| 公開子網 | Internet gateway：可以直接進出網際網路 | 負載平衡器、NAT gateway、少數需要公網 IP 的東西 |
+| 私有子網 | NAT gateway：只能**主動對外**連線，外面連不進來 | API 伺服器、背景工作 |
+| 隔離子網 | 沒有對外路由 | 資料庫 |
+
+**安全群組**（security group）掛在虛擬機的網路介面、資料庫、負載平衡器上：
+
+- **只有允許規則**：沒有被允許的就是拒絕。新建的安全群組預設沒有任何進入規則、允許所有對外連線。
+- **有狀態**（stateful）：允許了進來的連線，回應會自動放行。
+- **來源可以是另一個安全群組**：「允許來自 `app-sg` 的 5432」比「允許來自 10.20.32.0/20 的 5432」精確，API 伺服器換 IP、擴縮都不用改規則。
+
+| 安全群組 | 掛在 | 允許進入 | 來源 |
+|---|---|---|---|
+| `lb-sg` | 負載平衡器 | TCP 443、80（80 只用來轉址到 HTTPS） | `0.0.0.0/0` |
+| `app-sg` | API 伺服器 | TCP 8000 | `lb-sg` |
+| `db-sg` | 受管資料庫 | TCP 5432 | `app-sg` |
+
+SSH 不在表上：要進主機或查資料庫時，用業者提供的連線服務（AWS Systems Manager Session Manager、Google Cloud 的 IAP、Azure Bastion 這類）或跳板機。
+
+模擬這套判斷，可以直接執行：
+
+```python run
+import ipaddress
+
+# 每台機器：IP 與它掛的安全群組
+hosts = {
+    "internet": {"ip": "203.0.113.9", "sgs": []},
+    "lb":       {"ip": "10.20.0.12",  "sgs": ["lb-sg"]},
+    "app-1":    {"ip": "10.20.32.5",  "sgs": ["app-sg"]},
+    "db":       {"ip": "10.20.64.20", "sgs": ["db-sg"]},
+}
+# 進入規則：(安全群組, 埠, 來源)；來源是 CIDR 或另一個安全群組的名字
+rules = [
+    ("lb-sg",  443,  "0.0.0.0/0"),
+    ("app-sg", 8000, "lb-sg"),
+    ("db-sg",  5432, "app-sg"),
+]
+
+def allowed(src, dst, port):
+    for sg in hosts[dst]["sgs"]:
+        for rule_sg, rule_port, source in rules:
+            if rule_sg != sg or rule_port != port:
+                continue
+            if source.endswith("-sg"):
+                if source in hosts[src]["sgs"]:
+                    return True, f"{sg} 允許來自 {source} 的 {port}"
+            elif ipaddress.ip_address(hosts[src]["ip"]) in ipaddress.ip_network(source):
+                return True, f"{sg} 允許來自 {source} 的 {port}"
+    return False, "沒有任何允許規則：拒絕（對方看到的是連線逾時）"
+
+for src, dst, port in [("internet", "lb", 443), ("lb", "app-1", 8000), ("app-1", "db", 5432),
+                       ("internet", "db", 5432), ("lb", "db", 5432), ("internet", "app-1", 22)]:
+    ok, why = allowed(src, dst, port)
+    print(f"{src:>8} -> {dst:<5}:{port:<5} {'允許' if ok else '拒絕'}  {why}")
+```
+
+## 最常見的兩個錯誤
+
+- **`connection to server at "…" (10.20.64.20), port 5432 failed: Connection timed out`**：被安全群組擋掉的封包是**直接丟棄**，用戶端看到連線逾時，不是 `Connection refused`（refused 代表封包到了、但那個埠沒人在聽）。檢查 `db-sg` 的來源是否包含連線端的安全群組。
+- **資料庫 log 滿是 `password authentication failed for user "postgres"`**：資料庫對網際網路開放。關閉公開存取，安全群組只允許應用程式。
+
+:::stop 讀到這裡可以先停：說得出各個基本元件放在哪一層，規劃得出公開、私有、隔離子網與三個安全群組的規則。後面的服務模型、區域與可用區、位址規劃、受管資料庫、IAM 與成本，在要選區域、發憑證給程式或估帳單時再回來讀。
 
 ## 服務模型與常見元件
 
@@ -53,19 +150,9 @@
 
 **高可用的基本做法是跨 AZ**：至少兩個 AZ 各有一份 API、資料庫有另一個 AZ 的備援、負載平衡器同時接到兩邊。跨區域（multi-region）的成本與複雜度高很多，多數服務用不到。另外要知道，跨 AZ 的流量在部分業者是要收費的。
 
-## VPC 與子網
+## VPC 的位址規劃與私有子網對外
 
-**VPC**（Virtual Private Cloud）是你在雲端上的一段私有網路，用一個 CIDR 位址範圍定義，例如 `10.20.0.0/16`。私有位址通常從這三段裡選（RFC 1918）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`。
-
-VPC 再切成**子網**（subnet）。子網的差別在於它的路由表：
-
-| 子網類型 | 路由表裡 `0.0.0.0/0` 指向 | 放什麼 |
-|---|---|---|
-| 公開子網 | Internet gateway：可以直接進出網際網路 | 負載平衡器、NAT gateway、少數需要公網 IP 的東西 |
-| 私有子網 | NAT gateway：只能**主動對外**連線（下載套件、呼叫外部 API），外面連不進來 | API 伺服器、背景工作 |
-| 隔離子網 | 沒有對外路由 | 資料庫 |
-
-在 AWS，一個子網屬於單一 AZ，所以每一種子網要在每個 AZ 各建一個。Google Cloud 的子網是區域範圍、跨所有可用區。
+私有位址通常從這三段裡選（RFC 1918）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`。在 AWS，一個子網屬於單一 AZ，所以每一種子網要在每個 AZ 各建一個。Google Cloud 的子網是區域範圍、跨所有可用區。
 
 規劃位址時要注意：
 
@@ -101,64 +188,11 @@ print("10.20.33.7 在哪個子網？", [n for n, net in plan.items() if ipaddres
 
 私有子網裡的 API 要拉 image、呼叫金流 API，需要 NAT gateway。NAT gateway 通常按存在的時數加上經過的流量計費，而且每個 AZ 各一個才有高可用。流量大的對象（例如同區域的物件儲存、image registry）可以改走 **VPC endpoint**，流量不經過 NAT，也不離開業者的網路；AWS 的 S3 gateway endpoint 本身不另外收費，其他類型的 endpoint 依業者計費。
 
-## 安全群組：誰可以連誰
+## Network ACL 與連線逾時的排查
 
-**安全群組**（security group）是掛在資源（虛擬機的網路介面、資料庫、負載平衡器）上的防火牆規則：
+掛在子網上的 **Network ACL**：無狀態（回程要另外允許）、有允許也有拒絕、依編號順序比對。多數情況下用安全群組就夠，NACL 保持預設。Google Cloud 的 VPC firewall rules 與 Azure 的 NSG 都支援允許與拒絕規則並有優先順序，概念介於兩者之間。
 
-- **只有允許規則**：沒有被允許的就是拒絕。新建的安全群組預設沒有任何進入規則、允許所有對外連線。
-- **有狀態**（stateful）：允許了進來的連線，回應會自動放行，不用另外寫出去的規則。
-- **來源可以是另一個安全群組**：「允許來自 `app-sg` 的 5432」比「允許來自 10.20.32.0/20 的 5432」更精確，API 伺服器換 IP、擴縮都不用改規則。
-
-另外還有掛在子網上的 **Network ACL**：無狀態（回程要另外允許）、有允許也有拒絕、依編號順序比對。多數情況下用安全群組就夠，NACL 保持預設。Google Cloud 的 VPC firewall rules 與 Azure 的 NSG 都支援允許與拒絕規則並有優先順序，概念介於兩者之間。
-
-一個 API + 資料庫的典型規則：
-
-| 安全群組 | 掛在 | 允許進入 | 來源 |
-|---|---|---|---|
-| `lb-sg` | 負載平衡器 | TCP 443、80（80 只用來轉址到 HTTPS） | `0.0.0.0/0` |
-| `app-sg` | API 伺服器 | TCP 8000 | `lb-sg` |
-| `db-sg` | 受管資料庫 | TCP 5432 | `app-sg` |
-
-SSH 不在表上：需要進主機時，用業者提供的連線服務（AWS Systems Manager Session Manager、Google Cloud 的 IAP、Azure Bastion 這類）或跳板機，而不是對全世界開 22。開發者要查資料庫，也是經過這些通道，而不是把 5432 打開。
-
-下面模擬安全群組的判斷：只有允許規則、來源可以是 CIDR 或另一個安全群組。可以直接執行：
-
-```python run
-import ipaddress
-
-# 每台機器：IP 與它掛的安全群組
-hosts = {
-    "internet": {"ip": "203.0.113.9", "sgs": []},
-    "lb":       {"ip": "10.20.0.12",  "sgs": ["lb-sg"]},
-    "app-1":    {"ip": "10.20.32.5",  "sgs": ["app-sg"]},
-    "db":       {"ip": "10.20.64.20", "sgs": ["db-sg"]},
-}
-# 進入規則：(安全群組, 埠, 來源)；來源是 CIDR 或另一個安全群組的名字
-rules = [
-    ("lb-sg",  443,  "0.0.0.0/0"),
-    ("app-sg", 8000, "lb-sg"),
-    ("db-sg",  5432, "app-sg"),
-]
-
-def allowed(src, dst, port):
-    for sg in hosts[dst]["sgs"]:
-        for rule_sg, rule_port, source in rules:
-            if rule_sg != sg or rule_port != port:
-                continue
-            if source.endswith("-sg"):
-                if source in hosts[src]["sgs"]:
-                    return True, f"{sg} 允許來自 {source} 的 {port}"
-            elif ipaddress.ip_address(hosts[src]["ip"]) in ipaddress.ip_network(source):
-                return True, f"{sg} 允許來自 {source} 的 {port}"
-    return False, "沒有任何允許規則：拒絕（對方看到的是連線逾時）"
-
-for src, dst, port in [("internet", "lb", 443), ("lb", "app-1", 8000), ("app-1", "db", 5432),
-                       ("internet", "db", 5432), ("lb", "db", 5432), ("internet", "app-1", 22)]:
-    ok, why = allowed(src, dst, port)
-    print(f"{src:>8} -> {dst:<5}:{port:<5} {'允許' if ok else '拒絕'}  {why}")
-```
-
-被安全群組擋掉的封包是**直接丟棄**，用戶端看到的是連線逾時，而不是 `Connection refused`。這個差別是排查的重要線索：refused 代表封包到了、但那個埠沒人在聽；逾時通常代表中間被擋了。完整的排查順序見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting)。
+連線逾時通常代表中間被擋了，refused 代表封包到了。完整的排查順序見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting)。
 
 ## 負載平衡器
 
@@ -194,8 +228,6 @@ for src, dst, port in [("internet", "lb", 443), ("lb", "app-1", 8000), ("app-1",
 ## 物件儲存
 
 使用者上傳的檔案、報表、備份、前端的靜態檔，放在物件儲存（S3、Cloud Storage、Blob Storage），而不是虛擬機的磁碟：容量不用預先規劃、多台 API 都讀得到、耐久性由業者負責。瀏覽器透過 presigned URL 直接上傳下載，檔案不經過 API；bucket 預設私有、開啟版本控制與生命週期規則。細節見 [物件儲存：bucket、預簽網址與生命週期](#/skill/object-storage)。前端靜態檔通常再加一層 CDN，減少從儲存直接對外的流量。
-
-:::stop 讀到這裡可以先停：分得出 IaaS、PaaS 與 SaaS，規劃得出 VPC、子網與安全群組，知道負載平衡器、受管資料庫與物件儲存各放哪裡。後面的 IAM、成本與調整後的架構，在要發憑證給程式或估帳單時再回來讀。
 
 ## IAM 與最小權限
 
@@ -283,28 +315,6 @@ for action, resource in checks:
 - 非正式環境下班自動關機或縮到零；定期清掉沒在用的磁碟、快照、IP 位址。
 - 用量穩定之後，再評估長期承諾的折扣方案（各家名稱不同）；一開始用量還在變，不要急著綁約。
 - 容量怎麼估見 [硬體資源與容量規劃](#/skill/capacity-planning)。
-
-## 調整後的架構
-
-```text
-                  Internet
-                     │ 443 (80 → redirect)
-          ┌──────────▼──────────┐
-          │    Load balancer    │  public subnets, AZ-a + AZ-b, managed cert
-          └──────────┬──────────┘
-                     │ 8000, only from lb-sg
-          ┌──────────▼──────────┐
-          │  API containers x2  │  private subnets, AZ-a + AZ-b, IAM role
-          └──────────┬──────────┘
-                     │ 5432, only from app-sg
-          ┌──────────▼──────────┐
-          │ Managed PostgreSQL  │  db subnets, primary AZ-a + standby AZ-b
-          └─────────────────────┘
-
-  API ── VPC endpoint ──▶ object storage (browsers use presigned URLs)
-  API ── NAT gateway ───▶ external APIs (payments, email)
-  SPA static files: object storage + CDN
-```
 
 ## 常見錯誤與錯誤訊息
 

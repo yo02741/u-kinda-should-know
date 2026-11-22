@@ -1,4 +1,4 @@
-## 從一個具體問題開始：新會員禮券被領了兩張
+## 具體問題：新會員禮券被領了兩張
 
 「新會員禮券每人限領一次」的 API 長這樣：
 
@@ -23,7 +23,7 @@ async def claim_coupon(user_id: int):
 | t4 | | 判斷沒領過（根據 t2 的結果），INSERT | 2 筆 |
 | t5 | 發出 100 元禮券 | 發出 100 元禮券 | 2 筆 |
 
-每一句 SQL 單獨看都沒錯，錯在「查」與「做」之間隔了一段時間，另一個請求剛好插了進來。這種結果取決於執行先後順序的 bug 叫做 **race condition**（競態條件）。它在開發環境幾乎不會出現（一次只有一個請求），上線後偶爾出現、難以重現，常常要等到對帳時才被發現。
+每一句 SQL 單獨看都沒錯，錯在「查」與「做」之間隔了一段時間，另一個請求插了進來。這種結果取決於執行先後順序的 bug 叫做 **race condition**（競態條件）。開發環境一次只有一個請求，幾乎不會出現。
 
 ## 四種常見的形狀
 
@@ -34,63 +34,11 @@ async def claim_coupon(user_id: int):
 | lost update | 兩個人同時編輯同一份資料，後存的蓋掉先存的 | 前一個人的修改無聲消失 |
 | 重複提交 | 連點兩次、客戶端逾時重試、佇列重送訊息 | 同一個動作被執行兩次：扣款兩次、寄兩封信 |
 
-lost update 是 read-modify-write 的結果；用庫存扣減說明 lost update 的完整時間線，見 [交易與隔離等級](#/skill/transactions)。重複提交比較特別：它不需要兩個「不同的」動作同時發生，同一個動作被送了兩次就夠了。
-
-判斷一段程式有沒有這類問題，問一個問題：**「讀到的值」到「根據它做決定並寫入」之間，別人能不能改掉那個值？** 能，就有 race。
-
-## 兩個層次：程式內與跨服務
-
-### 程式內：執行緒與 async
-
-在同一個程序裡，多個執行緒或多個 async task 共用記憶體。
-
-**執行緒**：CPython 有 GIL（全域直譯器鎖），但 GIL 只保證「一次只有一個執行緒在跑 bytecode」，不保證你的一行程式是原子的。`counter += 1` 會被拆成「讀 counter、加一、寫回」幾個 bytecode，執行緒可能在中間被切換。Python 3.13 起另有 free-threaded 版本（沒有 GIL；3.13 標為實驗性，3.14 起列為正式支援，但仍是另外安裝的版本，不是預設），在這種版本上，共用狀態沒有加鎖的問題只會更明顯。
-
-```python
-import threading
-
-counter = 0
-lock = threading.Lock()
-
-def unsafe():
-    global counter
-    for _ in range(100_000):
-        counter += 1          # 讀、加、寫不是原子的，執行緒可能在中間被切換
-
-def safe():
-    global counter
-    for _ in range(100_000):
-        with lock:            # 同一時間只有一個執行緒能進入這段
-            counter += 1
-
-# 在本機 CPython 用 4 個執行緒各跑一次 unsafe，結果可能小於 400000（依版本與機器而定）；
-# safe 一定是 400000
-```
-
-**asyncio**：只有一個執行緒，task 只在 `await` 的地方交出執行權。所以兩個 `await` 之間的程式，不會被同一個 event loop 上的其他 task 打斷，這是 asyncio 比執行緒好推理的地方。但只要「讀」和「寫」中間有一個 `await`（查資料庫、呼叫 API、甚至 `asyncio.sleep(0)`），其他 task 就可能在那裡插進來。
-
-### 跨程序、跨主機
-
-正式環境通常有多個 worker 程序（gunicorn、uvicorn 的多 worker）與多台主機。開頭的例子，兩個請求在不同的 worker 裡：
-
-- `threading.Lock`、`asyncio.Lock` 只在**同一個程序**內有效，別的 worker 看不到這把鎖。
-- 程序內的變數、`lru_cache`、全域 dict 也是每個 worker 各一份。
-
-跨程序的並發要交給一個**所有人共用的仲裁者**，最常見的是資料庫本身：
-
-| 工具 | 有效範圍 | 用在 |
-|---|---|---|
-| `threading.Lock` / `asyncio.Lock` | 同一個程序 | 程序內的共用狀態：記憶體快取、計數器、連線物件 |
-| 條件更新 `UPDATE … WHERE 條件` | 所有連到這個資料庫的人 | 扣庫存、扣餘額、狀態轉換（`WHERE status = 'pending'`） |
-| 唯一約束 + `ON CONFLICT` | 同上 | 「每人一次」「每筆訂單一張發票」這種不能重複的事 |
-| `SELECT … FOR UPDATE` | 同上 | 判斷邏輯太複雜、塞不進一句 `WHERE` 時，先鎖住要改的列 |
-| 樂觀鎖（version 欄位） | 同上 | 衝突少、不想讓別人排隊；更新到 0 列就重讀重試 |
-| 冪等鍵 | 同上 | 重複提交、重試 |
-| 分散式鎖（Redis `SET key value NX PX`、資料庫 advisory lock） | 所有連到同一個 Redis / 資料庫的人 | 同一時間只能有一個人做的工作（例如排程），且沒有適合的資料列可以鎖 |
+判斷一段程式有沒有這類問題：**「讀到的值」到「根據它做決定並寫入」之間，別人能不能改掉那個值？** 能，就有 race。
 
 ## 實際程式：用 asyncio 重現 lost update，再用鎖修好
 
-下面這段在瀏覽器裡用 asyncio 模擬 100 個並行的存款請求。`await asyncio.sleep(0)` 代表一次 I/O（例如查資料庫），task 會在那裡交出執行權：
+asyncio 只有一個執行緒，task 只在 `await` 的地方交出執行權。下面模擬 100 個並行的存款請求，`await asyncio.sleep(0)` 代表一次 I/O（例如查資料庫）：
 
 ```python run
 import asyncio
@@ -133,15 +81,13 @@ await asyncio.gather(*(claim_unsafe(42) for _ in range(3)))
 print("同一個使用者連按三次，領到", claims.count(42), "張")
 ```
 
-沒有鎖時結果是 10：100 個 task 都在 `sleep(0)` 之前讀到 0，之後各自寫入 0 + 10。把 `await asyncio.sleep(0)` 那一行刪掉再跑，沒有鎖的版本也會得到 1000，因為讀和寫之間不再讓出執行權。這正好說明了 asyncio 的規則：race 發生在 `await` 的地方。
+沒有鎖時結果是 10：100 個 task 都在 `sleep(0)` 之前讀到 0，之後各自寫入 0 + 10。把 `await asyncio.sleep(0)` 那一行刪掉再跑，沒有鎖的版本也會得到 1000，因為讀和寫之間不再讓出執行權。race 發生在 `await` 的地方。
 
-但這把 `asyncio.Lock` 只保護同一個程序。開頭的禮券例子在兩個 worker 裡，要靠資料庫。
+`threading.Lock`、`asyncio.Lock` 只在**同一個程序**內有效。開頭的禮券例子在兩個 worker 裡，別的 worker 看不到這把鎖，要靠資料庫。
 
-## 跨服務的解法：讓資料庫當仲裁者
+## 跨 worker 的解法：讓資料庫當仲裁者
 
-### 唯一約束：讓「不能重複」成為資料庫的規則
-
-把「每人限領一次」寫成約束，資料庫保證不管多少個請求同時進來，只有一個 `INSERT` 會成功：
+把「每人限領一次」寫成唯一約束，資料庫保證不管多少個請求同時進來，只有一個 `INSERT` 會成功：
 
 ```sql run
 -- (user_id, campaign) 是主鍵：同一個使用者在同一個活動只能有一筆
@@ -163,11 +109,69 @@ ON CONFLICT DO NOTHING RETURNING user_id;
 SELECT * FROM coupon_claims;
 ```
 
-應用程式改成「先插入，插入成功才發券」，把「查」與「做」合成一個由資料庫保證的動作。插入與發券最好在同一個交易裡；若發券是呼叫外部服務，用 outbox 模式或讓發券本身也冪等（見 [訊息佇列與背景工作](#/skill/queues-workers)）。
+應用程式改成「先插入，插入成功才發券」，把「查」與「做」合成一個由資料庫保證的動作。
 
-### 條件更新：把判斷放進 WHERE
+扣庫存、扣餘額用**條件更新**，把判斷放進 `WHERE`：`UPDATE accounts SET balance = balance - 100 WHERE id = 1 AND balance >= 100` 在資料庫裡一次完成判斷與扣減，更新到 0 列就代表餘額不足。
 
-`UPDATE accounts SET balance = balance - 100 WHERE id = 1 AND balance >= 100` 在資料庫裡一次完成判斷與扣減，被擋住的交易拿到鎖後會用最新的值重新檢查條件。更新到 0 列就代表餘額不足。運作細節見 [交易與隔離等級](#/skill/transactions)。
+### 最常見的兩個錯誤
+
+- **`duplicate key value violates unique constraint "coupon_claims_pkey"`**（SQLSTATE `23505`）：唯一約束照設計擋下了重複資料。不要重試；轉成「已存在」（例如 HTTP 409）或改用 `ON CONFLICT`。
+- **用程式內的鎖保護資料庫資料**：沒有錯誤訊息。開發時單一程序沒問題，部署成多 worker 就失效，數字對不上時先找 check-then-act 與 read-modify-write。
+
+:::stop 讀到這裡可以先停：會認出 check-then-act 與 lost update，用 asyncio 重現再用鎖修好，並把「不能重複」交給唯一約束與條件更新。後面的執行緒與 GIL、各種工具的有效範圍、冪等鍵、分散式鎖與死結，在要處理重複提交、看到 `deadlock detected` 或要同時鎖兩列時再回來讀。
+
+## 執行緒、GIL 與各種工具的有效範圍
+
+lost update 是 read-modify-write 的結果；用庫存扣減說明 lost update 的完整時間線，見 [交易與隔離等級](#/skill/transactions)。重複提交比較特別：它不需要兩個「不同的」動作同時發生，同一個動作被送了兩次就夠了。
+
+### 程式內：執行緒與 async
+
+在同一個程序裡，多個執行緒或多個 async task 共用記憶體。
+
+**執行緒**：CPython 有 GIL（全域直譯器鎖），但 GIL 只保證「一次只有一個執行緒在跑 bytecode」，不保證你的一行程式是原子的。`counter += 1` 會被拆成「讀 counter、加一、寫回」幾個 bytecode，執行緒可能在中間被切換。Python 3.13 起另有 free-threaded 版本（沒有 GIL；3.13 標為實驗性，3.14 起列為正式支援，但仍是另外安裝的版本，不是預設），在這種版本上，共用狀態沒有加鎖的問題只會更明顯。
+
+```python
+import threading
+
+counter = 0
+lock = threading.Lock()
+
+def unsafe():
+    global counter
+    for _ in range(100_000):
+        counter += 1          # 讀、加、寫不是原子的，執行緒可能在中間被切換
+
+def safe():
+    global counter
+    for _ in range(100_000):
+        with lock:            # 同一時間只有一個執行緒能進入這段
+            counter += 1
+
+# 在本機 CPython 用 4 個執行緒各跑一次 unsafe，結果可能小於 400000（依版本與機器而定）；
+# safe 一定是 400000
+```
+
+**asyncio**：兩個 `await` 之間的程式，不會被同一個 event loop 上的其他 task 打斷，這是 asyncio 比執行緒好推理的地方。但只要「讀」和「寫」中間有一個 `await`（查資料庫、呼叫 API、甚至 `asyncio.sleep(0)`），其他 task 就可能在那裡插進來。
+
+### 跨程序、跨主機
+
+正式環境通常有多個 worker 程序（gunicorn、uvicorn 的多 worker）與多台主機。程序內的變數、`lru_cache`、全域 dict 是每個 worker 各一份。跨程序的並發要交給一個**所有人共用的仲裁者**，最常見的是資料庫本身：
+
+| 工具 | 有效範圍 | 用在 |
+|---|---|---|
+| `threading.Lock` / `asyncio.Lock` | 同一個程序 | 程序內的共用狀態：記憶體快取、計數器、連線物件 |
+| 條件更新 `UPDATE … WHERE 條件` | 所有連到這個資料庫的人 | 扣庫存、扣餘額、狀態轉換（`WHERE status = 'pending'`） |
+| 唯一約束 + `ON CONFLICT` | 同上 | 「每人一次」「每筆訂單一張發票」這種不能重複的事 |
+| `SELECT … FOR UPDATE` | 同上 | 判斷邏輯太複雜、塞不進一句 `WHERE` 時，先鎖住要改的列 |
+| 樂觀鎖（version 欄位） | 同上 | 衝突少、不想讓別人排隊；更新到 0 列就重讀重試 |
+| 冪等鍵 | 同上 | 重複提交、重試 |
+| 分散式鎖（Redis `SET key value NX PX`、資料庫 advisory lock） | 所有連到同一個 Redis / 資料庫的人 | 同一時間只能有一個人做的工作（例如排程），且沒有適合的資料列可以鎖 |
+
+## 發券的交易、冪等鍵與分散式鎖
+
+插入與發券最好在同一個交易裡；若發券是呼叫外部服務，用 outbox 模式或讓發券本身也冪等（見 [訊息佇列與背景工作](#/skill/queues-workers)）。
+
+條件更新時，被擋住的交易拿到鎖後會用最新的值重新檢查條件。運作細節見 [交易與隔離等級](#/skill/transactions)。
 
 ### 冪等鍵：處理重複提交
 
@@ -178,8 +182,6 @@ SELECT * FROM coupon_claims;
 Redis 的 `SET lock:job value NX PX 30000` 可以當作跨主機的鎖，但它有一個根本的問題：鎖有到期時間。持有鎖的程序如果卡住（GC 暫停、網路延遲、主機暫停）超過 30 秒，鎖自動到期、另一個程序拿到鎖，原本的程序醒來後並不知道自己已經失去鎖，兩個程序同時在做。要靠它保證正確性，被保護的資源還得檢查一個遞增的 fencing token，拒絕舊持有者的寫入。
 
 所以順序是：能用唯一約束或條件更新解決的，就不要用分散式鎖。分散式鎖適合「重複做只是浪費、不會出錯」的場合，例如避免兩台主機同時重建同一份快取。
-
-:::stop 讀到這裡可以先停：會認出 check-then-act 與 lost update，用 asyncio 重現再用鎖修好，並把「不能重複」交給唯一約束與條件更新。後面的死結，在看到 `deadlock detected` 或要同時鎖兩列時再回來讀。
 
 ## 死結
 

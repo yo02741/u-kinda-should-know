@@ -1,4 +1,4 @@
-## 從一個具體問題開始：一份「能動就好」的 .gitlab-ci.yml
+## 一份「能動就好」的 .gitlab-ci.yml
 
 一家醫院資訊部的預約系統放在自架的 GitLab 上，`.gitlab-ci.yml` 是幾年前寫的：
 
@@ -10,18 +10,16 @@ deploy:
     - sshpass -p 'P@ssw0rd2023' ssh deploy@10.20.0.15 "cd /srv/booking && git pull && systemctl restart booking"
 ```
 
-它能動，但問題不少：
+它能動，但有四個問題：
 
-- **密碼寫在檔案裡**：任何能讀這個 repo 的人都看得到，而且它會永遠留在 git 歷史中，刪掉這一行也一樣。
-- **任何分支都會部署**：有人在自己的功能分支 push 一次，正式環境就換成那個分支的程式碼。
-- **測試和部署在同一個 job**：測試連的是哪個資料庫？測試失敗時 `pytest` 的結束碼會讓 job 停下，但如果有人在前面加了 `|| true`，壞掉的程式也會上線。
-- **正式環境跑的東西無法追溯**：`git pull` 拉的是那一刻的最新程式碼，部署紀錄裡看不出是哪個 commit，也沒有可以回退的版本。
+- **密碼寫在檔案裡**：能讀這個 repo 的人都看得到，刪掉這一行它也留在 git 歷史中。
+- **任何分支都會部署**：有人在功能分支 push 一次，正式環境就換成那個分支的程式碼。
+- **測試和部署在同一個 job**：測試連的資料庫沒有定義；有人在 `pytest` 後面加 `|| true`，壞掉的程式也會上線。
+- **正式環境跑的東西無法追溯**：`git pull` 拉的是那一刻的最新程式碼，部署紀錄看不出是哪個 commit，也沒有可以回退的版本。
 
-這一課把它改寫成一份結構清楚的 pipeline：測試用獨立的 PostgreSQL、build 出帶 commit 版本號的 container image、只有 main 分支能部署、部署需要人按下按鈕、密碼由 GitLab 注入。過程中說明每個關鍵字的機制。
+## .gitlab-ci.yml 的結構：全域設定與 job
 
-## .gitlab-ci.yml 的結構
-
-GitLab 讀取 repo 根目錄的 `.gitlab-ci.yml`，每次 push、建立 merge request（MR）或排程觸發時，依內容建立一條 **pipeline**。檔案裡的頂層鍵分兩類：
+GitLab 讀取 repo 根目錄的 `.gitlab-ci.yml`，每次 push、建立 merge request（MR）或排程觸發時，依內容建立一條 **pipeline**。頂層鍵分兩類：
 
 - **全域設定**：`stages`、`variables`、`workflow`、`default`、`include` 等保留字。
 - **job**：其他頂層鍵都是 job 的名字。名字以 `.` 開頭的是隱藏 job，不會執行，常拿來當範本給 `extends` 用。
@@ -41,8 +39,6 @@ GitLab 讀取 repo 根目錄的 `.gitlab-ci.yml`，每次 push、建立 merge re
 | `cache` | 跨 pipeline 重用的檔案（例如套件下載快取） |
 | `environment` | 這個 job 部署到哪個環境，GitLab 會記錄部署歷史 |
 | `tags` | 要在帶有這些標籤的 Runner 上執行 |
-
-`artifacts` 和 `cache` 常被混用：artifact 是這條 pipeline 的產出，保證傳給後面的 job；cache 是加速用的，不保證存在（不同 Runner 之間預設不共享），不能拿來傳 build 結果。
 
 ## 改寫後的完整範例
 
@@ -132,9 +128,36 @@ deploy-production:
         "/srv/booking/deploy.sh $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
 ```
 
-（`StrictHostKeyChecking=yes` 需要事先把主機金鑰放進 `known_hosts`，例如用另一個 File 型變數；不要為了省事改成 `no`，那等於不驗證連到的是不是真的那台主機。）
+## job 的順序與出現條件：stages、needs、rules
 
-## 執行順序：stages 與 needs
+- **stage 是一道柵欄**：同一個 stage 的 job 平行執行；前一個 stage 的 job 全部成功，下一個 stage 才開始。
+- **`needs` 把柵欄換成依賴關係**：寫了 `needs: [build-image]` 的 job 只等 `build-image`。沒列進 needs 的 job 失敗，不會擋住它。
+- **`rules` 由上往下比對，第一條符合的規則生效**，後面的不再看；都不符合時，job 不會出現在 pipeline 裡。
+
+每條規則可以帶 `when`：
+
+| `when` | 效果 |
+|---|---|
+| `on_success`（預設） | 前面的 stage 都成功就執行 |
+| `manual` | 出現按鈕，要有人按才執行 |
+| `always` | 不管前面成功或失敗都執行 |
+| `never` | 不加入 pipeline |
+| `delayed` | 搭配 `start_in`，延遲一段時間後執行 |
+
+測試連不到 service 的資料庫時：
+
+| 現象 / 訊息 | 原因 | 怎麼處理 |
+|---|---|---|
+| `could not translate host name "postgres" to address` | job 沒有 `services:`，或連線用的主機名稱和 service 的名稱 / alias 不一致 | 加上 service，主機名稱用 alias（或 image 名稱，如 `postgres`） |
+
+:::stop 讀到這裡可以先停：會讀寫 stages、needs、rules，把測試、build、手動部署拆成各自的 job。後面的 stage 時間線、預定義變數與 MR pipeline，在 job 沒有照預期出現時回來讀；Runner、protected 與 masked 變數、Container Registry 與手動部署，在要自己架 Runner 或接上正式環境部署時再讀。
+
+## artifacts 與 cache 的差別、SSH 主機金鑰
+
+- `artifacts` 是這條 pipeline 的產出，保證傳給後面的 job；`cache` 是加速用的，不保證存在（不同 Runner 之間預設不共享），不能拿來傳 build 結果。
+- 範例的 `StrictHostKeyChecking=yes` 需要事先把主機金鑰放進 `known_hosts`，例如用另一個 File 型變數；不要為了省事改成 `no`，那等於不驗證連到的是不是真的那台主機。
+
+## 執行順序：stages 的時間線與 needs
 
 **stage 是一道柵欄**：同一個 stage 的 job 平行執行；前一個 stage 的 job 全部成功，下一個 stage 才開始。上面的範例在 main 分支上的時間線是這樣：
 
@@ -149,17 +172,7 @@ deploy-production:
 
 `needs` 還有第二個效果：預設只下載 needs 裡那些 job 的 artifacts。
 
-## rules：這個 job 要不要出現
-
-`rules` 由上往下比對，**第一條符合的規則生效**，後面的不再看；都不符合時，job 不會出現在 pipeline 裡。每條規則可以帶 `when`：
-
-| `when` | 效果 |
-|---|---|
-| `on_success`（預設） | 前面的 stage 都成功就執行 |
-| `manual` | 出現按鈕，要有人按才執行 |
-| `always` | 不管前面成功或失敗都執行 |
-| `never` | 不加入 pipeline |
-| `delayed` | 搭配 `start_in`，延遲一段時間後執行 |
+## rules 常用的預定義變數、MR pipeline 與分支 pipeline
 
 規則裡最常用的預定義變數：
 
@@ -179,8 +192,6 @@ deploy-production:
 push 一個分支會觸發分支 pipeline；這個分支有開著的 MR 時，GitLab 還可以觸發 MR pipeline（`CI_PIPELINE_SOURCE == "merge_request_event"`）。兩者都設定時，同一個 commit 會跑兩次。範例開頭的 `workflow: rules` 是 GitLab 文件提供的寫法：有開著的 MR 就只跑 MR pipeline，沒有 MR 時跑分支 pipeline。
 
 在專案設定的 Merge requests 裡勾選「Pipelines must succeed」，MR 的 pipeline 沒有通過就不能合併。main 要保持可部署，靠的主要是這個設定。
-
-:::stop 讀到這裡可以先停：會讀寫 stages、needs、rules，判斷一個 job 在 MR pipeline 與預設分支的 pipeline 會不會出現。後面的 Runner、protected 與 masked 變數、Container Registry 與手動部署，在要自己架 Runner 或接上正式環境部署時再回來讀。
 
 ## Runner：job 真正在哪裡執行
 
@@ -287,7 +298,6 @@ job 加上 `environment:` 之後，GitLab 會在 Operate → Environments 記錄
 |---|---|---|
 | job 一直 pending，提示沒有可用的 Runner | 沒有線上的 Runner 符合 job 的 `tags`；或 Runner 是 protected，而這是非受保護分支 | 檢查 job 的 `tags` 與 Runner 的標籤、Runner 的 protected 設定 |
 | 變數在 main 有值、在功能分支是空的 | 變數設成 protected，功能分支不是受保護分支 | 這通常是預期行為；功能分支不該拿到正式環境機密 |
-| `could not translate host name "postgres" to address` | job 沒有 `services:`，或連線用的主機名稱和 service 的名稱 / alias 不一致 | 加上 service，主機名稱用 alias（或 image 名稱，如 `postgres`） |
 | 連 `localhost:5432` 被拒絕 | docker executor 下 service 是另一個容器，不在 localhost | 改用 service 的主機名稱（Kubernetes executor 下 service 與 job 在同一個 Pod，才能用 localhost） |
 | `Cannot connect to the Docker daemon at tcp://docker:2375. Is the docker daemon running?` | 沒有 `docker:dind` service、TLS 設定不一致，或 Runner 沒開 privileged | 加上 dind service 與 `DOCKER_TLS_CERTDIR`，確認 Runner 設定 |
 | `docker push` 回 `denied: access forbidden` | 沒有登入 registry，或推到不屬於這個專案的路徑 | 確認 `docker login` 在 push 之前、tag 用 `$CI_REGISTRY_IMAGE` 開頭 |

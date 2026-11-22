@@ -1,38 +1,21 @@
-## 從一個具體問題開始：按了上一頁，篩選全沒了
+## 具體問題：按了上一頁，篩選全沒了
 
 櫃台在「掛號清單」選了狀態「已掛號」、日期從 11 月 1 日起，按了兩次「載入更多」，捲到第 47 筆，點進去看詳細資料。看完按瀏覽器的上一頁：篩選回到「全部」，清單只剩第一批 20 筆，捲軸停在最上面。她把網址貼給同事請他幫忙看第 47 筆，同事打開看到的也是預設的清單。
 
 篩選條件只存在元件的 `ref` 裡。元件卸載時這些 ref 跟著消失，網址上也沒有任何線索，重新進來只能從預設值開始。
 
-## 運作原理
-
-### 哪些東西放網址
+## 哪些條件放網址
 
 | 放網址 | 不放網址 |
 |---|---|
 | 關鍵字、狀態、日期區間、科別這類篩選 | 輸入框打到一半、還沒按搜尋的文字 |
 | 排序欄位與方向 | 展開了哪幾列、hover 在哪 |
-| offset 分頁的頁碼 | cursor 分頁的 cursor（見下一節） |
+| offset 分頁的頁碼 | cursor 分頁的 cursor（不透明的字串，過一陣子可能失效） |
 | 目前的 Tab（「今日」「本週」） | 登入者、權限、token |
 
 判斷方式：重新整理後要還在、貼給別人要看到同一個畫面、按上一頁要回得去的，放網址。條件放進網址之後，網址就是唯一的來源：元件從網址讀條件，按鈕與輸入框只改網址，不另外存一份。兩份同時存在時，總有一個操作只改了其中一份。
 
-### offset 與 cursor：前端看到的差別
-
-| | offset 分頁 | cursor 分頁 |
-|---|---|---|
-| 請求 | `?page=3&size=20` 或 `?offset=40&limit=20` | `?limit=20&cursor=…` |
-| 回應 | 這一頁的資料，常附總筆數 | 這一批的資料與 `next_cursor` |
-| 畫面元件 | Pagination（頁碼、上一頁、下一頁、跳頁） | 「載入更多」按鈕或無限捲動 |
-| 跳到第 7 頁 | 可以 | 不行，只能一批一批往下 |
-| 頁碼放網址 | 放，`?page=3` 打開就是第 3 頁 | cursor 不放；它是不透明的字串，過一陣子可能失效 |
-| 翻頁之間有新資料 | 會重複或漏掉 | 不會 |
-
-offset 的重複怎麼發生：清單依建立時間新到舊排列，第 1 頁是最新的 20 筆。使用者看第 1 頁時，櫃台新增了一筆掛號。這時要第 2 頁（`offset=20`），伺服器重新排序，原本的第 20 筆被擠到第 21 筆，於是出現在第 2 頁的第一列：同一筆在兩頁各出現一次。刪除資料時則反過來，會漏掉一筆。cursor 記的是「上一批最後一筆的位置」，下一批從那之後接著拿，不受前面新增或刪除影響。
-
-用哪一種由後端的 API 決定，前端跟著選元件。本站後端參考專案的 `GET /api/appointments` 是 cursor 分頁：回應 `{ items, next_cursor }`，`next_cursor` 為 `null` 代表沒有下一批。伺服器那一側怎麼設計 cursor，見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
-
-### query 讀進來都是字串
+## query 讀進來都是字串，寫回去選 push 或 replace
 
 Vue Router 的 `route.query` 型別是 `Record<string, string | null | (string | null)[]>`：
 
@@ -45,7 +28,7 @@ Vue Router 的 `route.query` 型別是 `Record<string, string | null | (string |
 
 `route.query.page + 1` 得到的是 `'21'`。所以讀進來的第一件事是解析：轉型、檢查範圍與允許的值，不合法就用預設值。使用者手改網址、舊的書籤、別的系統產生的連結，都可能帶來不合法的值；直接拿去組請求，送出的就是 `page=NaN`。
 
-### push 還是 replace
+寫回網址時：
 
 | 操作 | 用 | 理由 |
 |---|---|---|
@@ -53,20 +36,7 @@ Vue Router 的 `route.query` 型別是 `Record<string, string | null | (string |
 | 關鍵字輸入框（debounce 之後） | `router.replace` | 每打一個字就一筆紀錄，上一頁要按很多次才離開 |
 | 解析後發現參數不合法，改成預設值 | `router.replace` | 不合法的網址不該留在瀏覽紀錄裡 |
 
-### 回到原位：捲動位置與已載入的資料
-
-從詳細頁按上一頁回來，Vue Router 的 `scrollBehavior` 會收到 `savedPosition`（離開時的捲動位置），回傳它就會捲回去。前提是那個位置在當下存在：如果清單要重新抓資料，捲動發生時頁面只有 Skeleton，高度不夠，只能停在頂端。
-
-兩種做法：
-
-- **保留清單元件**：用 `<KeepAlive>` 包住列表頁，離開時元件不卸載，已載入的三批資料與 DOM 都還在，捲動位置也還原得回去。cursor 分頁的「載入更多」通常用這個做法，因為重新抓只拿得到第一批。
-- **等資料畫好再捲動**：`scrollBehavior` 可以回傳 Promise，等清單渲染完再 resolve 捲動位置。offset 分頁回到第 3 頁只要抓一頁，適合這個做法。
-
-Vue Router 5.5 的型別定義把 `scrollBehavior` 標成 deprecated，建議改用 `vue-router/experimental` 的 `useScrollRestoration()`；新的 API 還在實驗階段，`scrollBehavior` 目前照常運作，Vue Router 4 的專案也都用它。
-
-## 實際程式
-
-### 解析與寫回網址
+## 最小範例：解析與寫回網址的兩個純函式
 
 把「網址參數 → 條件」與「條件 → 網址參數」寫成兩個純函式，列表元件只呼叫它們。下面這段可以直接執行，看各種奇怪的網址被解析成什麼：
 
@@ -111,9 +81,35 @@ for (const q of cases) {
 
 `toQuery` 把預設值省略，所以「全部、第 1 頁」的網址就是 `/appointments`，和第一次進來的網址相同。`parseQuery(toQuery(f))` 要等於 `f`，這是可以寫成單元測試的性質。
 
-:::stop 讀到這裡可以先停：會決定哪些條件放網址、選 `push` 或 `replace`，並把網址解析成條件。後面的「載入更多」列表、`<KeepAlive>` 與 offset 頁碼，在動手做清單頁時再回來讀。
+:::stop 讀到這裡可以先停：會決定哪些條件放網址、選 `push` 或 `replace`，並把網址解析成條件。後面的 offset 與 cursor、捲動還原、「載入更多」列表與 `<KeepAlive>`，在動手做清單頁時再回來讀。
 
-### 列表元件：cursor 分頁加「載入更多」
+## offset 與 cursor：前端看到的差別
+
+| | offset 分頁 | cursor 分頁 |
+|---|---|---|
+| 請求 | `?page=3&size=20` 或 `?offset=40&limit=20` | `?limit=20&cursor=…` |
+| 回應 | 這一頁的資料，常附總筆數 | 這一批的資料與 `next_cursor` |
+| 畫面元件 | Pagination（頁碼、上一頁、下一頁、跳頁） | 「載入更多」按鈕或無限捲動 |
+| 跳到第 7 頁 | 可以 | 不行，只能一批一批往下 |
+| 頁碼放網址 | 放，`?page=3` 打開就是第 3 頁 | cursor 不放；它是不透明的字串，過一陣子可能失效 |
+| 翻頁之間有新資料 | 會重複或漏掉 | 不會 |
+
+offset 的重複怎麼發生：清單依建立時間新到舊排列，第 1 頁是最新的 20 筆。使用者看第 1 頁時，櫃台新增了一筆掛號。這時要第 2 頁（`offset=20`），伺服器重新排序，原本的第 20 筆被擠到第 21 筆，於是出現在第 2 頁的第一列：同一筆在兩頁各出現一次。刪除資料時則反過來，會漏掉一筆。cursor 記的是「上一批最後一筆的位置」，下一批從那之後接著拿，不受前面新增或刪除影響。
+
+用哪一種由後端的 API 決定，前端跟著選元件。本站後端參考專案的 `GET /api/appointments` 是 cursor 分頁：回應 `{ items, next_cursor }`，`next_cursor` 為 `null` 代表沒有下一批。伺服器那一側怎麼設計 cursor，見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
+
+## 回到原位：捲動位置與已載入的資料
+
+從詳細頁按上一頁回來，Vue Router 的 `scrollBehavior` 會收到 `savedPosition`（離開時的捲動位置），回傳它就會捲回去。前提是那個位置在當下存在：如果清單要重新抓資料，捲動發生時頁面只有 Skeleton，高度不夠，只能停在頂端。
+
+兩種做法：
+
+- **保留清單元件**：用 `<KeepAlive>` 包住列表頁，離開時元件不卸載，已載入的三批資料與 DOM 都還在，捲動位置也還原得回去。cursor 分頁的「載入更多」通常用這個做法，因為重新抓只拿得到第一批。
+- **等資料畫好再捲動**：`scrollBehavior` 可以回傳 Promise，等清單渲染完再 resolve 捲動位置。offset 分頁回到第 3 頁只要抓一頁，適合這個做法。
+
+Vue Router 5.5 的型別定義把 `scrollBehavior` 標成 deprecated，建議改用 `vue-router/experimental` 的 `useScrollRestoration()`；新的 API 還在實驗階段，`scrollBehavior` 目前照常運作，Vue Router 4 的專案也都用它。
+
+## 列表元件：cursor 分頁加「載入更多」
 
 ```vue
 <script setup>
@@ -236,7 +232,7 @@ const router = createRouter({
 })
 ```
 
-### offset 分頁：頁碼放網址
+## offset 分頁：頁碼放網址
 
 後端是 offset 分頁時，頁碼放進網址，Pagination 元件的每個頁碼都是一次 `router.push`：
 

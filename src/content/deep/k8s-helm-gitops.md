@@ -1,12 +1,12 @@
-## 從一個具體問題開始：三個環境、三份複製貼上的 YAML
+## 三個環境、三份複製貼上的 YAML
 
 `booking-api` 要部署到 dev、staging、production。最直接的做法是把 `k8s/` 目錄複製三份，各自改幾個值：副本數、image tag、資源、網域、log 等級。
 
 三個月後，三個目錄之間的差異有四十幾行。其中哪些是刻意的（production 副本數比較多），哪些是某次修問題時只改了一邊、忘了同步（production 有 `preStop`，staging 沒有），已經沒有人說得清楚。staging 驗證通過的東西，和實際部署到 production 的不是同一份。
 
-還有另一個問題：這些 YAML 是誰、用什麼方式套用到叢集的？有人從自己的電腦 `kubectl apply`，有人直接 `kubectl edit` 改線上的物件。叢集裡實際跑的，和 Git 裡寫的，也不保證一樣。
+套用的方式也不一致：有人從自己的電腦 `kubectl apply`，有人直接 `kubectl edit` 改線上的物件。叢集裡實際跑的，和 Git 裡寫的，不保證一樣。
 
-這一課處理這兩件事：
+要處理兩件事：
 
 - 同一份 manifest 上多個環境：共同的部分只寫一次，差異明確列出來。兩種做法是 Kustomize（補丁）與 Helm（樣板）。
 - 誰把它套用到叢集：CI 推進去（push），或叢集自己從 Git 拉（GitOps）。
@@ -15,7 +15,7 @@ manifest 本身的寫法見 [Kubernetes 實作：把服務寫成 manifest](#/ski
 
 ## Kustomize：base 加 overlay
 
-Kustomize 的做法是：base 放一份完整、合法的 manifest，每個環境一個 overlay，只寫「和 base 不一樣的地方」。
+base 放一份完整、合法的 manifest，每個環境一個 overlay，只寫「和 base 不一樣的地方」。
 
 ```text
 k8s/

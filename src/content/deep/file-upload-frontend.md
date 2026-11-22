@@ -1,4 +1,4 @@
-## 從一個具體問題開始：轉診單傳了兩分鐘，最後回 413
+## 具體問題：轉診單傳了兩分鐘，最後回 413
 
 病患在「我的掛號」上傳轉診單。第一版由 AI 產生，問題一個一個出現：
 
@@ -7,11 +7,7 @@
 - 另一個版本把檔案放進 JSON：`body: JSON.stringify({ file })`，Network 分頁的 Payload 是 `{"file":{}}`，伺服器收到一個空物件。
 - 上傳中沒有進度、不能取消；網路慢的時候使用者以為當掉，重新整理頁面又傳了一次。
 
-檔案上傳和一般的 JSON 請求不一樣：body 的格式不同、檔案大、要時間，而且檔案的內容不能相信。
-
-## 運作原理
-
-### 從選檔到送出
+## 從選檔到送出：`File` 的欄位只能當提早回饋
 
 ```text
 <input type="file"> 或拖放
@@ -28,16 +24,12 @@ File { name, size, type, lastModified }   ← size 與 type 由瀏覽器依檔�
 伺服器檢查：大小上限、magic bytes、病毒掃描、權限（這一步才算數）
 ```
 
-### `File` 能告訴你什麼
-
 - `name`：使用者電腦上的檔名，可以是任何字，不能直接拿來當儲存路徑。
 - `size`：位元組數，準確。前端檢查大小靠它。
 - `type`：瀏覽器依副檔名判斷的 MIME 類型；把 `setup.exe` 改名成 `setup.pdf`，`type` 就變成 `application/pdf`。判斷不出來時是空字串。
 - `accept` 屬性只影響檔案選擇視窗預設列出哪些檔案，多數系統的選擇視窗可以切到「所有檔案」。
 
-要多一層把關，可以用 `file.slice(0, 8).arrayBuffer()` 讀前幾個位元組比對 magic bytes（PDF 是 `%PDF-`，PNG 是 `89 50 4E 47`，JPEG 是 `FF D8 FF`）。這仍然只是給使用者的提早回饋，伺服器要自己再驗一次，見 [輸入驗證與檔案上傳](#/skill/input-validation)。
-
-### `multipart/form-data` 與 boundary
+## `multipart/form-data` 的 boundary 由瀏覽器產生
 
 一個 multipart 的 body 由好幾段組成，每段之間用一串分隔字串（boundary）隔開，這串字寫在 `Content-Type` 標頭裡：
 
@@ -59,37 +51,7 @@ Content-Type: application/pdf
 
 上面是 Chromium 實際產生的格式。body 是 `FormData` 時，瀏覽器自己產生 boundary 並寫進 `Content-Type`。程式手動設 `Content-Type: multipart/form-data`，會把瀏覽器產生的值整個蓋掉，伺服器拿不到 boundary、切不開 body。後端是 FastAPI（Starlette 1.10）時，回 400 與 `Missing boundary in multipart.`。
 
-### 上傳進度：fetch 做不到
-
-fetch 有下載的串流（`res.body`），沒有上傳進度事件。fetch 的串流上傳（request body 是 `ReadableStream`、加上 `duplex: 'half'`）依 2026-11 的 web-features 資料只有 Chromium 系列支援，還不是 Baseline。
-
-需要進度條時用 `XMLHttpRequest`：
-
-| 事件 | 在哪裡 | 意思 |
-|---|---|---|
-| `xhr.upload.onprogress` | 上傳 | `e.loaded` 已送出的位元組，`e.lengthComputable` 為 `true` 時 `e.total` 是總數 |
-| `xhr.upload.onload` | 上傳 | body 送完了（伺服器還沒回應） |
-| `xhr.onload` | 回應 | 收到回應，`xhr.status` 是狀態碼 |
-| `xhr.onerror` | 回應 | 網路錯誤，包含 CORS 被擋 |
-| `xhr.onabort` | 回應 | 呼叫了 `xhr.abort()` |
-
-`upload` 上的監聽要在 `send()` 之前註冊。
-
-### 經過 API，或直傳物件儲存
-
-| | 經過 API（`multipart/form-data`） | 預簽網址直傳 |
-|---|---|---|
-| 請求 | 1 個 | 3 個：要網址、PUT 檔案、通知完成 |
-| 檔案經過 API 主機 | 是，每個位元組進出各一次 | 否 |
-| 大小限制 | API 與反向代理的上限（nginx 的 `client_max_body_size` 預設 1m） | 物件儲存的上限；大檔案用分段上傳 |
-| 前端要處理的錯誤 | 413、415、422 | 403（簽章不符、過期）、CORS |
-| 適合 | 小檔、要同步驗證內容 | 大檔、量多 |
-
-預簽網址的簽章綁定方法、key、到期時間與指定的標頭；送出的 `PUT` 要和簽的時候一致，`Content-Type` 不同就是 `SignatureDoesNotMatch`。bucket 端的設定與限制見 [物件儲存](#/skill/object-storage)，兩種架構的取捨見設計情境 [使用者上傳檔案](#/scenario/upload)。
-
-## 實際程式
-
-### 檢查檔案，與 FormData 實際送出的樣子
+## 最小範例：檢查檔案，看 FormData 實際送出的樣子
 
 這段在瀏覽器的 Worker 裡跑：建立幾個 `File`，照規則逐檔檢查，再看 `FormData` 讓瀏覽器產生的 `Content-Type` 與 body，和手動設定標頭的差別。
 
@@ -142,7 +104,19 @@ console.log('JSON.stringify：', JSON.stringify({ file: files[0] }), '← File �
 
 `new Request()` 只建立請求物件、不會送出，所以這段不需要網路。
 
-### 有進度、可取消的上傳
+## 進度與取消用 XMLHttpRequest
+
+fetch 有下載的串流（`res.body`），沒有上傳進度事件。需要進度條時用 `XMLHttpRequest`：
+
+| 事件 | 在哪裡 | 意思 |
+|---|---|---|
+| `xhr.upload.onprogress` | 上傳 | `e.loaded` 已送出的位元組，`e.lengthComputable` 為 `true` 時 `e.total` 是總數 |
+| `xhr.upload.onload` | 上傳 | body 送完了（伺服器還沒回應） |
+| `xhr.onload` | 回應 | 收到回應，`xhr.status` 是狀態碼 |
+| `xhr.onerror` | 回應 | 網路錯誤，包含 CORS 被擋 |
+| `xhr.onabort` | 回應 | 呼叫了 `xhr.abort()` |
+
+`upload` 上的監聽要在 `send()` 之前註冊。
 
 ```js
 // upload.js：用 XMLHttpRequest 上傳一個檔案，回傳 { promise, abort }
@@ -167,7 +141,27 @@ export function uploadFile(url, file, { method = 'PUT', onProgress } = {}) {
 
 經過 API 時，把 `xhr.send(file)` 換成 `xhr.send(formData)`，並且拿掉 `setRequestHeader('Content-Type', …)`，理由和 fetch 一樣。
 
-### Vue 元件裡的流程
+:::stop 讀到這裡可以先停：會用 FormData 送檔、在前端先檢查大小與類型，並用 XMLHttpRequest 顯示進度與取消。後面的直傳物件儲存、Vue 元件流程、拖放與錯誤對照，在檔案大到要直傳、要做完整的上傳畫面或排查上傳失敗時再回來讀。
+
+## 經過 API，或直傳物件儲存
+
+| | 經過 API（`multipart/form-data`） | 預簽網址直傳 |
+|---|---|---|
+| 請求 | 1 個 | 3 個：要網址、PUT 檔案、通知完成 |
+| 檔案經過 API 主機 | 是，每個位元組進出各一次 | 否 |
+| 大小限制 | API 與反向代理的上限（nginx 的 `client_max_body_size` 預設 1m） | 物件儲存的上限；大檔案用分段上傳 |
+| 前端要處理的錯誤 | 413、415、422 | 403（簽章不符、過期）、CORS |
+| 適合 | 小檔、要同步驗證內容 | 大檔、量多 |
+
+預簽網址的簽章綁定方法、key、到期時間與指定的標頭；送出的 `PUT` 要和簽的時候一致，`Content-Type` 不同就是 `SignatureDoesNotMatch`。bucket 端的設定與限制見 [物件儲存](#/skill/object-storage)，兩種架構的取捨見設計情境 [使用者上傳檔案](#/scenario/upload)。
+
+## magic bytes 與 fetch 的串流上傳
+
+要多一層把關，可以用 `file.slice(0, 8).arrayBuffer()` 讀前幾個位元組比對 magic bytes（PDF 是 `%PDF-`，PNG 是 `89 50 4E 47`，JPEG 是 `FF D8 FF`）。這仍然只是給使用者的提早回饋，伺服器要自己再驗一次，見 [輸入驗證與檔案上傳](#/skill/input-validation)。
+
+fetch 的串流上傳（request body 是 `ReadableStream`、加上 `duplex: 'half'`）依 2026-11 的 web-features 資料只有 Chromium 系列支援，還不是 Baseline。
+
+## Vue 元件裡的流程：每個檔案一個狀態
 
 ```vue
 <script setup>
@@ -219,9 +213,7 @@ onUnmounted(() => items.value.forEach((x) => { x.task?.abort(); if (x.preview) U
 
 每個檔案有自己的 `status`：`ready`、`invalid`、`uploading`、`done`、`failed`、`cancelled`。畫面依狀態顯示進度條、錯誤、重試或移除，和 [API 的四種狀態](#/skill/api-states) 一樣，每個狀態都要有對應的樣子。全部 `done` 之後才把 `key` 清單送給 API 建立轉診紀錄。
 
-:::stop 讀到這裡可以先停：會用 FormData 送檔、在前端先檢查大小與類型，並用 XMLHttpRequest 顯示進度與取消。後面的拖放與錯誤對照，在要讓使用者把檔案拖進頁面或排查上傳失敗時再回來讀。
-
-### 拖放
+## 拖放
 
 ```js
 function onDragOver(e) { e.preventDefault() }          // 沒有這行，drop 不會觸發，瀏覽器會直接開啟檔案

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：「網站變慢了」，但儀表板一切正常
+## 具體問題：「網站變慢了」，但儀表板一切正常
 
 週一上午客服轉來好幾則抱怨：「結帳要轉很久」。值班工程師打開儀表板：
 
@@ -8,11 +8,9 @@
 
 接著翻 log：每台機器各自一個文字檔，內容是 `2026-10-19 10:42:13 INFO checkout ok`。找不到哪一筆是那位客戶的結帳，也看不出那個請求後來呼叫了庫存服務和金流服務，在哪一段花了時間。
 
-兩個小時後才找到原因：金流服務的一個外部 API 偶爾要 8 秒才回，影響大約 2% 的結帳請求。平均值把它稀釋掉了：98 個 150 ms 加 2 個 8,000 ms，平均是 307 ms，看起來只是「有點慢」，但那 2% 的使用者等了 8 秒。
+兩個小時後才找到原因：金流服務的一個外部 API 偶爾要 8 秒才回，影響大約 2% 的結帳請求。98 個 150 ms 加 2 個 8,000 ms，平均是 307 ms，看起來只是「有點慢」，但那 2% 的使用者等了 8 秒。
 
-缺的是三樣東西：看得到尾端的指標（p99，而不是平均）、能串起一個請求的 log（每一行帶著同一個 id）、能看出請求在各服務之間花在哪裡的 trace。
-
-## 三種訊號各回答什麼問題
+## 三種訊號：metrics、logs、traces 各回答什麼問題
 
 | | metrics | logs | traces |
 |---|---|---|---|
@@ -22,26 +20,36 @@
 | 典型用途 | 儀表板、告警 | 除錯、稽核 | 找瓶頸、看依賴關係 |
 | 工具舉例 | Prometheus | Loki、Elasticsearch、雲端的 log 服務 | Jaeger、Tempo、雲端的 trace 服務 |
 
-三者互補：告警從 metrics 來（「5xx 比例升高」），定位用 trace（「慢在金流服務的 `charge` 那一段」），細節看 log（「那一次的錯誤訊息與參數」）。三者共用同一個 trace id 或 request id，才能從一個跳到另一個。
+告警從 metrics 來（「5xx 比例升高」），定位用 trace（「慢在金流服務的 `charge` 那一段」），細節看 log（「那一次的錯誤訊息與參數」）。三者共用同一個 trace id 或 request id，才能從一個跳到另一個。
 
-## 結構化日誌與 correlation id
+開頭缺的是：看得到尾端的指標（p99，不是平均）、每一行帶著同一個 id 的 log、能看出時間花在哪個服務的 trace。同一個結帳請求的 trace：
 
-文字 log 適合人讀，不適合機器查。**結構化日誌**是每一行一個 JSON 物件，欄位固定：
+```text
+trace 4bf92f35…                                           0 ms ─────────────── 8,140 ms
+└─ POST /checkout (shop-api)                              ████████████████████████████
+   ├─ SELECT cart_items (PostgreSQL)                      █
+   ├─ POST /reserve (inventory)                            ██
+   │  └─ UPDATE stock (PostgreSQL)                          █
+   └─ POST /charge (payment)                                  ███████████████████████
+      └─ POST https://gateway.example.com/v1/charges          ██████████████████████
+```
+
+## 結構化日誌與 correlation id：一個請求的 log 串得起來
+
+**結構化日誌**是每一行一個 JSON 物件，欄位固定：
 
 ```json
 {"ts": "2026-10-19T02:42:13.418Z", "level": "INFO", "msg": "checkout completed", "request_id": "c0a8e3f2", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "user_id": 1042, "order_id": 88123, "duration_ms": 8143}
 ```
 
-有了欄位，就能查「`duration_ms > 5000` 的結帳」、「`request_id = c0a8e3f2` 的所有 log」，而不是用正規表示式在文字裡撈。
+有了欄位，就能查「`duration_ms > 5000` 的結帳」、「`request_id = c0a8e3f2` 的所有 log」，不用拿正規表示式在文字裡撈。
 
 **correlation id**（request id）是一個請求從進來到結束都帶著的識別碼：
 
-1. 入口（反向代理或 API 的第一層 middleware）產生一個 id；如果上游已經帶了（例如 `X-Request-ID` 標頭，這是常見慣例，不是標準），就沿用。
+1. 入口（反向代理或 API 的第一層 middleware）產生一個 id；上游已經帶了（例如 `X-Request-ID` 標頭，這是常見慣例，不是標準）就沿用。
 2. 這個請求處理期間的每一行 log 都自動帶上它。
 3. 呼叫下游服務時，把它放進請求標頭傳下去。
 4. 回應時也放進回應標頭，使用者回報問題時可以提供。
-
-用了 OpenTelemetry 時，W3C Trace Context 的 `traceparent` 標頭已經帶著 trace id，可以直接把 trace id 當成 correlation id。
 
 Python 裡用 `contextvars` 存「目前這個請求的 id」：它對 asyncio 的每個 task 是獨立的，同時處理很多請求也不會混在一起。
 
@@ -93,12 +101,22 @@ async def main():
 asyncio.run(main())
 ```
 
-三個請求的 log 交錯印出，但每一行的 `request_id` 都對得上自己的請求。幾個原則：
+三個請求的 log 交錯印出，每一行的 `request_id` 都對得上自己的請求。
+
+## 最常見的兩個錯誤
+
+- **`TypeError: Object of type datetime is not JSON serializable`**：log 的欄位裡有 `datetime`、`Decimal` 等 `json` 不認得的型別。先轉成字串（`isoformat()`），或給 `json.dumps` 一個 `default=str`。
+- **儀表板上的 p99 很平滑，但使用者抱怨**：圖表把各實例的百分位數取平均，或時間窗口太大。用 histogram 的 bucket 先加總再算，縮小窗口。
+
+:::stop 讀到這裡可以先停：會分辨 log、metrics、trace 各回答什麼，寫出帶 request id 的 JSON log。後面的指標類型與百分位數、RED 與 USE、trace 的傳遞與取樣、OpenTelemetry 與告警設計，在要加指標、畫儀表板、替服務接 SDK 或整理告警時再回來讀。
+
+## 結構化日誌的其他原則
 
 - **時間用 UTC、ISO 8601**，時區轉換交給查詢介面。
 - **例外的 stack trace 放進同一筆 JSON 的欄位**，不要印成多行文字；多行 log 在收集端常被切成好幾筆不相干的事件。
 - **不要記個資與秘密**：密碼、token、完整的身分證號、卡號。遮罩與欄位白名單見 [日誌與稽核紀錄裡的個資](#/skill/logs-pii)；log 的設定方式見 [日誌、錯誤處理與設定](#/skill/logging-config)。
 - **log 等級**：正式環境通常是 INFO；DEBUG 的量可能是十倍以上，要開就限定範圍與時間。
+- 用了 OpenTelemetry 時，W3C Trace Context 的 `traceparent` 標頭已經帶著 trace id，可以直接把 trace id 當成 correlation id。
 
 ## metrics：三種指標類型
 
@@ -213,19 +231,9 @@ RED 看的是使用者感受到什麼；USE 找的是哪個資源是瓶頸。Goo
 
 ## 分散式追蹤：trace 與 span
 
-一個 **trace** 代表一個請求的完整旅程；它由很多 **span** 組成，每個 span 是一段有開始與結束時間的工作（一次 HTTP 呼叫、一句 SQL、一段函式），span 之間有父子關係：
+一個 **trace** 代表一個請求的完整旅程；它由很多 **span** 組成，每個 span 是一段有開始與結束時間的工作（一次 HTTP 呼叫、一句 SQL、一段函式），span 之間有父子關係。必讀那張圖裡，時間花在外部金流 API。
 
-```text
-trace 4bf92f35…                                           0 ms ─────────────── 8,140 ms
-└─ POST /checkout (shop-api)                              ████████████████████████████
-   ├─ SELECT cart_items (PostgreSQL)                      █
-   ├─ POST /reserve (inventory)                            ██
-   │  └─ UPDATE stock (PostgreSQL)                          █
-   └─ POST /charge (payment)                                  ███████████████████████
-      └─ POST https://gateway.example.com/v1/charges          ██████████████████████
-```
-
-一眼就能看出時間花在外部金流 API。每個 span 記錄：名稱、開始與結束時間、所屬的 trace id、自己的 span id、父 span id，以及屬性（`http.route`、`db.system`、`order.id` 等）。
+每個 span 記錄：名稱、開始與結束時間、所屬的 trace id、自己的 span id、父 span id，以及屬性（`http.route`、`db.system`、`order.id` 等）。
 
 跨服務時，trace 的上下文靠標頭傳遞。W3C Trace Context 規範的 `traceparent` 標頭格式是 `版本-trace id-父 span id-旗標`：
 
@@ -235,9 +243,12 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 下游服務收到後，用同一個 trace id 建立自己的 span，父 span 設成標頭裡的那一個。經過訊息佇列時也要把這個上下文放進訊息的 metadata，否則 trace 會在佇列那裡斷掉。
 
-**取樣**：每個請求都記錄完整 trace 成本很高。head sampling 在請求開始時就決定要不要記（例如 10%），簡單但會漏掉罕見的慢請求；tail sampling 等請求結束後再決定（例如「錯誤或超過 1 秒的全部保留」），需要先把 span 暫存在收集器裡。
+**取樣**：每個請求都記錄完整 trace 成本很高。
 
-:::stop 讀到這裡可以先停：會分辨 log、metrics、trace 各回答什麼，寫帶 request id 的 JSON log，從 histogram 讀百分位數，沿著 trace 找到慢的 span。後面的 OpenTelemetry 與告警設計，在要替服務接 SDK 或整理告警時再回來讀。
+| 方式 | 何時決定 | 特性 |
+|---|---|---|
+| head sampling | 請求開始時（例如 10%） | 簡單，但會漏掉罕見的慢請求 |
+| tail sampling | 請求結束後（例如「錯誤或超過 1 秒的全部保留」） | 需要先把 span 暫存在收集器裡 |
 
 ## OpenTelemetry 的角色
 

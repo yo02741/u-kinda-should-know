@@ -1,8 +1,6 @@
-## 從一個具體問題開始：第二台主機上找不到昨天的頭像
+## 具體問題：第二台主機上找不到昨天的頭像
 
-一個 API 把使用者上傳的頭像存在主機的 `/var/app/uploads/<user_id>.png`，資料庫記下路徑，讀取時由同一個程序把檔案送回去。只有一台主機時一切正常。
-
-流量變大後加了第二台主機，前面放負載平衡器。接著開始出現這些狀況：
+一個 API 把使用者上傳的頭像存在主機的 `/var/app/uploads/<user_id>.png`，資料庫記下路徑，讀取時由同一個程序把檔案送回去。加了第二台主機與負載平衡器之後：
 
 | 狀況 | 原因 |
 |---|---|
@@ -11,30 +9,15 @@
 | 某天整個 API 掛掉 | 磁碟被上傳檔案塞滿，連 log 都寫不進去 |
 | 要做備份、要搬機器 | 檔案散在每台主機上，得自己同步、自己備份 |
 
-把檔案掛在共用的網路磁碟（NFS）上可以解決前兩個，但效能、權限、單點故障變成新的問題。比較常見的做法是把檔案交給**物件儲存**（object storage）：應用程式主機只處理請求，資料庫只存檔案的 key，檔案本身放在一個專門為大量檔案設計、由雲端或儲存叢集負責耐久性的服務裡。
+常見的做法是把檔案交給**物件儲存**（object storage），由雲端或儲存叢集負責耐久性；應用程式主機只處理請求。
 
-## 物件儲存的模型：bucket、key、物件
+## 模型：bucket、key、物件，資料庫只存 key
 
-物件儲存的模型比檔案系統簡單很多：
+- **bucket**：放物件的容器，權限、版本控制、生命週期規則多半以 bucket 為單位設定。
+- **key**：物件的名字，是一個字串，例如 `avatars/42/01J9Q3K7.png`。物件儲存**沒有真正的資料夾**：`/` 只是 key 裡的一個字元，管理介面把它顯示成資料夾。列舉時用「前綴」（`Prefix=avatars/42/`）過濾。
+- **物件**：一段位元組加上 metadata（`Content-Type`、`Cache-Control`、自訂欄位）與一個 `ETag`。讀寫以整個物件為單位，要改就整個物件重新上傳；讀取可以用 `Range` 只讀一段。
 
-- **bucket**：放物件的容器，權限、版本控制、生命週期規則多半以 bucket 為單位設定。以 AWS S3 來說，bucket 名稱在同一個分區（例如一般的商用區域）裡全球唯一。
-- **key**：物件的名字，就是一個字串，例如 `avatars/42/01J9Q3K7.png`。物件儲存**沒有真正的資料夾**：`/` 只是 key 裡的一個字元，管理介面把它顯示成資料夾。列舉時用「前綴」（`Prefix=avatars/42/`）過濾。
-- **物件**：一段位元組加上 metadata（`Content-Type`、`Cache-Control`、自訂欄位）與一個 `ETag`。讀寫以整個物件為單位：一般的 S3 API 沒有「把第 100 到 200 個位元組改掉」或「在後面追加」這種操作，要改就是整個物件重新上傳。讀取倒是可以用 `Range` 只讀一段。
-
-跟本機磁碟、網路磁碟比較：
-
-| | 本機磁碟 | 網路磁碟（NFS 等） | 物件儲存 |
-|---|---|---|---|
-| 多台主機共用 | 不行 | 可以 | 可以，透過 HTTP API |
-| 容器重建後 | 寫在可寫層就消失 | 還在 | 還在 |
-| 容量 | 受限於那顆磁碟 | 受限於檔案伺服器 | 依服務而定，通常不用自己規劃 |
-| 存取方式 | 檔案系統呼叫 | 檔案系統呼叫 | HTTP（PUT / GET / DELETE / LIST） |
-| 修改部分內容 | 可以 | 可以 | 不行，整個物件重寫 |
-| 瀏覽器直接存取 | 要經過應用程式 | 要經過應用程式 | 可以（presigned URL、CDN） |
-
-一致性方面，AWS S3 從 2020 年 12 月起對 PUT 與 DELETE 提供強的 read-after-write 一致性：寫入成功後立刻讀，一定讀到新內容，列舉也看得到。其他 S3 相容的服務不一定有同樣的保證，要看各自的文件。
-
-資料庫裡該存的是 **key**，不是完整網址，也不是使用者給的原始檔名：
+存取方式是 HTTP（PUT / GET / DELETE / LIST）。資料庫裡存 **key**，不存完整網址，也不存使用者給的原始檔名：
 
 ```sql
 CREATE TABLE files (
@@ -49,45 +32,11 @@ CREATE TABLE files (
 );
 ```
 
-key 由伺服器產生（UUID 或其他隨機值），不直接用使用者的檔名：檔名可能重複、可能含 `../` 之類的字元，也可能洩漏資訊。
+key 由伺服器產生（UUID 或其他隨機值）：使用者的檔名可能重複、可能含 `../` 之類的字元，也可能洩漏資訊。
 
-## S3 相容 API 與自建
+## 預簽網址：瀏覽器直接對物件儲存上傳下載
 
-AWS S3 的 HTTP API 已經是事實上的標準。很多服務提供「S3 相容」的 API，同一套 SDK 改一下 `endpoint_url` 就能用：Cloudflare R2、Google Cloud Storage 的 XML API（有互通模式）、各家雲端的物件儲存，以及可以在地端自建的 MinIO、Ceph 的 RADOS Gateway 等。
-
-「相容」的程度不一樣。基本的 PUT / GET / DELETE / LIST 與 presigned URL 大多支援；版本控制、生命週期規則、presigned POST 的條件、物件鎖定這些進階功能，要逐項查該服務的文件。
-
-用 Python 的 boto3 存取（需要真的物件儲存與憑證，不能在瀏覽器跑）：
-
-```python
-import boto3
-
-# endpoint_url 指向 S3 相容服務；用 AWS S3 時省略。憑證從環境變數或執行角色讀，不寫在程式裡
-s3 = boto3.client("s3", endpoint_url="http://localhost:9000", region_name="us-east-1")
-
-# 上傳：key 是伺服器產生的名字，Content-Type 要明確設定，否則下載時瀏覽器不知道怎麼處理
-s3.put_object(
-    Bucket="app-uploads",
-    Key="avatars/42/01J9Q3K7",
-    Body=open("avatar.png", "rb"),
-    ContentType="image/png",
-)
-
-# 下載
-obj = s3.get_object(Bucket="app-uploads", Key="avatars/42/01J9Q3K7")
-data = obj["Body"].read()
-
-# 列舉某個「資料夾」：其實是用前綴過濾；一次最多回 1,000 筆，要用分頁
-resp = s3.list_objects_v2(Bucket="app-uploads", Prefix="avatars/42/")
-for item in resp.get("Contents", []):
-    print(item["Key"], item["Size"])
-```
-
-開發環境可以在 docker compose 裡起一個 S3 相容的服務，讓本機與正式環境用同一套程式碼，只差 `endpoint_url` 與憑證。要注意 MinIO 的社群版採用 AGPLv3 授權，而且近年官方調整過社群版的發行方式與功能範圍；要拿來當正式環境的儲存，先確認它目前的版本、授權與維護狀態，再和其他自建方案或受管服務比較。
-
-## 預簽網址：讓瀏覽器直接跟物件儲存講話
-
-檔案經過 API 的做法（瀏覽器 → API → 物件儲存）會讓每個位元組進出 API 主機各一次，大檔案佔住 worker 與記憶體。**presigned URL**（預簽網址）把傳輸直接交給物件儲存：
+檔案經過 API（瀏覽器 → API → 物件儲存）會讓每個位元組進出 API 主機各一次，大檔案佔住 worker 與記憶體。**presigned URL**（預簽網址）把傳輸直接交給物件儲存：
 
 1. 瀏覽器向 API 要求上傳：`POST /uploads`，附上檔名、類型、大小。
 2. API 檢查登入與權限、驗證類型與大小，產生 key，在資料庫寫一筆 `pending`。
@@ -95,17 +44,11 @@ for item in resp.get("Contents", []):
 4. 瀏覽器拿這個網址直接 `PUT` 檔案到物件儲存。物件儲存驗證簽章與到期時間，通過就接受。
 5. 瀏覽器通知 API 上傳完成；API 自己去物件儲存確認物件存在、大小正確，才把狀態改成 `ready`。
 
-下載也一樣：API 確認使用者有權限後，簽一個短效的 GET 網址回給瀏覽器（或回 302 轉址過去）。
+下載時 API 確認使用者有權限後，簽一個短效的 GET 網址回給瀏覽器（或回 302 轉址過去）。
 
-幾個要點：
+**網址本身就是授權**，到期前任何拿到網址的人都能用。到期時間要短（上傳幾分鐘、下載依用途），網址不寫進 log、不存進資料庫，每次需要時重新簽。
 
-- **網址本身就是授權**。到期前任何拿到網址的人都能用，所以到期時間要短（上傳幾分鐘、下載依用途），網址不要寫進 log、不要存進資料庫。資料庫存 key，每次需要時重新簽。
-- **簽章綁定方法與 key**。用 GET 的網址去 PUT、改掉網址裡的 key，簽章都會不符。
-- **到期時間有上限**。AWS 的 Signature Version 4 預簽網址最長 7 天；若用臨時憑證（例如執行角色）簽，憑證先到期的話網址也會跟著失效。
-- **限制大小**：S3 的 presigned POST 可以在 policy 裡寫 `content-length-range`，由物件儲存拒絕超過大小的上傳。presigned PUT 的限制方式依服務與 SDK 而定，要查文件。
-- **瀏覽器直傳需要 CORS**：bucket 要設定允許你的網站來源使用 PUT，否則瀏覽器會擋下請求（錯誤出現在瀏覽器 console，不在伺服器 log）。
-
-真正的 Signature Version 4 要組 canonical request、用日期與區域推導簽章金鑰，細節由 SDK 處理。核心概念可以用 HMAC 簡化示範：伺服器用只有自己知道的密鑰，對「方法、key、到期時間」算出簽章；驗證時重算一次比對。
+簽章的概念用 HMAC 簡化示範（實際的細節由 SDK 處理）：伺服器用只有自己知道的密鑰，對「方法、key、到期時間」算出簽章；驗證時重算一次比對。
 
 ```python run
 import hmac
@@ -144,9 +87,73 @@ print("改掉 key：            ", verify("PUT", url.replace("/42/", "/43/"), no
 print("十分鐘後：            ", verify("PUT", url, now + 600))
 ```
 
-上傳要經過 API、用 presigned URL 直傳，還是分段上傳，取決於檔案大小、需不需要同步驗證內容與網路品質，設計情境 [使用者上傳檔案](#/scenario/upload) 有完整的比較與決策練習。
+## 最常見的兩個錯誤
 
-:::stop 讀到這裡可以先停：知道 bucket、key、物件的模型，會用預簽網址讓瀏覽器直傳直下，資料庫只存 key。後面的權限、版本控制、生命週期與分段上傳，在要開 bucket 給正式環境用或帳單開始變高時再回來讀。
+- **`SignatureDoesNotMatch`（403）**：請求和簽章時不一致：方法不同、`Content-Type` 跟簽進去的不同、key 被改、區域或 endpoint 設錯。比對「簽的時候」與「送出時」的方法、標頭、key。
+- **`No 'Access-Control-Allow-Origin' header is present on the requested resource`**：瀏覽器直傳時 bucket 沒有設定 CORS，或設定的來源、方法、標頭不包含這次請求。錯誤只出現在瀏覽器 console，伺服器 log 不會有紀錄。
+
+:::stop 讀到這裡可以先停：知道 bucket、key、物件的模型，會用預簽網址讓瀏覽器直傳直下，資料庫只存 key。後面的 S3 相容 API、權限、版本控制、生命週期與分段上傳，在要開 bucket 給正式環境用、要傳大檔或帳單開始變高時再回來讀。
+
+## 和本機磁碟、網路磁碟的比較
+
+把檔案掛在共用的網路磁碟（NFS）上可以解決開頭的前兩個狀況，但效能、權限、單點故障變成新的問題。
+
+| | 本機磁碟 | 網路磁碟（NFS 等） | 物件儲存 |
+|---|---|---|---|
+| 多台主機共用 | 不行 | 可以 | 可以，透過 HTTP API |
+| 容器重建後 | 寫在可寫層就消失 | 還在 | 還在 |
+| 容量 | 受限於那顆磁碟 | 受限於檔案伺服器 | 依服務而定，通常不用自己規劃 |
+| 存取方式 | 檔案系統呼叫 | 檔案系統呼叫 | HTTP（PUT / GET / DELETE / LIST） |
+| 修改部分內容 | 可以 | 可以 | 不行，整個物件重寫 |
+| 瀏覽器直接存取 | 要經過應用程式 | 要經過應用程式 | 可以（presigned URL、CDN） |
+
+- 以 AWS S3 來說，bucket 名稱在同一個分區（例如一般的商用區域）裡全球唯一。
+- 一般的 S3 API 沒有「把第 100 到 200 個位元組改掉」或「在後面追加」這種操作。
+- AWS S3 從 2020 年 12 月起對 PUT 與 DELETE 提供強的 read-after-write 一致性：寫入成功後立刻讀，一定讀到新內容，列舉也看得到。其他 S3 相容的服務不一定有同樣的保證，要看各自的文件。
+
+## S3 相容 API 與自建
+
+AWS S3 的 HTTP API 已經是事實上的標準。很多服務提供「S3 相容」的 API，同一套 SDK 改一下 `endpoint_url` 就能用：Cloudflare R2、Google Cloud Storage 的 XML API（有互通模式）、各家雲端的物件儲存，以及可以在地端自建的 MinIO、Ceph 的 RADOS Gateway 等。
+
+「相容」的程度不一樣。基本的 PUT / GET / DELETE / LIST 與 presigned URL 大多支援；版本控制、生命週期規則、presigned POST 的條件、物件鎖定這些進階功能，要逐項查該服務的文件。
+
+用 Python 的 boto3 存取（需要真的物件儲存與憑證，不能在瀏覽器跑）：
+
+```python
+import boto3
+
+# endpoint_url 指向 S3 相容服務；用 AWS S3 時省略。憑證從環境變數或執行角色讀，不寫在程式裡
+s3 = boto3.client("s3", endpoint_url="http://localhost:9000", region_name="us-east-1")
+
+# 上傳：key 是伺服器產生的名字，Content-Type 要明確設定，否則下載時瀏覽器不知道怎麼處理
+s3.put_object(
+    Bucket="app-uploads",
+    Key="avatars/42/01J9Q3K7",
+    Body=open("avatar.png", "rb"),
+    ContentType="image/png",
+)
+
+# 下載
+obj = s3.get_object(Bucket="app-uploads", Key="avatars/42/01J9Q3K7")
+data = obj["Body"].read()
+
+# 列舉某個「資料夾」：其實是用前綴過濾；一次最多回 1,000 筆，要用分頁
+resp = s3.list_objects_v2(Bucket="app-uploads", Prefix="avatars/42/")
+for item in resp.get("Contents", []):
+    print(item["Key"], item["Size"])
+```
+
+開發環境可以在 docker compose 裡起一個 S3 相容的服務，讓本機與正式環境用同一套程式碼，只差 `endpoint_url` 與憑證。要注意 MinIO 的社群版採用 AGPLv3 授權，而且近年官方調整過社群版的發行方式與功能範圍；要拿來當正式環境的儲存，先確認它目前的版本、授權與維護狀態，再和其他自建方案或受管服務比較。
+
+## 預簽網址的限制：到期上限、大小、CORS
+
+- **簽章綁定方法與 key**。用 GET 的網址去 PUT、改掉網址裡的 key，簽章都會不符。
+- **到期時間有上限**。AWS 的 Signature Version 4 預簽網址最長 7 天；若用臨時憑證（例如執行角色）簽，憑證先到期的話網址也會跟著失效。
+- **限制大小**：S3 的 presigned POST 可以在 policy 裡寫 `content-length-range`，由物件儲存拒絕超過大小的上傳。presigned PUT 的限制方式依服務與 SDK 而定，要查文件。
+- **瀏覽器直傳需要 CORS**：bucket 要設定允許你的網站來源使用 PUT，否則瀏覽器會擋下請求。
+- 真正的 Signature Version 4 要組 canonical request、用日期與區域推導簽章金鑰。
+
+上傳要經過 API、用 presigned URL 直傳，還是分段上傳，取決於檔案大小、需不需要同步驗證內容與網路品質，設計情境 [使用者上傳檔案](#/scenario/upload) 有完整的比較與決策練習。
 
 ## 權限與公開 bucket 的外洩
 

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：為了除錯打開的日誌
+## 為了除錯打開的日誌，三個月後還開著
 
 登入 API 偶爾回 500，工程師為了查原因，把請求的 body 與 header 整包記進日誌，上線觀察：
 
@@ -8,11 +8,11 @@
 2026-10-02T09:14:04+08:00 ERROR duplicate key value violates unique constraint "users_email_key" DETAIL: Key (email)=(bob@example.com) already exists.
 ```
 
-問題兩天後找到、修好了，但這段設定忘了關。三個月後盤點時發現：日誌平台保存一年，四十多位工程師與一家外包廠商有讀取權限，日誌還被同步到另一個區域做備份。裡面有明文密碼、可以直接拿來呼叫 API 的 token、session cookie，以及身分證字號。
+問題兩天後修好，這段設定忘了關。三個月後盤點發現：日誌平台保存一年，四十多位工程師與一家外包廠商有讀取權限，日誌還被同步到另一個區域做備份。裡面有明文密碼、可以直接拿來呼叫 API 的 token、session cookie，以及身分證字號。
 
-這些資料從沒進過「會員資料庫」，卻比資料庫更容易被看到：資料庫有存取控管、有欄位加密、有稽核；日誌通常沒有。而且日誌一旦送出去，就會被複製到收集器、搜尋索引、備份、甚至匯出給廠商的檔案裡，事後很難刪乾淨。
+資料庫有存取控管、欄位加密、稽核，日誌通常沒有。日誌送出去之後還會被複製到收集器、搜尋索引、備份、匯出給廠商的檔案，事後很難刪乾淨。
 
-## 運作原理：個資從哪裡進到日誌
+## 個資從六個地方進到日誌，用三層防線擋
 
 | 外洩點 | 例子 | 常見來源 |
 |---|---|---|
@@ -23,13 +23,60 @@
 | SQL 與參數 | ORM 的 echo 模式印出參數；資料庫錯誤的 DETAIL 帶出值（上面第三行） | `echo=True`、`log_statement = 'all'`、慢查詢日誌的 `parameters: $1 = '…'` |
 | 錯誤追蹤與 APM | 例外發生時自動附上 request 資料與區域變數 | Sentry 這類服務的預設設定 |
 
-多數外洩來自「整包記下來」的設定、錯誤訊息裡的原始輸入、或第三方工具的預設行為，很少是有人刻意記錄個資。所以防線要建在「記錄」這個動作本身，不能期待每個寫 `logger.info` 的人都記得。
-
-### 三層防線
+多數外洩來自「整包記下來」的設定、錯誤訊息裡的原始輸入、第三方工具的預設行為。防線要建在「記錄」這個動作上，分三層：
 
 1. **不記（白名單）**：結構化日誌只輸出明確列出的欄位。請求日誌記 `method`、路由樣板（`/users/{id}`，不是實際路徑）、`status`、`duration_ms`、`request_id`、內部的使用者 id；不記 body，不記 header（需要時只挑 `User-Agent` 這類明列的）。黑名單（看到 `password` 就遮）的問題是永遠漏掉新加的欄位：`passwd`、`pin`、`secret_answer`。
-2. **遮罩（pattern 當保險）**：在日誌寫出前，用 pattern 再掃一次訊息：email、身分證字號、`Bearer` token、信用卡號。它是白名單之外的第二層，抓的是「不小心混進訊息字串裡」的值。
+2. **遮罩（pattern 當保險）**：日誌寫出前，用 pattern 再掃一次訊息：email、身分證字號、`Bearer` token、信用卡號，抓混進訊息字串裡的值。
 3. **控管**：日誌本身也是敏感資料。存取要授權並留紀錄、保存期限到了自動刪除、匯出要經過審核。
+
+## 最小的程式：欄位白名單加假名化
+
+JSON 格式的結構化日誌只輸出白名單裡的欄位，使用者識別改成假名。
+
+```python run
+import hashlib
+import hmac
+import json
+
+# 假名化金鑰：正式環境放在 secret manager，不寫在程式碼裡；換金鑰後新舊假名就連不起來
+PSEUDONYM_KEY = b"demo-only-key-not-for-production"
+
+ALLOWED = {"ts", "level", "event", "request_id", "method", "route", "status", "duration_ms", "user"}
+
+def pseudonym(value: str) -> str:
+    # 帶金鑰的 HMAC：同一個人每次得到同一個假名；沒有金鑰的人無法用字典反查
+    return "u_" + hmac.new(PSEUDONYM_KEY, value.encode(), hashlib.sha256).hexdigest()[:12]
+
+def to_log_line(event: dict) -> str:
+    out = {k: v for k, v in event.items() if k in ALLOWED}
+    dropped = sorted(set(event) - ALLOWED)
+    if "user" in out:
+        out["user"] = pseudonym(str(out["user"]))
+    if dropped:
+        out["dropped_fields"] = dropped   # 只記欄位名稱，方便發現有人想記不該記的東西
+    return json.dumps(out, ensure_ascii=False)
+
+print(to_log_line({
+    "ts": "2026-10-02T09:14:03+08:00", "level": "INFO", "event": "login_ok",
+    "request_id": "req-7d1c", "method": "POST", "route": "/api/login", "status": 200,
+    "duration_ms": 42, "user": "alice@example.com",
+    "password": "S3cret!pass", "headers": {"Authorization": "Bearer demo-token-0123456789"},
+}))
+print(to_log_line({"ts": "2026-10-02T09:20:11+08:00", "level": "INFO", "event": "login_ok", "user": "alice@example.com"}))
+```
+
+兩行輸出的 `user` 相同，可以追蹤「同一個人在十分鐘內登入兩次」，但看不出是誰。
+
+最常見的兩個錯誤：
+
+| 錯誤 | 後果 | 改法 |
+|---|---|---|
+| 除錯時打開 body / header logging，事後忘了關 | 密碼與 token 長期留在日誌平台 | 不提供「記錄全部」的開關；需要時只記明列欄位，並設自動失效的時間 |
+| 錯誤訊息直接帶出輸入值 | `ValueError(f"… {national_id} …")` 隨著 traceback 進日誌與錯誤追蹤服務 | 錯誤訊息描述「哪個欄位、什麼問題」，不帶值 |
+
+:::stop 讀到這裡可以先停：找得出個資進到日誌的位置，會用欄位白名單與假名化決定哪些欄位寫出去。後面的 logging Filter 遮罩、稽核紀錄、保存期限，在要接手既有的文字日誌或設計「誰看了哪筆資料」的紀錄時再回來讀。
+
+## 遮罩：方式的選擇與 logging Filter
 
 遮罩的方式依用途選：
 
@@ -38,8 +85,6 @@
 | 完全移除 | `[REDACTED]` | 密碼、token、cookie：沒有任何除錯價值 |
 | 部分遮罩 | `A12****789`、`a***@example.com` | 客服或除錯時需要「大概是哪一個」 |
 | 假名化（帶金鑰的 HMAC） | `user:5f2c91ab` | 需要追蹤同一個人的多筆行為，但不需要知道是誰 |
-
-## 實際程式
 
 ### logging Filter：寫出前遮罩
 
@@ -101,55 +146,15 @@ except ValueError:
     logger.exception("驗證失敗", extra={"client": "web"})
 ```
 
-幾個細節：
-
 - Filter 要掛在 **handler** 上，而不是只掛在某個 logger 上。掛在 logger 上的 filter 只處理直接送到這個 logger 的紀錄，子 logger 傳上來的紀錄不會經過它；掛在 handler 上，所有經過這個出口的紀錄都會被處理。
 - 遮罩要在**寫出之前**。在日誌平台上設定「顯示時遮罩」不夠：原始資料已經被存下、備份、可以被匯出。
 - pattern 一定有漏網之魚（沒有 `Bearer` 前綴的 token、寫成 `A 123456789` 的證號），也可能誤判。它是保險，主要的防線仍然是白名單：不要把 body 和 header 整包丟進日誌。
 
-### 結構化日誌：欄位白名單加假名化
-
-JSON 格式的結構化日誌，敏感資料的處理可以做得更確定：只有白名單裡的欄位會被輸出，使用者識別改成假名。
-
-```python run
-import hashlib
-import hmac
-import json
-
-# 假名化金鑰：正式環境放在 secret manager，不寫在程式碼裡；換金鑰後新舊假名就連不起來
-PSEUDONYM_KEY = b"demo-only-key-not-for-production"
-
-ALLOWED = {"ts", "level", "event", "request_id", "method", "route", "status", "duration_ms", "user"}
-
-def pseudonym(value: str) -> str:
-    # 帶金鑰的 HMAC：同一個人每次得到同一個假名；沒有金鑰的人無法用字典反查
-    return "u_" + hmac.new(PSEUDONYM_KEY, value.encode(), hashlib.sha256).hexdigest()[:12]
-
-def to_log_line(event: dict) -> str:
-    out = {k: v for k, v in event.items() if k in ALLOWED}
-    dropped = sorted(set(event) - ALLOWED)
-    if "user" in out:
-        out["user"] = pseudonym(str(out["user"]))
-    if dropped:
-        out["dropped_fields"] = dropped   # 只記欄位名稱，方便發現有人想記不該記的東西
-    return json.dumps(out, ensure_ascii=False)
-
-print(to_log_line({
-    "ts": "2026-10-02T09:14:03+08:00", "level": "INFO", "event": "login_ok",
-    "request_id": "req-7d1c", "method": "POST", "route": "/api/login", "status": 200,
-    "duration_ms": 42, "user": "alice@example.com",
-    "password": "S3cret!pass", "headers": {"Authorization": "Bearer demo-token-0123456789"},
-}))
-print(to_log_line({"ts": "2026-10-02T09:20:11+08:00", "level": "INFO", "event": "login_ok", "user": "alice@example.com"}))
-```
-
-兩行輸出的 `user` 相同，可以拿來追蹤「同一個人在十分鐘內登入兩次」，但看不出是誰。要注意：
+## 假名化與白名單的注意事項
 
 - 假名化不是匿名化。持有金鑰的人可以對特定 email 算出假名、反查紀錄；再加上時間與行為，也可能推回是誰。法規上假名化的資料仍然屬於個資，只是降低了風險。
 - 不帶金鑰的雜湊（直接 `sha256(email)`）不算保護：email、電話、身分證字號的可能值有限，攻擊者可以把所有候選值算一遍反查。
 - 白名單要配合路由樣板。記 `route = "/users/{id}"` 而不是實際路徑，否則 `/users/alice@example.com` 會從 path 漏出去。
-
-:::stop 讀到這裡可以先停：找得出個資進到日誌的位置，會用欄位白名單與 Filter 在寫出前遮罩。後面的稽核紀錄、保存期限與假名化，在要設計「誰看了哪筆資料」的紀錄或訂保存政策時再回來讀。
 
 ## 稽核紀錄不是一般日誌
 
@@ -213,13 +218,11 @@ ORDER BY occurred_at, id;
 - **假名化**：需要關聯同一個人的行為時用帶金鑰的假名；金鑰跟日誌分開保管。
 - **測試**：在測試裡斷言日誌輸出不含測試用的密碼與 token 字串，比上線後再盤點便宜得多。
 
-## 常見錯誤
+## 其他常見錯誤
 
 | 錯誤 | 後果 | 改法 |
 |---|---|---|
-| 除錯時打開 body / header logging，事後忘了關 | 密碼與 token 長期留在日誌平台 | 不提供「記錄全部」的開關；需要時只記明列欄位，並設自動失效的時間 |
 | 遮罩規則掛在 logger 而不是 handler | 子 logger 或第三方套件的紀錄沒經過遮罩 | Filter 掛在 handler（或根 logger 的 handler） |
-| 錯誤訊息直接帶出輸入值 | `ValueError(f"… {national_id} …")` 隨著 traceback 進日誌與錯誤追蹤服務 | 錯誤訊息描述「哪個欄位、什麼問題」，不帶值 |
 | 用 `sha256(email)` 當假名 | 可以用候選清單反查 | 帶金鑰的 HMAC，金鑰放 secret manager |
 | 稽核紀錄寫進一般日誌 | 被抽樣丟棄、保存太短、誰都能刪 | 獨立的只新增儲存，權限分開 |
 | 稽核紀錄複製了資料內容 | 稽核表成了另一個個資庫 | 只記對象的類型與 id、動作與結果 |

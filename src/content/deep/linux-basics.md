@@ -1,6 +1,6 @@
-## 從一個具體問題開始：部署完，服務起不來
+## 部署完服務起不來：address already in use
 
-一台 Ubuntu 主機上跑著一個 Python API，由 systemd 管理，服務名稱 `orders-api`，聽 8000 埠。部署腳本拉了新版程式碼、執行 `sudo systemctl restart orders-api`，然後健康檢查一直失敗。ssh 進去看：
+一台 Ubuntu 主機上跑著 Python API，由 systemd 管理，服務名稱 `orders-api`，聽 8000 埠。部署腳本拉了新版程式碼、執行 `sudo systemctl restart orders-api`，健康檢查一直失敗。ssh 進去看：
 
 ```bash
 $ systemctl status orders-api
@@ -11,7 +11,7 @@ $ systemctl status orders-api
    Main PID: 48211 (code=exited, status=1/FAILURE)
 ```
 
-`status` 只說它失敗了。原因在 log 裡：
+`status` 只說失敗，原因在 log 裡：
 
 ```bash
 $ journalctl -u orders-api -n 20 --no-pager
@@ -19,7 +19,7 @@ Oct 20 09:12:41 web-1 uvicorn[48211]: ERROR:    [Errno 98] error while attemptin
 Oct 20 09:12:41 web-1 systemd[1]: orders-api.service: Main process exited, code=exited, status=1/FAILURE
 ```
 
-8000 埠已經有人在用。是誰：
+找出誰占用 8000 埠：
 
 ```bash
 $ sudo ss -ltnp 'sport = :8000'
@@ -31,7 +31,7 @@ $ ps -o pid,ppid,user,lstart,cmd -p 31877
   31877       1 deploy   Mon Oct 19 22:40:03 2026 /srv/orders/.venv/bin/uvicorn app.main:app --port 8000
 ```
 
-前一天晚上有人用 `nohup uvicorn … &` 手動起了一份來測試，忘了關。它不歸 systemd 管，所以 `systemctl restart` 動不到它。處理方式是先請它優雅地結束，確認埠空出來，再啟動正式的服務：
+前一天晚上有人用 `nohup uvicorn … &` 手動起了一份來測試，忘了關。它不歸 systemd 管，`systemctl restart` 動不到它。先請它結束，確認埠空出來，再啟動正式的服務：
 
 ```bash
 $ kill -TERM 31877          # 先送 SIGTERM，讓它把手上的請求做完
@@ -42,11 +42,9 @@ $ curl -s localhost:8000/health
 {"status":"ok"}
 ```
 
-這一段用到的 systemd、journal、`ss`、`ps`、訊號、行程的擁有者，是這一課的內容。後面依序講檔案權限、行程與訊號、systemd 與 log、排查指令、環境變數，最後是 SSH 金鑰登入。
+## 檔案權限：owner、group、others 各一組 rwx
 
-## 檔案權限：誰可以對這個檔案做什麼
-
-`ls -l` 每一列的前十個字元是檔案類型加上三組權限：
+`ls -l` 每列的前十個字元是檔案類型加三組權限：
 
 ```bash
 $ ls -l /srv/orders
@@ -71,17 +69,7 @@ lrwxrwxrwx  1 deploy deploy    22 Oct 20 09:10 current -> /srv/orders/releases/4
 | `w`（2） | 改內容 | 在目錄裡新增、刪除、改名檔案（**刪檔看的是目錄的 w，不是檔案本身**） |
 | `x`（1） | 當成程式執行 | 進入目錄、存取裡面的檔案（沒有 `x` 就算知道檔名也打不開） |
 
-數字表示法把每一組的 r、w、x 加起來：`rw-` = 4 + 2 = 6，`r--` = 4，`---` = 0，所以 `-rw-r-----` 就是 `640`。常見的組合：
-
-| 數字 | 字串 | 用在 |
-|---|---|---|
-| `600` | `rw-------` | 私鑰、只給服務自己讀的秘密檔 |
-| `640` | `rw-r-----` | 設定檔：擁有者可改，同群組的服務可讀 |
-| `644` | `rw-r--r--` | 一般公開可讀的檔案 |
-| `700` | `rwx------` | `~/.ssh` 目錄 |
-| `755` | `rwxr-xr-x` | 程式、一般目錄 |
-
-判斷一個行程能不能存取某個檔案時，核心依序檢查：行程的使用者是不是擁有者？是就只看 owner 那組；不是的話，行程是否屬於檔案的群組？是就只看 group 那組；都不是才看 others。root 不受這些限制（讀寫幾乎都可以；執行仍需要至少一組有 `x`）。
+數字表示法把每一組的 r、w、x 加起來：`rw-` = 4 + 2 = 6，`r--` = 4，`---` = 0，所以 `-rw-r-----` 是 `640`。核心判斷行程能不能存取檔案的順序：行程的使用者是擁有者，只看 owner 那組；否則行程屬於檔案的群組，只看 group 那組；都不是才看 others。root 不受這些限制（讀寫幾乎都可以；執行仍需要至少一組有 `x`）。
 
 改權限與擁有者：
 
@@ -94,9 +82,7 @@ sudo chown -R orders: /srv/orders/uploads       # 冒號後空白：群組改成
 id orders                               # 看使用者的 UID、GID 與所屬群組
 ```
 
-新建立的檔案預設權限由 `umask` 決定：一般 shell 的 umask 是 `022`，新檔案就是 `644`、新目錄 `755`。
-
-下面這段把權限字串轉成數字，並逐一判斷三種身分能做什麼，可以直接執行：
+下面這段把權限字串轉成數字，並判斷三種身分各能做什麼：
 
 ```python run
 # 把 ls -l 的權限字串轉成數字，並說明 owner / group / others 各能做什麼
@@ -118,6 +104,62 @@ for mode in ["-rw-r-----", "-rwxr-xr-x", "drwxr-x---", "-rw-------"]:
     print("\n".join(rows))
 ```
 
+## 行程與訊號：先 SIGTERM，還在才 SIGKILL
+
+每個執行中的程式是一個**行程**（process），有 PID、父行程（PPID）、執行身分（USER）：
+
+```bash
+$ ps aux --sort=-rss | head -5
+USER       PID %CPU %MEM    VSZ   RSS TTY  STAT START   TIME COMMAND
+orders   48302  3.1  4.2 412340 171204 ?   Ssl  09:13   0:21 /srv/orders/.venv/bin/python /srv/orders/.venv/bin/uvicorn app.main:app --workers 2
+orders   48305  1.2  3.9 398112 160022 ?   Sl   09:13   0:08 /srv/orders/.venv/bin/python -c from multiprocessing.spawn import spawn_main; ...
+postgres  1021  0.4  2.1 220180  86340 ?   Ss   Oct18   9:42 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main
+root       812  0.0  0.3  44720  12104 ?   Ss   Oct18   0:03 /usr/lib/systemd/systemd-journald
+```
+
+**訊號**（signal）是核心送給行程的通知。`kill` 的工作是送訊號，送哪一個由參數決定：
+
+| 訊號 | 編號 | 誰會送 | 預設行為 | 行程能不能攔截 |
+|---|---|---|---|---|
+| `SIGTERM` | 15 | `kill` 不加參數、`systemctl stop`、`docker stop`、Kubernetes 刪 Pod | 結束 | 可以：通常用來做清理再結束 |
+| `SIGINT` | 2 | 終端機按 Ctrl+C | 結束 | 可以：Python 會變成 `KeyboardInterrupt` |
+| `SIGKILL` | 9 | `kill -9`、OOM killer、逾時後的強制停止 | 立刻結束 | **不行**：沒有清理的機會 |
+
+收到 `SIGTERM` 的程式可以先停止接新請求、把進行中的請求做完、關掉資料庫連線，然後才退出。`SIGKILL` 由核心直接回收行程：進行中的請求斷線、沒寫完的檔案留下半截。
+
+停止服務的順序是先 `SIGTERM`、等一段時間、還在才 `SIGKILL`。systemd、Docker、Kubernetes 都這樣做，等待時間不同（systemd 預設 90 秒、`docker stop` 預設 10 秒、Kubernetes 預設 30 秒）。程式怎麼處理 `SIGTERM` 見 [應用伺服器與程序管理](#/skill/process-servers)。
+
+```bash
+kill -TERM 31877              # 等同 kill 31877
+kill -0 31877 && echo 還在     # 只檢查存在與權限，不送訊號
+pkill -TERM -f 'uvicorn app.main'   # 依完整指令列比對；-f 範圍很大，先用 pgrep -af 確認會比對到誰
+pgrep -af uvicorn
+kill -KILL 31877              # 最後手段
+```
+
+最常見的兩個錯誤：
+
+| 訊息 | 意思 | 怎麼查、怎麼修 |
+|---|---|---|
+| `bash: ./run.sh: Permission denied` | 檔案沒有執行權限，或所在檔案系統以 `noexec` 掛載 | `ls -l` 看有沒有 `x`；`chmod u+x run.sh`，或用 `bash run.sh` 執行 |
+| `PermissionError: [Errno 13] Permission denied: '/srv/orders/uploads/a.png'` | 服務帳號沒有寫入權限 | `ls -ld` 看目錄的擁有者與權限；`namei -l <路徑>` 會列出路徑上每一層，常常是上層目錄少了 `x` |
+
+:::stop 讀到這裡可以先停：看得懂 `ls -l` 的權限，會用 `ss`、`ps`、`kill` 找到並停掉一個行程。後面的權限組合與服務帳號、systemd、journalctl、排查指令與 SSH 金鑰，在要把服務交給 systemd 管或 ssh 進機器查問題時再回來讀。
+
+## 權限的常見組合、umask 與服務專屬帳號
+
+常見的組合：
+
+| 數字 | 字串 | 用在 |
+|---|---|---|
+| `600` | `rw-------` | 私鑰、只給服務自己讀的秘密檔 |
+| `640` | `rw-r-----` | 設定檔：擁有者可改，同群組的服務可讀 |
+| `644` | `rw-r--r--` | 一般公開可讀的檔案 |
+| `700` | `rwx------` | `~/.ssh` 目錄 |
+| `755` | `rwxr-xr-x` | 程式、一般目錄 |
+
+新建立的檔案預設權限由 `umask` 決定：一般 shell 的 umask 是 `022`，新檔案就是 `644`、新目錄 `755`。
+
 ### 服務用專屬帳號跑
 
 服務不要用 root 跑，也不要用登入用的個人帳號跑。建一個沒有登入 shell 的系統帳號，程式碼屬於部署帳號（服務只能讀）、需要寫入的目錄（上傳、快取）才屬於服務帳號：
@@ -131,47 +173,13 @@ sudo install -d -o orders -g orders -m 750 /srv/orders/uploads   # 建目錄並�
 
 應用程式被攻破時，攻擊者拿到的就只是 `orders` 這個帳號能碰的東西。容器裡的使用者與掛載目錄的權限問題，也是這裡的 UID 與權限位元，見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
 
-## 行程與訊號
+## ps 的欄位、SIGHUP 與退出碼
 
-每個執行中的程式是一個**行程**（process），有 PID、父行程（PPID）、執行身分（USER）。`ps` 一次看全部：
+`SIGHUP`（編號 1）在終端機斷線時送出，預設行為是結束，行程可以攔截。很多常駐程式拿它當「重新載入設定」：nginx 收到會重讀設定、gunicorn 會重啟 worker。
 
-```bash
-$ ps aux --sort=-rss | head -5
-USER       PID %CPU %MEM    VSZ   RSS TTY  STAT START   TIME COMMAND
-orders   48302  3.1  4.2 412340 171204 ?   Ssl  09:13   0:21 /srv/orders/.venv/bin/python /srv/orders/.venv/bin/uvicorn app.main:app --workers 2
-orders   48305  1.2  3.9 398112 160022 ?   Sl   09:13   0:08 /srv/orders/.venv/bin/python -c from multiprocessing.spawn import spawn_main; ...
-postgres  1021  0.4  2.1 220180  86340 ?   Ss   Oct18   9:42 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main
-root       812  0.0  0.3  44720  12104 ?   Ss   Oct18   0:03 /usr/lib/systemd/systemd-journald
-```
-
-`RSS` 是實際佔用的實體記憶體（KB），`STAT` 的 `S` 是睡眠中（等 I/O，閒置的服務大多是這個）、`R` 是在跑、`D` 是卡在磁碟或網路檔案系統、`Z` 是殭屍行程。各欄位的細節與執行緒、檔案描述子的關係見 [電腦怎麼跑你的程式：行程、執行緒、記憶體](#/skill/how-programs-run)。
-
-### 訊號：請它停，或直接殺掉
-
-**訊號**（signal）是核心送給行程的通知。`kill` 這個指令名稱有點誤導，它的工作是「送訊號」，送哪一個由參數決定：
-
-| 訊號 | 編號 | 誰會送 | 預設行為 | 行程能不能攔截 |
-|---|---|---|---|---|
-| `SIGTERM` | 15 | `kill` 不加參數、`systemctl stop`、`docker stop`、Kubernetes 刪 Pod | 結束 | 可以：通常用來做清理再結束 |
-| `SIGINT` | 2 | 終端機按 Ctrl+C | 結束 | 可以：Python 會變成 `KeyboardInterrupt` |
-| `SIGHUP` | 1 | 終端機斷線；很多常駐程式拿它當「重新載入設定」 | 結束 | 可以：nginx 收到會重讀設定、gunicorn 會重啟 worker |
-| `SIGKILL` | 9 | `kill -9`、OOM killer、逾時後的強制停止 | 立刻結束 | **不行**：沒有清理的機會 |
-
-`SIGTERM` 和 `SIGKILL` 的差別是重點。`SIGTERM` 是「請你結束」，程式可以先停止接新請求、把進行中的請求做完、關掉資料庫連線、把緩衝寫進磁碟，然後才退出；`SIGKILL` 由核心直接回收行程，程式完全不知道發生了什麼：進行中的請求斷線、沒寫完的檔案留下半截。
-
-所以停止服務的順序永遠是先 `SIGTERM`、等一段時間、還在才 `SIGKILL`。systemd、Docker、Kubernetes 都是這樣做的，只是等待時間不同（systemd 預設 90 秒、`docker stop` 預設 10 秒、Kubernetes 預設 30 秒）。程式要在這段時間內正確處理 `SIGTERM`，細節見 [應用伺服器與程序管理](#/skill/process-servers)。
-
-```bash
-kill -TERM 31877              # 等同 kill 31877
-kill -0 31877 && echo 還在     # 只檢查存在與權限，不送訊號
-pkill -TERM -f 'uvicorn app.main'   # 依完整指令列比對；-f 範圍很大，先用 pgrep -af 確認會比對到誰
-pgrep -af uvicorn
-kill -KILL 31877              # 最後手段
-```
+`RSS` 是實際佔用的實體記憶體（KB），`STAT` 的 `S` 是睡眠中（等 I/O，閒置的服務大多是這個）、`R` 是在跑、`D` 是卡在磁碟或網路檔案系統、`Z` 是殭屍行程。欄位細節見 [電腦怎麼跑你的程式：行程、執行緒、記憶體](#/skill/how-programs-run)。
 
 行程結束後，**退出碼**（exit code）告訴你它怎麼死的：0 是正常結束，1–125 通常是程式自己回報的錯誤，被訊號殺掉時 shell 與容器平台慣例顯示 `128 + 訊號編號`：`137` = 128 + 9（SIGKILL，常見於記憶體超限被 OOM killer 殺掉）、`143` = 128 + 15（SIGTERM）。
-
-:::stop 讀到這裡可以先停：看得懂 `ls -l` 的權限，會用 `ps`、`kill` 找到並停掉一個行程。後面的 systemd、journalctl、排查指令與 SSH 金鑰，在要把服務交給 systemd 管或 ssh 進機器查問題時再回來讀。
 
 ## systemd：開機自動起、掛了自動重啟
 
@@ -386,12 +394,10 @@ chmod 600 ~/.ssh/authorized_keys ~/.ssh/id_ed25519
 chmod 644 ~/.ssh/id_ed25519.pub
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息 | 意思 | 怎麼查、怎麼修 |
 |---|---|---|
-| `bash: ./run.sh: Permission denied` | 檔案沒有執行權限，或所在檔案系統以 `noexec` 掛載 | `ls -l` 看有沒有 `x`；`chmod u+x run.sh`，或用 `bash run.sh` 執行 |
-| `PermissionError: [Errno 13] Permission denied: '/srv/orders/uploads/a.png'` | 服務帳號沒有寫入權限 | `ls -ld` 看目錄的擁有者與權限；`namei -l <路徑>` 會列出路徑上每一層，常常是上層目錄少了 `x` |
 | `uvicorn: command not found` | `PATH` 裡找不到 | `command -v`；在 systemd、cron、sudo 底下寫完整路徑 |
 | `[Errno 98] ... address already in use` | 埠已被其他行程占用 | `sudo ss -ltnp 'sport = :8000'` 找 PID，確認是誰再處理 |
 | `OSError: [Errno 28] No space left on device` | 磁碟或 inode 用完 | `df -h`、`df -i`、`du`；刪了檔案空間沒回來就查 `lsof +L1` |

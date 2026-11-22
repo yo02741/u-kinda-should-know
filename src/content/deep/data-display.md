@@ -1,4 +1,4 @@
-## 從一個具體問題開始：排序只排了這一頁
+## 具體問題：排序只排了這一頁
 
 內科 101 診的今日預約有 134 筆，表格每頁 20 筆。護理師按「時間」排序，想找最晚的那一位，第一列是 11:40。可是第 6 頁還有一位 16:20 的加號病人。表格的排序寫成 `items.value.sort(…)`，前端手上只有這一頁的 20 筆，排序只在這 20 筆裡排。
 
@@ -9,11 +9,7 @@
 - 全選框只有勾與不勾兩種。勾了三列之後，全選框看起來和完全沒勾一樣。
 - 在手機上整頁都可以左右滑，連頁首也跟著滑出畫面。
 
-資料顯示元件要先決定用哪一種（Table、List、Card），再把每一欄、每個互動的範圍講清楚：排序與篩選在哪裡做、勾選選到哪些資料、手機上怎麼排。
-
-## 運作原理
-
-### Table、List、Card 怎麼選
+## Table、List、Card 怎麼選
 
 | 元件 | 適合 | 不適合 | 門診系統的例子 |
 |---|---|---|---|
@@ -23,7 +19,7 @@
 
 判斷的問題是：使用者會不會「往下掃一欄」比較？會的話用 Table。
 
-### 表格的結構
+## 表格的結構：`caption` 與 `th scope`
 
 ```html
 <table>
@@ -52,7 +48,7 @@
 - 原生 `<table>` 優先。APG 的 Table 模式也強烈建議盡量用原生元素，ARIA 的 `role="table"` 是給沒辦法用原生表格的情況。
 - APG 區分 table 與 grid：table 是靜態結構，格子不能聚焦，裡面的按鈕各自是一個 Tab 停留點；grid 是互動元件，用方向鍵在格子間移動。每列有好幾個按鈕、Tab 停留點多到難以操作時，才考慮 grid。
 
-### 排序
+## 排序在前端還是 API 做
 
 APG 的 Sortable Table 範例：可排序的欄把表頭文字包在 `<button>` 裡，目前排序的那一欄設 `aria-sort`，值是 `ascending` 或 `descending`；換排序欄時，把舊欄的 `aria-sort` 拿掉，設到新的那一欄。不能排序的欄沒有按鈕。
 
@@ -102,7 +98,7 @@ console.log('排全部的順序：', allRows.map((r) => r.time ?? '（未排）'
 
 :::stop 讀到這裡可以先停：會在 Table、List、Card 之間選一種，寫出有 `th scope` 的表格，並判斷排序要在前端還是 API 做。後面的篩選、固定表頭、全選與手機版表格，在做到那個功能時再回來讀。
 
-### 篩選
+## 篩選條件列
 
 篩選條件列放在表格上方，規格要寫：
 
@@ -112,7 +108,7 @@ console.log('排全部的順序：', allRows.map((r) => r.time ?? '（未排）'
 - 篩選後沒有資料：Empty state「沒有符合條件的預約」加「清除篩選」，和「這天沒有預約」分開（見 [回饋](#/skill/feedback)）。
 - 條件寫進網址的 query。
 
-### 固定表頭與固定欄
+## 固定表頭與固定欄
 
 ```css
 .table-wrap { overflow: auto; max-block-size: 70vh; }      /* 捲動發生在容器裡 */
@@ -122,7 +118,7 @@ tbody th[scope="row"], thead th:first-child { position: sticky; inset-inline-sta
 
 `position: sticky` 以最近的捲動容器為準。容器沒有設 `overflow`，表頭會黏在整頁的頂端；表格的某個祖先設了 `overflow: hidden`，sticky 就會失效。固定的格子要有背景色，否則捲動時底下的內容會透出來。
 
-### 勾選與全選
+## 勾選與全選的三種狀態
 
 | 已勾選 | 全選框 | `checked` | `indeterminate` |
 |---|---|---|---|
@@ -134,7 +130,7 @@ tbody th[scope="row"], thead th:first-child { position: sticky; inset-inline-sta
 
 全選的範圍要寫進規格：只選這一頁，還是全部符合條件的資料？常見做法是先選這一頁，再顯示「已選這頁 20 筆，選取全部 134 筆」讓使用者擴大範圍。批次操作送給 API 時，「全部符合條件」要送篩選條件，而不是 134 個 id。
 
-### Badge 與 Tag
+## Badge 與 Tag
 
 | | Badge | Tag（Chip） |
 |---|---|---|
@@ -144,7 +140,7 @@ tbody th[scope="row"], thead th:first-child { position: sticky; inset-inline-sta
 
 不能只靠顏色：「已報到」前面加 ✓ 或直接寫字，「已取消」加刪除線或圖示。WCAG 的 1.4.1 Use of Color（A）要求顏色不能是傳達資訊的唯一方式。
 
-### 手機上的表格
+## 手機上的表格
 
 | 做法 | 怎麼做 | 適合 |
 |---|---|---|
@@ -154,7 +150,7 @@ tbody th[scope="row"], thead th:first-child { position: sticky; inset-inline-sta
 
 WCAG 2.1 的 1.4.10 Reflow（AA）要求內容在 320 CSS px 寬時不需要兩個方向捲動，但把資料表列為例外：需要二維版面才有意義的內容可以二維捲動。例外只限表格本身，整頁仍然不能左右滑。
 
-## 實際程式
+## 完整範例：排序、全選與卡片版的預約表格
 
 ```vue
 <script setup>

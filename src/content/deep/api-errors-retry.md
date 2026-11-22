@@ -1,4 +1,4 @@
-## 從一個具體問題開始：伺服器重啟的那一分鐘
+## 具體問題：伺服器重啟的那一分鐘
 
 門診系統中午部署新版，後端重啟期間有 30 秒回 `503`。前端的寫法是「失敗就每秒重試，直到成功」：
 
@@ -15,11 +15,7 @@ async function load() {
 - 掛號的 `POST` 走同一段重試，第一次已經寫進資料庫、只是回應逾時，重送之後病患多了一筆掛號。
 - 有一個畫面把錯誤直接塞進文字，櫃台看到「載入失敗：[object Object]」。
 
-重試本身沒有錯，錯在沒有分類：哪些錯誤該重試、哪些請求能重試、重試的間隔與次數、使用者最後看到什麼。
-
-## 運作原理
-
-### 四類錯誤
+## 四類錯誤，哪些可以自動重試
 
 | 類別 | 程式裡怎麼認 | 例子 | 自動重試 | 畫面 |
 |---|---|---|---|---|
@@ -28,13 +24,9 @@ async function load() {
 | 4xx | `res.ok` 為 `false`，`res.status` 在 400–499 | 400、403、404、409、422 | 不行（429 例外） | 原因與下一步 |
 | 5xx | `res.status` 在 500–599 | 500、502、503、504 | 502、503、504 可以；500 看情況 | 「系統暫時無法處理」＋重試 |
 
-Chrome 的網路錯誤訊息是 `TypeError: Failed to fetch`，Firefox 是 `TypeError: NetworkError when attempting to fetch resource.`，Safari 是 `TypeError: Load failed`；程式裡判斷 `name`，不要比對訊息文字。401 與 403 的處理見 [登入狀態與 401](#/skill/auth-frontend)，422 與 409 對回表單見 [表單送出與驗證錯誤](#/skill/form-submit)。
-
 502、503、504 多半是暫時的：閘道後面的服務沒回應、正在重啟、過載。500 是伺服器自己的程式出錯，同樣的請求重送常常得到同樣的 500，自動重試一次就夠，或乾脆不重試。
 
-### 哪些請求可以自動重試
-
-逾時與網路錯誤有一個麻煩：前端不知道請求有沒有到過伺服器。連線在送出之前就斷了，伺服器什麼都沒做；回應在回程丟了，伺服器已經做完。
+逾時與網路錯誤時，前端不知道請求有沒有到過伺服器：連線在送出之前就斷了，伺服器什麼都沒做；回應在回程丟了，伺服器已經做完。所以還要看方法：
 
 | 方法 | 冪等 | 自動重試 |
 |---|---|---|
@@ -42,13 +34,11 @@ Chrome 的網路錯誤訊息是 `TypeError: Failed to fetch`，Firefox 是 `Type
 | `PUT`、`DELETE` | 是：送兩次的結果和送一次一樣 | 可以 |
 | `POST`、`PATCH` | 否：送兩次可能建立兩筆 | 只有帶 `Idempotency-Key` 且後端支援時 |
 
-沒有冪等鍵的 `POST` 失敗時，交給使用者決定要不要再送，並在畫面上提醒「如果掛號清單裡已經有這筆，不用再送」。伺服器那一側怎麼實作冪等鍵，見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
+沒有冪等鍵的 `POST` 失敗時，交給使用者決定要不要再送，並在畫面上提醒「如果掛號清單裡已經有這筆，不用再送」。
 
-`429` 例外：伺服器明確說「這次沒處理，等一下再來」，所以即使是 `POST`，照 `Retry-After` 等待後重送也安全。
+## 退避與抖動：間隔拉長、時間錯開
 
-### 退避與抖動
-
-固定間隔重試的問題在開頭看到了：所有客戶端同時失敗、同時等 1 秒、同時重送。退避讓間隔越拉越長，抖動讓每個客戶端的時間錯開：
+固定間隔重試時，所有客戶端同時失敗、同時等 1 秒、同時重送。退避讓間隔越拉越長，抖動讓每個客戶端的時間錯開：
 
 ```
 第 n 次重試前的等待 = base × 2^n × 隨機(0.5 ~ 1)
@@ -60,32 +50,9 @@ Chrome 的網路錯誤訊息是 `TypeError: Failed to fetch`，Firefox 是 `Type
 | 第 2 次 | 1000 ms | 500–1000 ms |
 | 第 3 次 | 2000 ms | 1000–2000 ms |
 
-再加上上限：前端的重試通常 2 到 3 次就停，之後顯示錯誤與「重試」按鈕。使用者正在等畫面，自動重試拖太久，不如讓他知道出了什麼事。伺服器之間呼叫的重試預算與斷路器，見 [呼叫外部服務的韌性](#/skill/resilience)。
+前端的重試通常 2 到 3 次就停，之後顯示錯誤與「重試」按鈕。
 
-### 429 與 Retry-After
-
-`Retry-After` 有兩種寫法：秒數（`Retry-After: 30`）或 HTTP 日期（`Retry-After: Wed, 19 Nov 2026 08:30:00 GMT`）。等待期間停用會觸發同一個請求的按鈕，並顯示還要等多久。等待時間太長（例如超過 10 秒）就不自動等，直接顯示訊息。
-
-跨網域時有一個陷阱：`Retry-After` 不在 CORS 預設允許前端讀取的回應標頭裡。Network 分頁的 Response Headers 看得到它，程式裡 `res.headers.get('Retry-After')` 卻是 `null`，要伺服器加上 `Access-Control-Expose-Headers: Retry-After`。後端回的 `X-Request-ID` 也一樣。限流在伺服器那一側怎麼做，見 [限流演算法](#/skill/rate-limiting)。
-
-### 給使用者看的與給 log 的
-
-| 錯誤 | 使用者看到 | 送進 log 或錯誤監控 |
-|---|---|---|
-| 網路錯誤 | 「無法連線，請檢查網路」 | 錯誤名稱、網址、`navigator.onLine` |
-| 逾時 | 「伺服器回應逾時，請稍後再試」 | 網址、逾時秒數 |
-| 4xx（有 Problem Details） | 依 `type` 對應的文案，對不到就用 `detail` | 狀態碼、`type`、request id |
-| 5xx | 「系統暫時無法處理，請稍後再試」 | 狀態碼、request id、回應 body |
-
-不給使用者看的：狀態碼數字、`TypeError`、stack trace、整段 JSON。回報問題時最有用的是 request id：本站後端在每個回應加 `X-Request-ID` 標頭，錯誤畫面可以小字顯示「錯誤代碼 req-3f9c2a1b4e5d」，客服拿這串字就能在後端日誌找到那一個請求。後端怎麼產生與記錄它，見 [錯誤設計](#/skill/error-design)。
-
-### 離線
-
-`navigator.onLine` 為 `false` 時一定沒有網路，可以直接顯示「目前沒有網路」，不用等逾時。為 `true` 只代表有網路介面，不代表連得到伺服器。`online` 事件在恢復連線時觸發，適合自動重抓一次。
-
-## 實際程式
-
-### 可以注入 fetch 的重試函式
+## 最小範例：有退避、抖動與上限的 fetchWithRetry
 
 下面把 `fetchWithRetry` 的 fetch 換成一個照腳本回應的假伺服器（`base` 調成 50 ms 方便觀察），跑幾種情境，看每次請求的時間與最後的結果：
 
@@ -173,9 +140,32 @@ await scenario('一直 503，120 ms 時使用者取消', [503], { base: 200 }, 1
 
 看輸出的時間欄：503 的兩次重試間隔大約是 25–50 ms 與 50–100 ms（`base` 是 50），429 那一組等了整整 1 秒。最後一組在等待中被取消，請求數停在 1。
 
-:::stop 讀到這裡可以先停：會分出四類錯誤、判斷哪些請求能自動重試，並寫出有退避、抖動與上限的重試函式。後面的錯誤文案與元件接法，在把重試接到畫面上時再回來讀。
+:::stop 讀到這裡可以先停：會分出四類錯誤、判斷哪些請求能自動重試，並寫出有退避、抖動與上限的重試函式。後面的 429 與 `Retry-After`、錯誤文案、離線與元件接法，在把重試接到畫面上時再回來讀。
 
-### 錯誤轉成畫面上的訊息
+## 各瀏覽器的網路錯誤訊息與相關狀態碼
+
+Chrome 的網路錯誤訊息是 `TypeError: Failed to fetch`，Firefox 是 `TypeError: NetworkError when attempting to fetch resource.`，Safari 是 `TypeError: Load failed`；程式裡判斷 `name`，不要比對訊息文字。401 與 403 的處理見 [登入狀態與 401](#/skill/auth-frontend)，422 與 409 對回表單見 [表單送出與驗證錯誤](#/skill/form-submit)。
+
+伺服器那一側怎麼實作冪等鍵，見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。伺服器之間呼叫的重試預算與斷路器，見 [呼叫外部服務的韌性](#/skill/resilience)。
+
+## 429 與 Retry-After
+
+`429` 例外：伺服器明確說「這次沒處理，等一下再來」，所以即使是 `POST`，照 `Retry-After` 等待後重送也安全。
+
+`Retry-After` 有兩種寫法：秒數（`Retry-After: 30`）或 HTTP 日期（`Retry-After: Wed, 19 Nov 2026 08:30:00 GMT`）。等待期間停用會觸發同一個請求的按鈕，並顯示還要等多久。等待時間太長（例如超過 10 秒）就不自動等，直接顯示訊息。
+
+跨網域時有一個陷阱：`Retry-After` 不在 CORS 預設允許前端讀取的回應標頭裡。Network 分頁的 Response Headers 看得到它，程式裡 `res.headers.get('Retry-After')` 卻是 `null`，要伺服器加上 `Access-Control-Expose-Headers: Retry-After`。後端回的 `X-Request-ID` 也一樣。限流在伺服器那一側怎麼做，見 [限流演算法](#/skill/rate-limiting)。
+
+## 給使用者看的與給 log 的
+
+| 錯誤 | 使用者看到 | 送進 log 或錯誤監控 |
+|---|---|---|
+| 網路錯誤 | 「無法連線，請檢查網路」 | 錯誤名稱、網址、`navigator.onLine` |
+| 逾時 | 「伺服器回應逾時，請稍後再試」 | 網址、逾時秒數 |
+| 4xx（有 Problem Details） | 依 `type` 對應的文案，對不到就用 `detail` | 狀態碼、`type`、request id |
+| 5xx | 「系統暫時無法處理，請稍後再試」 | 狀態碼、request id、回應 body |
+
+不給使用者看的：狀態碼數字、`TypeError`、stack trace、整段 JSON。回報問題時最有用的是 request id：本站後端在每個回應加 `X-Request-ID` 標頭，錯誤畫面可以小字顯示「錯誤代碼 req-3f9c2a1b4e5d」，客服拿這串字就能在後端日誌找到那一個請求。後端怎麼產生與記錄它，見 [錯誤設計](#/skill/error-design)。
 
 ```js
 // errors.js：所有錯誤畫面都從這裡拿文案
@@ -204,7 +194,9 @@ export function report(err, context) {
 
 `err.requestId` 由 `apiFetch` 在建立 `ApiError` 時從 `res.headers.get('X-Request-ID')` 取得；跨網域時記得請後端把它列進 `Access-Control-Expose-Headers`。
 
-### 在元件裡用
+## 離線與在元件裡用
+
+`navigator.onLine` 為 `false` 時一定沒有網路，可以直接顯示「目前沒有網路」，不用等逾時。為 `true` 只代表有網路介面，不代表連得到伺服器。`online` 事件在恢復連線時觸發，適合自動重抓一次。
 
 ```js
 // <script setup> 節錄：清單載入失敗時的處理
@@ -231,7 +223,7 @@ window.addEventListener('online', () => { if (status.value === 'error') load() }
 
 `online` 的監聽要在元件卸載時移除，寫法見 [Vue 的生命週期](#/skill/lifecycle)。
 
-### 現成的工具
+## 現成的工具：TanStack Query
 
 TanStack Query v5 的查詢預設在瀏覽器重試 3 次，間隔是 `min(1000 × 2^n, 30000)` 毫秒；mutation 預設不重試。它不分辨 4xx 與 5xx，403 也會重試 3 次，通常要自己傳 `retry: (count, err) => err.status >= 500 && count < 2`。用了工具，上面的分類與文案仍然要自己定。
 

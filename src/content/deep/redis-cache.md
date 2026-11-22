@@ -11,33 +11,7 @@
 | t3 | | 更新快取 | Alison | Alison |
 | t4 | 更新快取（A 這時才跑到這一行） | | Alison | **Alicia** |
 
-DB 是 Alison，快取是 Alicia，而且不會自己修正。快取的難處不在「把東西放進去」，而在**資料變了以後怎麼讓快取跟著變**。
-
-## Redis 的資料結構與用途
-
-Redis 是放在記憶體裡的鍵值資料庫，值不只是字串。指令由單一執行緒依序執行，**每一個指令都是原子的**，這是很多用法的基礎：
-
-| 結構 | 常用指令 | 適合的用途 |
-|---|---|---|
-| string | `GET` `SET` `SET … EX 60 NX` `INCR` `DEL` | 快取一份 JSON、計數器、鎖 |
-| hash | `HSET` `HGET` `HGETALL` `HINCRBY` | 一個物件的多個欄位（session 資料、購物車：商品 → 數量） |
-| list | `LPUSH` `RPOP` `LRANGE` `LTRIM` | 最近 N 筆（`LPUSH` + `LTRIM`）、簡單佇列 |
-| set | `SADD` `SISMEMBER` `SCARD` `SMEMBERS` | 不重複的集合：標籤、某使用者的所有 session id、去重 |
-| sorted set | `ZADD` `ZINCRBY` `ZRANGE … REV WITHSCORES` `ZREMRANGEBYSCORE` | 排行榜、依時間排序的紀錄、滑動視窗限流 |
-
-另外還有 stream（可持久的訊息流，搭配 consumer group）、HyperLogLog（近似不重複計數）、bitmap 等。
-
-```bash
-# redis-cli（需要真的 Redis，不能在瀏覽器執行）
-SET user:42:profile '{"id":42,"name":"Alice"}' EX 60   # 字串 + 60 秒 TTL
-TTL user:42:profile                                     # 剩幾秒；-1 = 沒有 TTL；-2 = key 不存在
-HSET cart:42 sku:A 2 sku:B 1                            # 購物車：hash 的每個欄位是一個商品
-HINCRBY cart:42 sku:A 1
-ZINCRBY leaderboard:2026-10 30 user:42                  # 排行榜加分
-ZRANGE leaderboard:2026-10 0 9 REV WITHSCORES           # 前 10 名（Redis 6.2 起的寫法；舊版用 ZREVRANGE）
-```
-
-key 用冒號分層、帶上實體與 id（`user:42:profile`、`ratelimit:login:ip:203.0.113.7`），才能用 `SCAN 0 MATCH user:*` 批次觀察與清理。正式環境不要用 `KEYS *`：它一次掃過所有 key，執行期間其他指令全部要等。
+DB 是 Alison，快取是 Alicia，而且不會自己修正。
 
 ## 快取的四種模式
 
@@ -48,7 +22,7 @@ key 用冒號分層、帶上實體與 id（`user:42:profile`、`ratelimit:login:
 | Write-through | 同 read-through | 寫入同時寫快取與 DB，都成功才回應 | 快取永遠有最新值 | 寫入變慢；很多寫入的資料從來沒被讀 |
 | Write-behind（write-back） | 從快取讀 | 只寫快取，背景批次寫回 DB | 寫入極快、可以合併多次寫入 | 快取掛掉時還沒寫回的資料會遺失 |
 
-後端服務最常見的是 cache-aside，下面都以它為主。互動版本見 [Cache-aside 實驗室](#/lab/CacheLab)。
+後端服務最常見的是 cache-aside。互動版本見 [Cache-aside 實驗室](#/lab/CacheLab)。
 
 ### cache-aside 與 TTL
 
@@ -118,11 +92,11 @@ print("資料庫總共被讀了", stats["db_reads"], "次")
 
 TTL 是安全網：就算失效邏輯漏了某條路徑（批次腳本直接改 DB、另一個服務寫入），資料最多舊一個 TTL。TTL 的長度依「這份資料可以容忍多舊」決定，不是依「想要多高的命中率」。
 
-## 快取失效：為什麼是「刪」而不是「更新」
+## 快取失效：寫入後刪快取，不更新快取
 
-回到開頭的時間線。寫入後**更新**快取，兩個寫入交錯時，快取裡留下的是比較晚執行到那一行的值，不一定是比較晚寫進 DB 的值。寫入後**刪除**快取，不管怎麼交錯，最後快取都是空的，下一次讀取會從 DB 拿到最新值。
+開頭的時間線裡，寫入後**更新**快取，兩個寫入交錯時，快取裡留下的是比較晚執行到那一行的值，不一定是比較晚寫進 DB 的值。寫入後**刪除**快取，不管怎麼交錯，最後快取都是空的，下一次讀取會從 DB 拿到最新值。
 
-刪除策略也不是完美的：讀取者 cache miss、從 DB 讀到舊值，在它回寫快取之前，寫入者剛好完成了「寫 DB + 刪快取」，讀取者接著把舊值寫進去。這需要「讀 DB 比寫 DB 加刪快取還慢」，機率低得多，而且 TTL 讓它最多持續一個 TTL。
+刪除也有窗口：讀取者 cache miss、從 DB 讀到舊值，在它回寫快取之前，寫入者剛好完成了「寫 DB + 刪快取」，讀取者接著把舊值寫進去。這需要「讀 DB 比寫 DB 加刪快取還慢」，機率低得多，而且 TTL 讓它最多持續一個 TTL。
 
 ```python run
 # 兩種寫入策略在並行時的差別：每個步驟依指定順序交錯執行
@@ -152,7 +126,33 @@ run([("-", "del_cache", None), ("R", "read_db", None),
 
 要把這個窗口再縮小，常見做法有：寫入後延遲幾百毫秒再刪一次（延遲雙刪），或由資料庫的變更事件（CDC，例如讀 PostgreSQL 的邏輯複寫）驅動刪除。這些都增加複雜度；多數情況下「寫 DB → 刪快取 → TTL 兜底」就夠了。完全不能讀到舊值的資料（餘額、付款狀態），通常就不要快取，見設計情境 [API 快取](#/scenario/cache)。
 
-:::stop 讀到這裡可以先停：會寫 cache-aside，也說得出更新資料時為什麼刪快取而不是改快取。後面的淘汰策略、穿透與雪崩、分散式鎖，在快取量變大或流量尖峰時再回來讀。
+:::stop 讀到這裡可以先停：會寫 cache-aside，也說得出更新資料時為什麼刪快取而不是改快取。後面的 Redis 資料結構在要用計數器、排行榜或集合時回來查；淘汰策略、穿透與雪崩、分散式鎖，在快取量變大或流量尖峰時再讀。
+
+## Redis 的資料結構與用途
+
+Redis 是放在記憶體裡的鍵值資料庫，值不只是字串。指令由單一執行緒依序執行，**每一個指令都是原子的**，這是很多用法的基礎：
+
+| 結構 | 常用指令 | 適合的用途 |
+|---|---|---|
+| string | `GET` `SET` `SET … EX 60 NX` `INCR` `DEL` | 快取一份 JSON、計數器、鎖 |
+| hash | `HSET` `HGET` `HGETALL` `HINCRBY` | 一個物件的多個欄位（session 資料、購物車：商品 → 數量） |
+| list | `LPUSH` `RPOP` `LRANGE` `LTRIM` | 最近 N 筆（`LPUSH` + `LTRIM`）、簡單佇列 |
+| set | `SADD` `SISMEMBER` `SCARD` `SMEMBERS` | 不重複的集合：標籤、某使用者的所有 session id、去重 |
+| sorted set | `ZADD` `ZINCRBY` `ZRANGE … REV WITHSCORES` `ZREMRANGEBYSCORE` | 排行榜、依時間排序的紀錄、滑動視窗限流 |
+
+另外還有 stream（可持久的訊息流，搭配 consumer group）、HyperLogLog（近似不重複計數）、bitmap 等。
+
+```bash
+# redis-cli（需要真的 Redis，不能在瀏覽器執行）
+SET user:42:profile '{"id":42,"name":"Alice"}' EX 60   # 字串 + 60 秒 TTL
+TTL user:42:profile                                     # 剩幾秒；-1 = 沒有 TTL；-2 = key 不存在
+HSET cart:42 sku:A 2 sku:B 1                            # 購物車：hash 的每個欄位是一個商品
+HINCRBY cart:42 sku:A 1
+ZINCRBY leaderboard:2026-10 30 user:42                  # 排行榜加分
+ZRANGE leaderboard:2026-10 0 9 REV WITHSCORES           # 前 10 名（Redis 6.2 起的寫法；舊版用 ZREVRANGE）
+```
+
+key 用冒號分層、帶上實體與 id（`user:42:profile`、`ratelimit:login:ip:203.0.113.7`），才能用 `SCAN 0 MATCH user:*` 批次觀察與清理。正式環境不要用 `KEYS *`：它一次掃過所有 key，執行期間其他指令全部要等。
 
 ## 淘汰策略：記憶體滿了怎麼辦
 

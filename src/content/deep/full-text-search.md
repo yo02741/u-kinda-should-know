@@ -9,21 +9,21 @@ ORDER BY created_at DESC
 LIMIT 20;
 ```
 
-上線時只有幾百篇，查詢不到 1 毫秒。一年後同一句要 800 毫秒，而且使用者開始抱怨結果不對：
+上線時只有幾百篇，查詢不到 1 毫秒。一年後同一句要 800 毫秒，結果也不對：
 
 - 搜 `log`，第一名是〈Catalog of blog posts〉：`catalog` 和 `blog` 都包含 `log` 這三個字母。
 - 搜 `indexes` 找不到只寫了 `index` 的文章；搜 `vacuuming` 找不到寫 `vacuum` 的。
 - 結果只能依時間排，標題就叫〈Choosing an index type〉的文章，跟內文順帶提到一次 index 的文章排在一起。
 
-慢和不準是兩個問題。慢：B-tree 索引依字串的開頭排序，`LIKE 'abc%'`（前綴）可以用，但前面有 `%` 時不知道從哪裡開始找，只能逐列比對，成本跟資料量成正比（原因在 [索引與查詢計畫](#/skill/indexes)）。不準：子字串比對不懂什麼是「一個詞」，也不知道 `indexes` 和 `index` 是同一個詞的不同形態，更沒有「哪篇比較相關」的概念。
+慢：B-tree 索引依字串開頭排序，前面有 `%` 的 `LIKE` 只能逐列比對，成本跟資料量成正比（原因在 [索引與查詢計畫](#/skill/indexes)）。不準：子字串比對不懂「詞」，不知道 `indexes` 和 `index` 是同一個詞，也沒有相關度。
 
-全文檢索（full-text search）一次處理這兩件事：先把文字切成詞並正規化，再對「詞」建索引、算相關度。
+全文檢索（full-text search）先把文字切成詞並正規化，再對「詞」建索引、算相關度。
 
-## 運作原理：tsvector、tsquery 與 @@
+## 運作原理：兩邊都正規化成詞位，再用 @@ 比對
 
 ### 文件端：to_tsvector 把文字變成詞位清單
 
-`to_tsvector(設定, 文字)` 做三件事：用 parser 把文字切成 token、去掉停用詞（the、were 這類沒有檢索價值的詞）、用字典把每個詞還原成**詞位**（lexeme），並記下它在原文的位置。
+`to_tsvector(設定, 文字)` 用 parser 把文字切成 token、去掉停用詞（the、were）、用字典把每個詞還原成**詞位**（lexeme），並記下它在原文的位置。
 
 ```sql run
 -- 同一句話，用 english 與 simple 兩種設定斷詞
@@ -44,11 +44,11 @@ SELECT to_tsquery('english', 'index & vacuum')                                  
 | `english` | `'index':2 'rebuilt':4 'tabl':8 'vacuum':6` | 去掉 the / were / after；indexes → index、vacuuming → vacuum、tables → tabl |
 | `simple` | `'after':5 'indexes':2 'rebuilt':4 'tables':8 'the':1,7 'vacuuming':6 'were':3` | 只轉小寫，不去停用詞、不還原字根 |
 
-詞位不一定是英文單字（`tabl`），它只是比對用的正規化形式。`english` 設定用的是 Snowball stemmer，規則式地砍字尾，所以 `rebuilt` 不會變成 `rebuild`：搜 `rebuilding`（→ `rebuild`）找不到寫 `rebuilt` 的文章。字根還原能處理規則的字形變化，處理不了不規則動詞與同義詞。
+詞位不一定是英文單字（`tabl`），它只是比對用的正規化形式。
 
 ### 查詢端：四種把使用者輸入變成 tsquery 的函式
 
-tsquery 的運算子有 `&`（且）、`|`（或）、`!`（非）、`<->`（緊接著）與 `:*`（前綴）。四個函式差在「誰負責寫這些運算子」：
+tsquery 的運算子有 `&`（且）、`|`（或）、`!`（非）、`<->`（緊接著）與 `:*`（前綴）。四個函式差在誰寫這些運算子：
 
 | 函式 | 輸入 | 適合 |
 |---|---|---|
@@ -66,33 +66,13 @@ q3  'full' <-> 'text' <-> 'search'
 q4  'connect' <-> 'pool' & !'mysql' | 'pgbouncer'
 ```
 
-`to_tsquery` 會解析運算子，使用者輸入 `connection pool`（兩個詞之間沒有運算子）就會報錯 `syntax error in tsquery`。接使用者輸入時用 `websearch_to_tsquery` 或 `plainto_tsquery`，它們不會因為輸入格式而失敗。
+最常見的錯誤是把使用者輸入交給 `to_tsquery`：`connection pool` 兩個詞之間沒有運算子，報錯 `syntax error in tsquery: "connection pool"`。`websearch_to_tsquery` 與 `plainto_tsquery` 不會因為輸入格式失敗。
 
 ### 比對：@@
 
-`tsvector @@ tsquery` 回傳 true / false：文件的詞位是否滿足查詢。整套機制就是「兩邊用同一個設定正規化，再比對詞位」，所以**建索引、存欄位、查詢三處的設定必須一致**。文件用 `english` 斷詞、查詢用 `simple`，`vacuuming` 對 `vacuum` 就配不起來。
+`tsvector @@ tsquery` 回傳文件的詞位是否滿足查詢。**建索引、存欄位、查詢三處的設定必須一致**：文件用 `english` 斷詞、查詢用 `simple`，`vacuuming` 對 `vacuum` 就配不起來。
 
-### GIN 索引：從詞位找文件
-
-GIN（Generalized Inverted Index）是倒排索引：key 是每個詞位，value 是含有這個詞位的列的位置清單。查 `'index' & 'vacuum'` 時，分別取出兩個詞位的清單再取交集，不用掃描任何一篇文章的內容。
-
-| 詞位 | 出現在哪些列 |
-|---|---|
-| `index` | 1, 2, 4 |
-| `vacuum` | 1, 4 |
-| `pool` | 3 |
-
-代價在寫入：一篇文章有幾百個詞位，插入一篇就要更新幾百個 key。GIN 預設用 `fastupdate` 先把新項目放進待處理清單，之後再整批併入主結構，所以寫入不會太慢，但查詢時也要掃這份清單。寫入很頻繁的表要注意這一點。
-
-另一個選項是 GiST 索引，建立與更新比較快，但它是有損的（lossy），查到後還要回表重新檢查，一般的全文檢索查詢比 GIN 慢。多數情況選 GIN。
-
-### 相關度：ts_rank 與權重
-
-`ts_rank(tsvector, tsquery)` 依詞位出現的次數與權重算出分數；`ts_rank_cd` 另外考慮查詢詞在文件裡彼此的距離（cover density）。詞位可以用 `setweight` 標成 A、B、C、D 四級，預設權重是 A = 1.0、B = 0.4、C = 0.2、D = 0.1，標題標 A、內文標 B，標題命中的文章自然排在前面。
-
-分數只對同一個查詢內的排序有意義，不同查詢的分數不能拿來比較，也不是百分比。
-
-## 實際程式：產生欄位 + GIN 索引
+## 最小可用的搜尋：產生欄位 + GIN 索引
 
 ```sql run
 -- tsvector 存成產生欄位（generated column）：寫入時自動算好，查詢與索引都用它
@@ -136,11 +116,39 @@ EXPLAIN SELECT id FROM articles WHERE tsv @@ websearch_to_tsquery('english', 'va
 RESET enable_seqscan;
 ```
 
-第 4 段的計畫裡會看到 `Bitmap Index Scan on articles_tsv_idx`，接著是 `Bitmap Heap Scan` 與 `Recheck Cond`：GIN 索引找出候選列，再回表取資料。
+- GIN 是倒排索引：從詞位查到含有它的列，不用掃文章內容。
+- `setweight` 把標題標成 A（預設權重 1.0）、內文標成 B（0.4），`ts_rank` 依此算分，標題命中的排前面。
+- 第 4 段的計畫裡會看到 `Bitmap Index Scan on articles_tsv_idx`，接著是 `Bitmap Heap Scan` 與 `Recheck Cond`：GIN 索引找出候選列，再回表取資料。
 
-### 不想多一個欄位：表達式索引
+:::stop 讀到這裡可以先停：會用 tsvector 產生欄位、GIN 索引與 `websearch_to_tsquery` 做出依相關度排序的英文搜尋。後面的 GIN 與 ts_rank 細節、表達式索引在調效能時回來讀；內容有中文，或需要錯字容錯與同義詞時，讀中文斷詞與換搜尋引擎兩章。
 
-也可以不存 `tsv` 欄位，直接對表達式建索引：
+## GIN 索引與相關度怎麼算
+
+### GIN 索引：從詞位找文件
+
+GIN（Generalized Inverted Index）是倒排索引：key 是每個詞位，value 是含有這個詞位的列的位置清單。查 `'index' & 'vacuum'` 時，分別取出兩個詞位的清單再取交集，不用掃描任何一篇文章的內容。
+
+| 詞位 | 出現在哪些列 |
+|---|---|
+| `index` | 1, 2, 4 |
+| `vacuum` | 1, 4 |
+| `pool` | 3 |
+
+`english` 設定用 Snowball stemmer 規則式地砍字尾，`rebuilt` 不會變成 `rebuild`：搜 `rebuilding`（→ `rebuild`）找不到寫 `rebuilt` 的文章。不規則動詞與同義詞它處理不了。
+
+代價在寫入：一篇文章有幾百個詞位，插入一篇就要更新幾百個 key。GIN 預設用 `fastupdate` 先把新項目放進待處理清單，之後再整批併入主結構，所以寫入不會太慢，但查詢時也要掃這份清單。
+
+另一個選項是 GiST 索引，建立與更新比較快，但它是有損的（lossy），查到後還要回表重新檢查，一般的全文檢索查詢比 GIN 慢。多數情況選 GIN。
+
+### 相關度：ts_rank 與權重
+
+`ts_rank(tsvector, tsquery)` 依詞位出現的次數與權重算出分數；`ts_rank_cd` 另外考慮查詢詞在文件裡彼此的距離（cover density）。詞位可以用 `setweight` 標成 A、B、C、D 四級，預設權重是 A = 1.0、B = 0.4、C = 0.2、D = 0.1，標題標 A、內文標 B，標題命中的文章自然排在前面。
+
+分數只對同一個查詢內的排序有意義，不同查詢的分數不能拿來比較，也不是百分比。
+
+## 不想多一個欄位：表達式索引
+
+不存 `tsv` 欄位，直接對表達式建索引：
 
 ```sql
 CREATE INDEX articles_body_fts ON articles USING gin (to_tsvector('english', body));
@@ -154,7 +162,7 @@ SELECT id FROM articles WHERE to_tsvector(body) @@ websearch_to_tsquery('vacuum'
 
 表達式索引省空間，但每次排序算 `ts_rank` 都要重新斷詞；產生欄位多佔空間，換來查詢時不用重算，也不怕表達式寫錯。多欄位加權的情況，產生欄位比較好維護。
 
-### 中文：內建設定不會斷詞
+## 中文：內建設定不會斷詞
 
 PostgreSQL 內建的設定沒有中文斷詞。parser 依空白與標點切 token，一整段沒有空白的中文會變成**一個**詞位：
 
@@ -193,9 +201,7 @@ FROM articles WHERE title % 'autovacum' ORDER BY sim DESC;
 - 中文詞常常只有兩個字。`LIKE '%檢索%'` 抽不出任何三個字元的片段時，trigram 索引幫不上忙，會退化成掃描整個索引。
 - `pg_trgm` 只從「字母與數字」組成的字裡抽三元組，中文字元算不算由資料庫的 locale（`LC_CTYPE`）決定，不同環境的結果可能不同。
 
-:::stop 讀到這裡可以先停：會用 tsvector、GIN 索引與 `websearch_to_tsquery` 做出能排序的搜尋，也知道內建設定不切中文。後面何時換搜尋引擎，在需要錯字容錯、同義詞或大量中文內容時再回來讀。
-
-### 什麼時候該換搜尋引擎
+## 什麼時候該換搜尋引擎
 
 PostgreSQL 全文檢索的優點是零同步：文章 commit 的同時就搜得到，篩選條件、權限檢查、分頁都在同一句 SQL 裡。需要以下功能時，Elasticsearch / OpenSearch 這類搜尋引擎比較省力：
 

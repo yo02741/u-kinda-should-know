@@ -1,4 +1,4 @@
-## 從一個具體問題開始：一個慢請求拖垮了所有請求
+## 具體問題：一個慢請求拖垮了所有請求
 
 一個 FastAPI 服務，handler 全都寫成 `async def`。平常 p50 延遲 20 ms。某天加了一支「匯出報表」的 API：
 
@@ -11,11 +11,9 @@ async def report():
 
 報表服務回應要 3 秒。上線後，**所有** API（包括健康檢查）都開始間歇性地慢 3 秒，健康檢查逾時，負載平衡器把這台機器標成不健康。CPU 使用率卻很低。
 
-原因是 `async def` 跑在 event loop 上，而一個 event loop 只有一個執行緒。`requests.get` 是同步呼叫，它在等網路回應的 3 秒裡**沒有把控制權交回 event loop**，這段時間同一個 worker 上的其他請求一個都動不了。CPU 很閒，因為它在等；但 event loop 被佔住了。
+原因是 `async def` 跑在 event loop 上，而一個 event loop 只有一個執行緒。`requests.get` 是同步呼叫，它在等網路回應的 3 秒裡**沒有把控制權交回 event loop**，這段時間同一個 worker 上的其他請求一個都動不了。
 
-這篇從「等 I/O 的時候 CPU 在做什麼」開始，說明 async 怎麼運作、為什麼一個阻塞呼叫能卡住全部、以及什麼時候 async 根本幫不上忙。
-
-## 三種處理多個請求的方式
+## 三種處理多個請求的方式：誰決定什麼時候切換
 
 假設每個請求都要等資料庫 100 ms、自己運算 5 ms。來了 3 個請求：
 
@@ -50,12 +48,6 @@ async（一個執行緒，await 時切換）
 | 共享資料 | 需要鎖，否則可能在任何地方被打斷 | 兩個 `await` 之間的程式不會被打斷，但跨 `await` 仍然可能交錯 |
 | 弱點 | 執行緒多了切換與記憶體成本高 | **任何不 await 的長時間工作都會卡住全部** |
 
-### GIL 與 CPU 密集工作
-
-預設的 CPython 有 GIL（全域直譯器鎖）：同一時間只有一個執行緒在執行 Python bytecode。執行緒在等 I/O（socket、檔案、`time.sleep`）時會釋放 GIL，所以多執行緒對 I/O 密集的工作有效；但兩個執行緒都在算 Python 迴圈時，它們只能輪流拿 GIL，總時間和單執行緒差不多。
-
-async 對 CPU 密集工作也沒有幫助，而且更糟：運算中沒有 `await`，event loop 完全停住。CPU 密集的工作要放到**別的行程**（`ProcessPoolExecutor`、背景工作佇列），讓它在另一顆 CPU 上跑。Python 3.13 起有不帶 GIL 的 free-threaded 版本（3.14 起不再標為實驗性），但它不是預設版本，C 擴充套件也需要個別支援；目前寫後端仍以「有 GIL」為前提比較穩當。行程、執行緒、GIL 的底層見 [程式怎麼跑起來](#/skill/how-programs-run)。
-
 ## event loop 怎麼運作
 
 event loop 是一個不斷重複的迴圈，手上有兩份名單：「現在可以執行的任務」和「在等某件事的任務」。
@@ -73,13 +65,9 @@ event loop 是一個不斷重複的迴圈，手上有兩份名單：「現在可
 - `asyncio.create_task(coro)` 把協程交給 loop 排程，**現在就開始跑**（在下一次讓出時），回傳一個 Task。
 - `asyncio.gather(a, b, c)` 同時排程多個協程，等全部完成，依傳入順序回傳結果。
 
-所以「async 比較快」是誤解：單一個請求不會因為 async 而變快。async 讓**同一個執行緒能同時等很多件事**，提高的是並行數量，前提是每件事大部分時間都在等 I/O、而且等待的地方都有 `await`。
-
-## 實際程式
+## 最小範例：一起等，與一個阻塞呼叫卡住整個 loop
 
 以下範例在瀏覽器裡的 Pyodide 執行，可以直接 `await`（頂層 await）；在本機的 CPython 要把最外層包成 `async def main()` 再用 `asyncio.run(main())`。用 `asyncio.sleep` 模擬 I/O 等待。
-
-### 一個接一個 vs 一起等
 
 ```python run
 import asyncio
@@ -111,8 +99,6 @@ t0 = time.perf_counter()
 await asyncio.gather(*(limited(i) for i in range(6)))
 print(f"Semaphore(2) 跑 6 個：{time.perf_counter() - t0:.2f} 秒")  # 約 0.6 秒
 ```
-
-### 一個阻塞呼叫卡住整個 loop
 
 ```python run
 import asyncio
@@ -156,7 +142,25 @@ await run(bad_handler)
 
 `bad_handler` 那一行的心跳會出現一個約 400 ms 以上的間隔：在實際的服務裡，這 400 ms 內同一個 worker 上所有請求、健康檢查都停住。
 
-### CPU 密集工作：async 沒有幫助
+開頭那個事故的兩種修法：把 handler 改成 `def`（FastAPI 交給執行緒池），或是改用 async 的 HTTP client。
+
+### 最常見的錯誤：忘了 `await`
+
+**`RuntimeWarning: coroutine 'fetch' was never awaited`**：呼叫了 `fetch()` 卻沒 `await`，協程根本沒執行。補上 `await`，或用 `create_task` 排程。
+
+:::stop 讀到這裡可以先停：會用 `gather` 把等待疊在一起，找出卡住 event loop 的阻塞呼叫。後面的 GIL 與 CPU 密集工作、逾時與取消、`to_thread`、FastAPI 的 `def`／`async def`、loop 被阻塞的查法，在要同時呼叫好幾個外部服務或服務莫名變慢時再回來讀。
+
+## async 提高的是並行數量，不是單一請求的速度
+
+「async 比較快」是誤解：單一個請求不會因為 async 而變快。async 讓**同一個執行緒能同時等很多件事**，提高的是並行數量，前提是每件事大部分時間都在等 I/O、而且等待的地方都有 `await`。
+
+## GIL 與 CPU 密集工作
+
+預設的 CPython 有 GIL（全域直譯器鎖）：同一時間只有一個執行緒在執行 Python bytecode。執行緒在等 I/O（socket、檔案、`time.sleep`）時會釋放 GIL，所以多執行緒對 I/O 密集的工作有效；但兩個執行緒都在算 Python 迴圈時，它們只能輪流拿 GIL，總時間和單執行緒差不多。
+
+async 對 CPU 密集工作也沒有幫助，而且更糟：運算中沒有 `await`，event loop 完全停住。CPU 密集的工作要放到**別的行程**（`ProcessPoolExecutor`、背景工作佇列），讓它在另一顆 CPU 上跑。Python 3.13 起有不帶 GIL 的 free-threaded 版本（3.14 起不再標為實驗性），但它不是預設版本，C 擴充套件也需要個別支援；目前寫後端仍以「有 GIL」為前提比較穩當。行程、執行緒、GIL 的底層見 [程式怎麼跑起來](#/skill/how-programs-run)。
+
+## 動手跑：CPU 密集工作，async 沒有幫助
 
 ```python run
 import asyncio
@@ -191,9 +195,7 @@ print(f"依序 4 個：{seq:.3f} 秒；gather 4 個：{gathered:.3f} 秒")
 # 對照第一段的 I/O：gather 5 個只花 1 個的時間。CPU 密集要交給別的行程。
 ```
 
-:::stop 讀到這裡可以先停：會分辨 I/O 與 CPU 密集的工作、找出卡住 event loop 的阻塞呼叫。後面的逾時、取消與 FastAPI 的 `def`／`async def`，在要同時呼叫好幾個外部服務時再回來讀。
-
-### 逾時、錯誤與取消
+## 逾時、錯誤與取消
 
 ```python run
 import asyncio
@@ -231,7 +233,7 @@ except* ConnectionError as eg:
     print("TaskGroup：", [str(e) for e in eg.exceptions], "，long 已被取消")
 ```
 
-### 不能在瀏覽器跑的部分：把同步呼叫丟到執行緒
+## 把同步呼叫丟到執行緒或行程（本機執行）
 
 本站的 Python 跑在 Pyodide，不能建立執行緒，下面這段要在本機的 CPython 執行。
 
@@ -240,15 +242,12 @@ import asyncio
 import time
 from concurrent.futures import ProcessPoolExecutor
 
-
 def legacy_sync_call(order_id: int) -> dict:
     time.sleep(1)                       # 同步 I/O：舊 SDK、同步 driver
     return {"id": order_id}
 
-
 def heavy_cpu(n: int) -> int:
     return sum(i * i for i in range(n))
-
 
 async def handler(order_id: int) -> dict:
     # I/O 型的同步呼叫：丟到預設的執行緒池，等的時候 loop 可以跑別人（3.9+）
@@ -263,7 +262,7 @@ async def handler(order_id: int) -> dict:
 
 `to_thread` 適合「沒有 async 版本的 I/O 函式庫」。能換成原生 async 的 client 更好：HTTP 用 `httpx.AsyncClient`、PostgreSQL 用 `asyncpg` 或 psycopg 3 的 async 介面。
 
-### FastAPI 裡的 `def` 與 `async def`
+## FastAPI 裡的 `def` 與 `async def`
 
 ```python
 @app.get("/a")
@@ -277,13 +276,12 @@ async def async_handler():   # 直接跑在 event loop 上：裡面只能用 awa
     return r.json()
 ```
 
-開頭那個事故的兩種修法：把 handler 改成 `def`（交給執行緒池），或是改用 async 的 HTTP client。最糟的組合是 `async def` 裡呼叫同步 I/O。執行緒池有上限（FastAPI 底層的 AnyIO 預設 40 個執行緒），同步 handler 很多又很慢時，請求會在池子前面排隊。
+最糟的組合是 `async def` 裡呼叫同步 I/O。執行緒池有上限（FastAPI 底層的 AnyIO 預設 40 個執行緒），同步 handler 很多又很慢時，請求會在池子前面排隊。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤、loop 被阻塞與共享狀態
 
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| `RuntimeWarning: coroutine 'fetch' was never awaited` | 呼叫了 `fetch()` 卻沒 `await`，協程根本沒執行 | 補上 `await`，或用 `create_task` 排程 |
 | `RuntimeError: asyncio.run() cannot be called from a running event loop` | 在已經有 loop 的地方（async 函式內、Jupyter、Pyodide）又呼叫 `asyncio.run` | 已經在 async 裡就直接 `await` |
 | `TypeError: object dict can't be used in 'await' expression`（3.14 改為 `'dict' object can't be awaited`） | `await` 了一個不是 awaitable 的值，常見於把同步函式當成 async 呼叫 | 確認被呼叫的函式是 `async def`，或拿掉 `await` |
 | `Task exception was never retrieved` | `create_task` 建的任務丟了例外，但沒有人 await 它 | 保存 Task 並在之後 await，或用 TaskGroup |

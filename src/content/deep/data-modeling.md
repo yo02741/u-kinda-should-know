@@ -1,4 +1,4 @@
-## 從一個具體問題開始：一張什麼都裝的訂單表
+## 具體問題：一張什麼都裝的訂單表
 
 一個小商店一開始用一張表記錄所有訂單，欄位照著試算表抄：
 
@@ -13,43 +13,19 @@
 - Alice 改了 email，客服只更新了最新那一筆。現在 Alice 有兩個 email，寄出貨通知要用哪個沒人知道（**更新異常**）。
 - 想先上架一個新商品「螢幕」，但這張表一列就是一張訂單，沒有訂單就沒地方放商品（**新增異常**）。
 - Carol 唯一的訂單被刪了，她的姓名、email、城市跟著消失（**刪除異常**）。
-- 要找「誰買過鍵盤」，只能寫 `products LIKE '%鍵盤%'`，連「鍵盤膜」也會被找到；「每個商品賣了幾件」根本算不出來。
+- 要找「誰買過鍵盤」，只能寫 `products LIKE '%鍵盤%'`，連「鍵盤膜」也會被找到；「每個商品賣了幾件」算不出來。
 
-這些問題的共同原因是：**同一件事實存了很多份，或是好幾件事實擠在同一格**。正規化把它們拆開，讓每件事實只存在一個地方。
+共同原因：**同一件事實存了很多份，或是好幾件事實擠在同一格**。正規化把它們拆開，讓每件事實只存在一個地方。
 
-## 正規化：一步一步拆
+## 正規化：三步，每一步只問一個問題
 
-正規形式（1NF、2NF、3NF）的正式定義是用「函數相依」寫的，這裡直接用上面那張表一步步拆，每一步只問一個問題。
+| 步驟 | 問的問題 | 這張表哪裡不符合 | 拆法 |
+|---|---|---|---|
+| 1NF | 一格只放一個值嗎 | `products` 放了「滑鼠,鍵盤」，資料庫看不懂逗號，沒辦法 JOIN、加總、建外鍵 | 一個品項一列：`(order_id, product, qty)` |
+| 2NF | 每個欄位都依賴**整個**主鍵嗎 | 品項表的主鍵是 `(order_id, product_id)`，`product_name` 只由 `product_id` 決定 | 商品名稱搬到 `products`，訂單資訊搬到 `orders` |
+| 3NF | 有欄位透過別的欄位間接依賴主鍵嗎 | `orders` 裡的 `customer_email` 由 `user_id` 決定，與訂單無關（id → user_id → email） | `orders` 只留 `user_id`，email、城市回到 `users` |
 
-### 第一步（1NF）：一格只放一個值
-
-`products` 欄位放了「滑鼠,鍵盤」，一格裡有兩個值。資料庫看不懂逗號，所以沒辦法對它 JOIN、加總、建外鍵。拆法是**一個品項一列**：
-
-| order_id | product | qty |
-|---|---|---|
-| 106 | 滑鼠 | 1 |
-| 106 | 鍵盤 | 1 |
-
-同樣不符合 1NF 的還有「重複欄位」：`phone1`、`phone2`、`phone3`。第四支電話要加欄位、查「這支電話是誰的」要查三個欄位。改成一張 `user_phones(user_id, phone)`。
-
-> PostgreSQL 有陣列與 JSONB 型別，一格放多個值在技術上可行。判斷標準是：需不需要對裡面的元素做 JOIN、加約束、單獨更新。需要的話就該拆成表；只是整包存取（例如一份設定、一組標籤只拿來顯示）才適合放陣列或 JSONB。
-
-### 第二步（2NF）：每個欄位都要依賴「整個」主鍵
-
-拆完之後，品項表的主鍵是 `(order_id, product_id)`。如果這張表還放了 `product_name`、`customer_email`：
-
-- `product_name` 只由 `product_id` 決定，跟 `order_id` 無關。
-- `customer_email` 只由 `order_id`（進而由客戶）決定，跟 `product_id` 無關。
-
-只依賴主鍵一部分的欄位，每出現一次就重複一次。「鍵盤」這個名字在每張買了鍵盤的訂單裡都存一遍，改名時就要改很多列。把它們搬到各自的表：商品名稱放 `products`，訂單資訊放 `orders`。
-
-### 第三步（3NF）：欄位不能透過別的欄位間接依賴主鍵
-
-`orders(id, user_id, customer_email, customer_city, …)`：`customer_email` 由 `user_id` 決定，與訂單無關（id → user_id → email）。這叫**遞移相依**，結果是開頭的更新異常：同一位使用者的 email 分散在他每一張訂單上。
-
-拆法：`orders` 只留 `user_id`，email、城市回到 `users`。需要時 JOIN。
-
-拆完就是範例資料庫的樣子：
+拆完是範例資料庫的樣子：
 
 ```text
 users(id PK, name, email UNIQUE, city, created_at)
@@ -69,6 +45,8 @@ order_items(order_id → orders.id, product_id → products.id, qty)   PK = (ord
 
 每件事實只有一個家：email 在 users、商品名稱與目前售價在 products、這張訂單買了什麼在 order_items。
 
+## 最小範例：用 JOIN 組回大表，用中介表建多對多
+
 ```sql run
 -- 原本的「大表」可以隨時用 JOIN 組回來，不需要真的存成那樣
 SELECT o.id AS order_id, u.name AS customer_name, u.email AS customer_email, u.city AS customer_city,
@@ -86,17 +64,11 @@ UPDATE users SET email = 'alice.new@example.com' WHERE id = 1;
 SELECT o.id, u.email FROM orders o JOIN users u ON u.id = o.user_id WHERE u.id = 1;
 ```
 
-## 關係的三種形狀
-
 | 關係 | 例子 | 怎麼建 |
 |---|---|---|
 | 一對多 | 一位使用者有多張訂單 | 外鍵放在「多」的那一邊：`orders.user_id REFERENCES users(id)` |
 | 多對多 | 一張訂單有多個商品，一個商品出現在多張訂單 | 中介表 `order_items(order_id, product_id)`，複合主鍵防止同一對出現兩次 |
 | 一對一 | 一位使用者最多一份詳細資料 | 子表的主鍵同時是外鍵：`user_profiles(user_id PRIMARY KEY REFERENCES users(id))` |
-
-多對多的中介表常常不只是「連線」，它本身就是一件事實，會有自己的欄位：`order_items` 的 `qty`、`user_roles` 的 `granted_at` 與 `granted_by`。
-
-一對一拆表要有理由（欄位很大、很少用到、權限不同），否則放同一張表比較簡單。
 
 ```sql run
 -- 多對多：商品與標籤
@@ -123,7 +95,35 @@ WHERE t.name = '電競'
 ORDER BY p.id;
 ```
 
-:::stop 讀到這裡可以先停：會把一張大表拆到 3NF，也分得出一對多與多對多該怎麼建表。後面的主鍵、外鍵 ON DELETE、約束與反正規化，在要寫 DDL 時再回來讀。
+## 最常見的兩個錯誤訊息
+
+| 錯誤訊息（PostgreSQL） | SQLSTATE | 原因 | 怎麼處理 |
+|---|---|---|---|
+| `insert or update on table "orders" violates foreign key constraint "orders_user_id_fkey"` | `23503` | 寫入的外鍵值不存在；DETAIL 會寫 `Key (user_id)=(9) is not present in table "users".` | 確認參照的列先建立；加外鍵前先清理孤兒資料 |
+| `duplicate key value violates unique constraint "users_email_key"` | `23505` | 違反 UNIQUE；DETAIL 寫出重複的值 | 回傳「已存在」，或用 `INSERT … ON CONFLICT` |
+
+:::stop 讀到這裡可以先停：會把一張大表拆到 3NF，分得出一對多、多對多、一對一該怎麼建表。後面是三個正規形式的細節、主鍵怎麼選、外鍵的 ON DELETE、用約束表達業務規則與反正規化，在要寫 DDL、決定刪除行為或為了效能多存一份時再回來讀。
+
+## 三個正規形式的細節
+
+正規形式的正式定義是用「函數相依」寫的，下面用開頭那張表說明。
+
+**1NF 的另一種違反：重複欄位。**`phone1`、`phone2`、`phone3`：第四支電話要加欄位、查「這支電話是誰的」要查三個欄位。改成一張 `user_phones(user_id, phone)`。
+
+> PostgreSQL 有陣列與 JSONB 型別，一格放多個值在技術上可行。判斷標準是：需不需要對裡面的元素做 JOIN、加約束、單獨更新。需要的話就該拆成表；只是整包存取（例如一份設定、一組標籤只拿來顯示）才適合放陣列或 JSONB。
+
+**2NF：只依賴主鍵一部分的欄位，每出現一次就重複一次。**品項表如果還放了 `product_name`、`customer_email`：
+
+- `product_name` 只由 `product_id` 決定，跟 `order_id` 無關。「鍵盤」這個名字在每張買了鍵盤的訂單裡都存一遍，改名時要改很多列。
+- `customer_email` 只由 `order_id`（進而由客戶）決定，跟 `product_id` 無關。
+
+**3NF：遞移相依。**`orders(id, user_id, customer_email, customer_city, …)` 的結果是開頭的更新異常：同一位使用者的 email 分散在他每一張訂單上。拆開之後需要時 JOIN。
+
+## 多對多與一對一的補充
+
+多對多的中介表常常不只是「連線」，它本身就是一件事實，會有自己的欄位：`order_items` 的 `qty`、`user_roles` 的 `granted_at` 與 `granted_by`。
+
+一對一拆表要有理由（欄位很大、很少用到、權限不同），否則放同一張表比較簡單。
 
 ## 主鍵怎麼選
 
@@ -246,16 +246,18 @@ SELECT * FROM (VALUES
 
 約束取名（`orders_shipped_needs_time`）有實際用處：違反時錯誤訊息會帶這個名字，應用程式可以依名字轉成對使用者的訊息，看 log 的人也一眼知道是哪條規則。
 
-約束表達不了的規則也要知道：
+約束表達不了的規則：
 
-- **跨列、跨表的彙總**：「訂單 amount 必須等於品項小計加總」、「一個人最多 3 張未付款訂單」。CHECK 只看得到同一列。可以用 trigger、在交易裡由應用程式檢查並鎖住相關列，或定期對帳找出不一致。
-- **時間區間不重疊**（同一間會議室的預約）：PostgreSQL 有 exclusion constraint（`EXCLUDE USING gist`），但「同一間會議室」這種純量欄位的相等比較需要 `btree_gist` 擴充；本站的 PGlite 沒有附這個擴充，所以這裡不示範。
+| 規則 | 為什麼不行 | 替代做法 |
+|---|---|---|
+| 跨列、跨表的彙總：「訂單 amount 必須等於品項小計加總」、「一個人最多 3 張未付款訂單」 | CHECK 只看得到同一列 | trigger、在交易裡由應用程式檢查並鎖住相關列，或定期對帳找出不一致 |
+| 時間區間不重疊（同一間會議室的預約） | PostgreSQL 有 exclusion constraint（`EXCLUDE USING gist`），但「同一間會議室」這種純量欄位的相等比較需要 `btree_gist` 擴充 | 本站的 PGlite 沒有附這個擴充，所以這裡不示範 |
 
 ## 何時刻意反正規化
 
 正規化讓寫入正確，但讀取時要 JOIN。有些情況會刻意多存一份，前提是**知道哪一份是真相、誰負責同步**。
 
-**快照不是反正規化。**範例的 `products.price` 是「目前售價」，但訂單成立時的價格是另一件事實：商品之後漲價，舊訂單的金額不能跟著變。所以 `order_items` 應該存 `unit_price`（成交價），`order_items` 也常存一份 `product_name`（商品之後改名，發票上的品名不能變）。它們看起來跟 products 重複，記錄的卻是不同時間點的值。
+**快照不是反正規化。**範例的 `products.price` 是「目前售價」，但訂單成立時的價格是另一件事實：商品之後漲價，舊訂單的金額不能跟著變。所以 `order_items` 應該存 `unit_price`（成交價），也常存一份 `product_name`（商品之後改名，發票上的品名不能變）。它們看起來跟 products 重複，記錄的卻是不同時間點的值。
 
 ```sql run
 -- 範例的 order_items 沒有成交價，只能拿「目前售價」去推算訂單金額
@@ -279,7 +281,7 @@ GROUP BY o.id ORDER BY o.id;
 ALTER TABLE order_items ADD COLUMN unit_price NUMERIC(10,2);
 ```
 
-**真正的反正規化**是存一份可以從別處算出來的值：
+**反正規化**是存一份可以從別處算出來的值：
 
 | 做法 | 例子 | 代價 |
 |---|---|---|
@@ -289,19 +291,17 @@ ALTER TABLE order_items ADD COLUMN unit_price NUMERIC(10,2);
 
 判斷順序：先正規化 → 加索引、改寫查詢 → 量測後仍然不夠快，才反正規化。反正規化的欄位要寫清楚來源，最好有一個對帳查詢（像上面那段）能定期找出不一致。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 錯誤訊息（PostgreSQL） | SQLSTATE | 原因 | 怎麼處理 |
 |---|---|---|---|
-| `insert or update on table "orders" violates foreign key constraint "orders_user_id_fkey"` | `23503` | 寫入的外鍵值不存在；DETAIL 會寫 `Key (user_id)=(9) is not present in table "users".` | 確認參照的列先建立；加外鍵前先清理孤兒資料 |
 | `update or delete on table "products" violates foreign key constraint "order_items_product_id_fkey" on table "order_items"` | `23503` | 刪除還被參照的列（NO ACTION） | 決定業務上該怎麼辦：禁止、連帶刪除、改成軟刪除 |
-| `duplicate key value violates unique constraint "users_email_key"` | `23505` | 違反 UNIQUE；DETAIL 寫出重複的值 | 回傳「已存在」，或用 `INSERT … ON CONFLICT` |
 | `null value in column "name" of relation "users" violates not-null constraint` | `23502` | 必填欄位沒給值 | 應用程式補值，或檢查是否該有 DEFAULT |
 | `new row for relation "products" violates check constraint "products_price_check"` | `23514` | 違反 CHECK；沒取名時名稱是自動產生的 `表_欄位_check` | 替約束取有意義的名字，應用程式依名字對應訊息 |
 | `cannot insert a non-DEFAULT value into column "id"` | `428C9` | 對 `GENERATED ALWAYS` 的欄位手動給值 | 不要給 id；匯入資料時才用 `OVERRIDING SYSTEM VALUE` |
 | `cannot drop table products because other objects depend on it` | `2BP01` | 有外鍵指向這張表 | HINT 建議 `DROP … CASCADE`，但它會把相依的外鍵約束一起刪掉，先確認 |
 
-SQLSTATE 的前兩碼 `23` 都是「完整性約束違反」。應用程式可以據此把這類錯誤轉成 4xx（使用者送的資料有問題），而不是 500。
+SQLSTATE 的前兩碼 `23` 都是「完整性約束違反」。應用程式可以據此把這類錯誤轉成 4xx（使用者送的資料有問題），不回 500。
 
 ## 動手
 

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：`kubectl get pods` 一排紅字
+## `kubectl get pods` 一排紅字
 
 週一早上部署完新版，`kubectl get pods -n booking` 的輸出類似這樣：
 
@@ -15,13 +15,11 @@ export-api-84f9d6c5b7-m4n1z       1/1     Running            0             1h
 
 六個 Pod、六種狀況：一個正常、一個啟動就掛、一個拉不到映像、一個排不上節點、一個看起來正常但重啟了 12 次。最後那個 `export-api` 狀態全綠，但使用者說連不到。
 
-常見的錯誤處理方式是看到紅字就 `kubectl delete pod`，或把 Deployment 刪掉重建。Pod 是 Deployment 依範本建出來的，範本沒改，重建出來的 Pod 會停在一模一樣的狀態，而且前一次的 log 與事件跟著消失。
+看到紅字就 `kubectl delete pod` 或把 Deployment 刪掉重建沒有用：Pod 是 Deployment 依範本建出來的，範本沒改，重建出來的 Pod 會停在一樣的狀態，前一次的 log 與事件也跟著消失。
 
-這一課是一張查表：每一種狀態代表什麼、下一個指令是什麼。各種狀態的成因（探針、requests、selector）在 [Kubernetes 實作：把服務寫成 manifest](#/skill/k8s-manifests) 與 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
+## 固定的排查順序：get、describe、logs、events
 
-## 固定的排查順序
-
-不管是哪一種狀態，都照同一個順序往下查，每一步回答一個問題：
+不管是哪一種狀態，都照同一個順序往下查：
 
 | 步驟 | 指令 | 回答的問題 |
 |---|---|---|
@@ -30,19 +28,35 @@ export-api-84f9d6c5b7-m4n1z       1/1     Running            0             1h
 | 3 | `kubectl logs <pod> -n <ns>`（必要時加 `--previous`） | 程式自己說了什麼？ |
 | 4 | `kubectl get events -n <ns> --sort-by=.lastTimestamp` | 這個 namespace 最近還發生了什麼？（Pod 已經不在時也查得到） |
 
-Events 是 Kubernetes 的視角（排程、拉映像、探針、重啟），logs 是應用程式的視角（stdout 與 stderr）。容器根本沒啟動過（Pending、ImagePullBackOff）時不會有 log，只能看 Events；程式啟動後自己掛掉時，Events 只會說「它結束了」，原因在 log 裡。
+Events 是 Kubernetes 的視角（排程、拉映像、探針、重啟），logs 是應用程式的視角（stdout 與 stderr）。容器沒啟動過（Pending、ImagePullBackOff）時沒有 log，只能看 Events；程式啟動後自己掛掉時，Events 只說「它結束了」，原因在 log 裡。
 
-三個欄位要一起看：
+兩個欄位要和 STATUS 一起看：
 
-- **STATUS** 不是單一欄位，是 kubectl 從 Pod 的階段與容器狀態整理出來的摘要。`CrashLoopBackOff`、`ImagePullBackOff` 是容器「正在等待」的原因，不是 Pod 的階段。
 - **READY** 是「ready 的容器數 / 容器總數」。`Running` 但 `0/1` 表示容器在跑、但 readiness 沒通過，Service 不會送流量給它。
-- **RESTARTS** 不是 0 就值得查，即使現在是 `Running`。上面的 `notify-api` 兩小時重啟 12 次，每次重啟都有進行中的請求被切斷。
+- **RESTARTS** 不是 0 就值得查，即使現在是 `Running`。`notify-api` 兩小時重啟 12 次，每次重啟都有進行中的請求被切斷。
 
-Events 預設只保留一小時左右。事故發生後要盡快看，或靠叢集的監控與 log 收集保留下來（見 [可觀測性：log、metrics、trace](#/skill/observability)）。
+## 每一種狀態先看哪裡
 
-## 每一種狀態：原因與下一步
+| 狀態 | 意思 | 先看 |
+|---|---|---|
+| `Pending` | 排程器找不到可以放它的節點 | `describe pod` 的 Events：`FailedScheduling` 列出每類節點被排除的原因 |
+| `ErrImagePull`、`ImagePullBackOff` | 拉不到映像 | Events 的 `Failed`：registry 回的錯誤 |
+| `CreateContainerConfigError` | `env` 參照的 ConfigMap 或 Secret 不存在 | Events（沒有 log） |
+| `CrashLoopBackOff` | 容器啟動後程序結束，正在等下一次重啟 | `logs --previous` 與 `Last State` 的 Exit Code |
+| `Reason: OOMKilled`、Exit Code 137 | 記憶體超過 limits，程式來不及寫 log | `describe pod` 的 `Last State` |
+| `Running` 但 `READY 0/1` | readiness 沒通過 | Events 的 `Readiness probe failed` |
+| `Running`、`1/1` 但連不到 | Service 的 selector、`targetPort` 或 NetworkPolicy | `kubectl get endpointslices` 看 Service 後面有沒有 Pod |
 
-### Pending：排不上節點
+`CrashLoopBackOff` 時 `kubectl logs <pod>` 看到的是**剛啟動的這一次**，常常是空的，要加 `--previous` 看上一次：
+
+```bash
+kubectl logs booking-api-7c5d9f8b66-h2m8q -n booking --previous
+kubectl describe pod booking-api-7c5d9f8b66-h2m8q -n booking
+```
+
+:::stop 讀到這裡可以先停：會照 get、describe、logs、events 的順序，從 Pod 的狀態找到下一個指令。後面每一種狀態各有一章，列出訊息關鍵字、原因與下一步，遇到那個狀態時回來查；模擬程式與 exec、port-forward、debug，在線索不夠、要進到容器裡查時再讀。
+
+## Pending：排不上節點
 
 Pod 已建立，但排程器找不到可以放它的節點。Events 的 `FailedScheduling` 訊息會列出每一類節點被排除的原因，類似：
 
@@ -59,7 +73,7 @@ Warning  FailedScheduling  default-scheduler  0/3 nodes are available: 1 node(s)
 
 Deployment 的副本數不足、卻連一個 Pending 的 Pod 都看不到時，檢查是不是 namespace 的 ResourceQuota 用完了：那種情況 Pod 根本建不出來，錯誤出現在 ReplicaSet 的 Events（`kubectl describe replicaset`）。
 
-### ImagePullBackOff 與 ErrImagePull：拉不到映像
+## ImagePullBackOff 與 ErrImagePull：拉不到映像
 
 `ErrImagePull` 是剛失敗，`ImagePullBackOff` 是失敗後正在等待重試（間隔會越來越長）。兩者是同一件事。Events 的 `Failed` 訊息會帶 registry 回的錯誤：
 
@@ -72,16 +86,11 @@ Deployment 的副本數不足、卻連一個 Pending 的 Pod 都看不到時，�
 
 拉映像的是節點上的容器執行環境，不是 Pod，所以「我的電腦 `docker pull` 得到」不能證明節點也拉得到。
 
-### CrashLoopBackOff：啟動後一直結束
+## CrashLoopBackOff：啟動後一直結束
+
+STATUS 是 kubectl 從 Pod 的階段與容器狀態整理出來的摘要。`CrashLoopBackOff`、`ImagePullBackOff` 是容器「正在等待」的原因，不是 Pod 的階段。
 
 容器啟動了，但程序結束了；kubelet 重啟它，它又結束。每次重啟前的等待時間會加倍（從 10 秒開始，上限 5 分鐘），`CrashLoopBackOff` 就是「正在等下一次重啟」。
-
-這時候 `kubectl logs <pod>` 看到的是**剛啟動的這一次**，常常是空的。要看的是上一次：
-
-```bash
-kubectl logs booking-api-7c5d9f8b66-h2m8q -n booking --previous
-kubectl describe pod booking-api-7c5d9f8b66-h2m8q -n booking
-```
 
 `describe` 裡容器的 `Last State` 類似：
 
@@ -101,14 +110,14 @@ kubectl describe pod booking-api-7c5d9f8b66-h2m8q -n booking
 | Exit Code 1（或其他非零值），啟動後幾秒就結束 | 程式啟動時丟出例外：必要的環境變數沒給、連不上資料庫、migration 沒跑 | `logs --previous` 的最後幾行通常就是原因 |
 | Exit Code 127 或 126；或 `Reason: StartError`、訊息有 `executable file not found` | 啟動指令找不到，或沒有執行權限 | 檢查映像的 `ENTRYPOINT`、`CMD` 與 manifest 的 `command`、`args` |
 | Exit Code 0，卻一直重啟 | 程式做完事就正常結束了；Deployment 預期的是不會結束的服務 | 一次性的工作改用 Job 或 CronJob |
-| `Reason: OOMKilled`、Exit Code 137 | 記憶體超過 limits（見下一小節） | 不要只看 CrashLoopBackOff 就當成程式錯誤 |
+| `Reason: OOMKilled`、Exit Code 137 | 記憶體超過 limits（見 OOMKilled 那一章） | 不要只看 CrashLoopBackOff 就當成程式錯誤 |
 | Events 有 `Liveness probe failed`，接著 `will be restarted` | 是 kubelet 把它殺掉的：liveness 在啟動完成前就判定失敗，或 liveness 檢查了外部依賴 | 加 `startupProbe`；liveness 只檢查程序本身 |
 
 結束碼大於 128 時，減掉 128 是訊號的編號：137 是 SIGKILL（9），143 是 SIGTERM（15）。
 
 與設定有關、但還沒到啟動那一步的是 `CreateContainerConfigError`：`env` 參照的 ConfigMap 或 Secret 不存在。這時沒有 log，原因在 Events。
 
-### OOMKilled：記憶體超過 limits
+## OOMKilled：記憶體超過 limits
 
 容器的記憶體用量超過 `limits.memory`，被核心直接殺掉，`Last State` 的 `Reason` 是 `OOMKilled`、Exit Code 是 137。程式沒有機會寫 log，所以 **log 裡找不到原因**是這種狀況的特徵。
 
@@ -121,7 +130,7 @@ kubectl describe pod booking-api-7c5d9f8b66-h2m8q -n booking
 
 另一種相關的狀態是 `Evicted`：不是容器超過自己的 limits，而是**節點**的記憶體或磁碟不足，kubelet 把 Pod 趕走。原因寫在 `describe pod` 的 Message。
 
-### Running，但 Service 連不到
+## Running，但 Service 連不到
 
 Pod 是 `Running`，其他服務連 `http://export-api` 卻不通。從 Service 往 Pod 一層一層查：
 
@@ -146,20 +155,20 @@ kubectl get pods -n booking -l app=export-api --show-labels -o wide
 
 「被拒絕」與「逾時」的差別和一般網路排查相同：被拒絕代表封包到了、但沒有程式在那個 port 上；逾時通常是封包被丟掉。NetworkPolicy 的行為是：沒有任何 policy 選到某個 Pod 時，它不受限制；一旦有 policy 選到它，就只有被允許的流量能通過（前提是叢集的網路外掛有實作 NetworkPolicy，否則寫了也不會生效）。
 
-### Ingress 回 404、502、503、504
+## Ingress 回 404、502、503、504
 
 狀態碼是 Ingress controller 產生的，下面是 nginx 系 controller 的常見對應，其他 controller 的行為可能略有不同：
 
 | 狀態碼 | 意思 | 下一步 |
 |---|---|---|
 | 404 | 請求的 Host 或路徑沒有對到任何規則；或這份 Ingress 根本沒被 controller 處理 | 檢查 `host`、`path`、`pathType` 與 `ingressClassName`；用 `curl -H "Host: …"` 確認送出去的 Host |
-| 503 | 規則對到了，但 Service 後面沒有可用的 Pod | 回到上一小節，從 EndpointSlice 查起 |
+| 503 | 規則對到了，但 Service 後面沒有可用的 Pod | 回到「Running，但 Service 連不到」那一章，從 EndpointSlice 查起 |
 | 502 | controller 連到了 Pod，但連線被拒絕或回應壞掉 | `targetPort` 寫錯、Pod 正在重啟、後端是 HTTPS 而 controller 用 HTTP 連 |
 | 504 | 後端太久沒有回應 | 程式本身慢，或 controller 的逾時設定太短 |
 
 確認問題在哪一層的方法，是跳過前面的層直接連後面：用 `port-forward` 直接連 Service 或 Pod，通了就表示問題在 Ingress 這一層。再往外還有 DNS、憑證與外部負載平衡器，排查方式見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting)。
 
-:::stop 讀到這裡可以先停：會照 get、describe、logs、events 的順序，從 Pod 的狀態找到下一個指令與要看的線索。後面的模擬程式與 exec、port-forward、debug，在線索不夠、要進到容器裡查時再回來讀。
+各種狀態的成因（探針、requests、selector）在 [Kubernetes 實作：把服務寫成 manifest](#/skill/k8s-manifests) 與 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
 
 ## 用程式走一遍排查順序
 
@@ -284,6 +293,8 @@ kubectl port-forward pod/export-api-84f9d6c5b7-m4n1z 8080:8000 -n booking
 | `Error from server (Forbidden): pods "…" is forbidden: User "…" cannot get resource "pods/log"` | 帳號的 RBAC 權限不足 | 不是 Pod 的問題；找叢集管理者確認權限 |
 | `port-forward` 通，經過 Service 不通 | 問題在 Service 這一層 | selector、`targetPort`、readiness、NetworkPolicy |
 | 刪掉 Pod 之後好了一陣子又壞 | 重建只是把狀態歸零（例如記憶體洩漏重新累積） | 回頭查 `RESTARTS` 與 `Last State`，找出根本原因 |
+
+Events 預設只保留一小時左右。事故發生後要盡快看，或靠叢集的監控與 log 收集保留下來（見 [可觀測性：log、metrics、trace](#/skill/observability)）。
 
 事故當下的分工與紀錄方式，見 [事故處理、on-call 與 postmortem](#/skill/incident-response)。
 

@@ -1,25 +1,19 @@
 ## 從一個具體問題開始：離職三個月，帳號還能登入
 
-某醫院的護理部上線了一套新的排班系統。開發時為了趕進度，系統自己建了一張帳號表：帳號、密碼雜湊、角色，由護理部的管理者在後台新增人員。
+某醫院護理部的新排班系統自己建了一張帳號表：帳號、密碼雜湊、角色，由護理部的管理者在後台新增人員。
 
-三月底，7A 病房的護理師 lin.meihua 離職。人事室照流程通知資訊室，資訊室在目錄服務裡停用了她的帳號，當天信箱、VPN、院內入口網站都登不進去。六月的內部稽核抽查排班系統，發現：
+三月底，7A 病房的護理師 lin.meihua 離職。資訊室在目錄服務裡停用了她的帳號，當天信箱、VPN、院內入口網站都登不進去。六月的內部稽核抽查排班系統，發現：
 
 - lin.meihua 的帳號還是有效狀態，五月有兩筆登入紀錄。
-- 另外有 14 個帳號對不到任何在職人員。
+- 另有 14 個帳號對不到在職人員。
 - 一位三月調到加護病房的護理師，在排班系統裡仍然能改 7A 的班表。
-- 排班系統的密碼規則是 6 碼以上、沒有 MFA；院內其他系統是 12 碼加 MFA。
+- 排班系統的密碼是 6 碼以上、沒有 MFA；院內其他系統是 12 碼加 MFA。
 
-排班系統的程式沒有 bug。問題在於它**多存了一份身分資料**，而這份資料沒有人負責和來源保持一致。每多一個自己管帳號的系統，到職、調動、離職就多一個要手動處理的地方，遲早會漏。
+排班系統**多存了一份身分資料**，沒有人負責讓它和來源一致。解法是讓應用程式不擁有身分：帳號與密碼留在組織的目錄服務，登入交給身分提供者，角色由群組決定，停用由佈建或同步自動生效。
 
-解法是讓應用程式不擁有身分：帳號與密碼留在組織的目錄服務，登入交給身分提供者，角色由群組決定，停用由佈建或同步自動生效。
+## 目錄服務與 LDAP 的樹狀結構
 
-## 目錄服務：組織的帳號放在哪裡
-
-**目錄服務**（directory service）是專門存「人、群組、電腦、服務帳號」的資料庫，讀多寫少，組織裡的系統都向它查詢。存取它最常見的協定是 LDAP（Lightweight Directory Access Protocol，RFC 4511）。
-
-### LDAP 的樹狀結構
-
-LDAP 的資料是一棵樹，每個節點叫一筆 entry：
+**目錄服務**（directory service）是專門存「人、群組、電腦、服務帳號」的資料庫，讀多寫少，組織裡的系統都向它查詢。存取它最常見的協定是 LDAP（Lightweight Directory Access Protocol，RFC 4511）。LDAP 的資料是一棵樹，每個節點叫一筆 entry：
 
 ```text
 dc=hospital,dc=example                  ← 樹根，通常對應組織的網域
@@ -40,24 +34,35 @@ dc=hospital,dc=example                  ← 樹根，通常對應組織的網域
 | 屬性（attribute） | entry 上的欄位，可以有多個值 | `mail`、`cn`、`memberOf` |
 | 群組 | 也是一筆 entry，用 `member` 屬性列出成員的 DN；成員可以是另一個群組 | `cn=nursing-all,ou=groups,…` |
 
-DN 會變：調部門時 entry 被搬到另一個 OU，DN 就不同了。要長期識別一個人，用目錄產生、不會變的 id（OpenLDAP 的 `entryUUID`、Active Directory 的 `objectGUID`）。
+DN 會變：調部門時 entry 被搬到另一個 OU。要長期識別一個人，用目錄產生、不會變的 id（OpenLDAP 的 `entryUUID`、Active Directory 的 `objectGUID`）。
 
-應用程式會用到的操作主要是兩個：
+應用程式主要用兩個操作：
 
 - **bind**：拿一個 DN 加密碼向目錄證明身分，成功代表密碼正確。
 - **search**：給定起點（base DN）、範圍（scope）與條件（filter），取回符合的 entry 與指定的屬性。filter 是前置式寫法，`(&(objectClass=person)(uid=chen.yiting))` 的意思是「是人，而且 uid 等於 chen.yiting」。
 
-### Active Directory 與 Kerberos
+## 應用程式接身分的三種方式怎麼選
 
-**Active Directory**（AD）是 Microsoft 的目錄服務，Windows 網域的帳號、電腦、群組原則都放在裡面。AD 對外提供 LDAP 介面，應用程式可以用 LDAP 查 AD 裡的使用者與群組；屬性名稱和一般 LDAP 伺服器不完全相同（登入名稱常用 `sAMAccountName` 或 `userPrincipalName`，停用狀態記在 `userAccountControl` 的旗標裡），接之前先看實際的資料。
+- **LDAP bind**：應用程式自己收帳號密碼，拿去目錄 bind，成功就當作登入。
+- **SAML 2.0**：密碼只在身分提供者（IdP）輸入，應用程式拿到 IdP 簽章的 XML（assertion）。
+- **OIDC**：同樣由 IdP 驗證，憑證是 JWT 格式的 ID token，見 [OAuth 2.0 與 OpenID Connect](#/skill/oauth-oidc)。
 
-網域內的登入驗證主要用 **Kerberos**，想法是「用票證，不傳密碼」：使用者登入電腦時向網域控制站證明一次身分，拿到一張有期限的票證；之後存取檔案伺服器或內部網站，出示的是針對那個服務核發的票證，密碼不會送到每個服務手上。本課只講到這個層次。
+| | LDAP bind | SAML 2.0 | OIDC |
+|---|---|---|---|
+| 應用程式會看到密碼嗎 | 會 | 不會 | 不會 |
+| MFA、單一登入 | 做不到 | 在 IdP 做 | 在 IdP 做 |
+| 應用程式要能連到誰 | 目錄伺服器 | 不需要連 IdP（瀏覽器轉址） | 後端要能連 IdP 的 token 端點與 JWKS |
+| 手機 App、SPA、呼叫 API | 不適合 | 不適合，它是為瀏覽器設計的 | 適合，和 OAuth 2.0 是同一套 |
 
-### 雲端目錄
+SAML 與 OIDC 的選擇多半由環境決定：
 
-Microsoft Entra ID（舊名 Azure AD）、Google Workspace、Okta 這類服務把目錄與身分提供者做成雲端服務，主要用 OIDC、SAML、SCIM 這些以 HTTP 為基礎的協定對接應用程式。Entra ID 和地端的 AD 是不同的產品，帳號可以同步，支援的協定不同；功能以各自的官方文件為準。
+- IdP 兩種都支援、應用程式是新寫的：選 OIDC。函式庫多、設定只要 issuer 網址、呼叫 API 也是同一套 token。
+- 對方的 IdP 或採購規範只支援 SAML，或要接的是只會 SAML 的既有系統：用 SAML。
+- 要賣給很多企業客戶的產品：通常兩種都要支援，由客戶選。
 
-## 應用程式接身分的三種方式
+:::stop 讀到這裡可以先停：說得出 LDAP 的 DN、OU、群組與 bind / search，也會比較 LDAP bind、SAML、OIDC 三種接法並選一種。後面三種接法的流程在動手接的時候回來讀；群組對應、帳號生命週期與對帳程式，在要處理角色對應或離職停權時再讀。
+
+## 三種接法的流程
 
 ### 方式一：直接 LDAP bind
 
@@ -141,24 +146,19 @@ ACS（Assertion Consumer Service）是 SP 上專門接收 assertion 的端點。
 
 ### 方式三：OIDC
 
-OIDC 的角色與 SAML 對應（IdP 對應 OpenID Provider，SP 對應 Relying Party），憑證換成 JWT 格式的 ID token，後端用授權碼換 token。流程與驗證項目在 [OAuth 2.0 與 OpenID Connect](#/skill/oauth-oidc)，這裡不重複。
+OIDC 的角色與 SAML 對應（IdP 對應 OpenID Provider，SP 對應 Relying Party），憑證換成 JWT 格式的 ID token，後端用授權碼換 token。流程與驗證項目在 [OAuth 2.0 與 OpenID Connect](#/skill/oauth-oidc)。
 
-### 三種方式比較，以及 SAML 與 OIDC 怎麼選
+## Active Directory、Kerberos 與雲端目錄
 
-| | LDAP bind | SAML 2.0 | OIDC |
-|---|---|---|---|
-| 應用程式會看到密碼嗎 | 會 | 不會 | 不會 |
-| MFA、單一登入 | 做不到 | 在 IdP 做 | 在 IdP 做 |
-| 應用程式要能連到誰 | 目錄伺服器 | 不需要連 IdP（瀏覽器轉址） | 後端要能連 IdP 的 token 端點與 JWKS |
-| 手機 App、SPA、呼叫 API | 不適合 | 不適合，它是為瀏覽器設計的 | 適合，和 OAuth 2.0 是同一套 |
+### Active Directory 與 Kerberos
 
-SAML 與 OIDC 的選擇多半由環境決定：
+**Active Directory**（AD）是 Microsoft 的目錄服務，Windows 網域的帳號、電腦、群組原則都放在裡面。AD 對外提供 LDAP 介面，應用程式可以用 LDAP 查 AD 裡的使用者與群組；屬性名稱和一般 LDAP 伺服器不完全相同（登入名稱常用 `sAMAccountName` 或 `userPrincipalName`，停用狀態記在 `userAccountControl` 的旗標裡），接之前先看實際的資料。
 
-- IdP 兩種都支援、應用程式是新寫的：選 OIDC。函式庫多、設定只要 issuer 網址、之後要呼叫 API 也是同一套 token。
-- 對方的 IdP 或採購規範只支援 SAML，或要接的是只會 SAML 的既有系統：用 SAML。
-- 要賣給很多企業客戶的產品：通常兩種都要支援，由客戶選。
+網域內的登入驗證主要用 **Kerberos**，想法是「用票證，不傳密碼」：使用者登入電腦時向網域控制站證明一次身分，拿到一張有期限的票證；之後存取檔案伺服器或內部網站，出示的是針對那個服務核發的票證，密碼不會送到每個服務手上。本課只講到這個層次。
 
-:::stop 讀到這裡可以先停：說得出 LDAP 的樹狀結構，也會比較 LDAP bind、SAML、OIDC 三種接法並選一種。後面的群組對應、帳號生命週期與對帳程式，在要處理角色對應或離職停權時再回來讀。
+### 雲端目錄
+
+Microsoft Entra ID（舊名 Azure AD）、Google Workspace、Okta 這類服務把目錄與身分提供者做成雲端服務，主要用 OIDC、SAML、SCIM 這些以 HTTP 為基礎的協定對接應用程式。Entra ID 和地端的 AD 是不同的產品，帳號可以同步，支援的協定不同；功能以各自的官方文件為準。
 
 ## 群組對應角色
 

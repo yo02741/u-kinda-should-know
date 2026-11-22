@@ -1,4 +1,4 @@
-## 從一個具體問題開始：第二個使用者看到了第一個人的購物車
+## 具體問題：第二個使用者看到了第一個人的購物車
 
 購物車 API 有個輔助函式，沒有傳入購物車時就「開一個新的」：
 
@@ -18,11 +18,11 @@ items = add_to_cart(product_id)
 1. **預設值只在 `def` 執行時建立一次**。`cart=[]` 的那個 list 是函式物件的一部分（存在 `add_to_cart.__defaults__`），之後每次沒傳 `cart` 的呼叫都拿到**同一個** list。
 2. **後端行程活很久**。腳本跑完就結束，那個 list 跟著消失；但 uvicorn 的 worker 會連續處理成千上萬個請求，那個 list 就一直長大，而且被所有請求共用。重新部署時行程重啟，list 歸零，所以問題「暫時消失」。
 
-修法是預設 `None`、在函式裡建新 list。背後的心智模型是：**後端的 Python 是長時間執行的行程，模組層級的東西會被所有請求共用**。這篇從這個模型出發，再談型別、資料模型與例外處理。
+修法是預設 `None`、在函式裡建新 list。
 
-## Python 後端的行程模型
+## 行程模型：模組層級的東西被所有請求共用
 
-用 `uvicorn app.main:app --workers 4` 啟動時，會有 4 個獨立的 Python 行程，各自把 `app/main.py` import 一次。行程之間不共用記憶體，執行緒與 GIL 的細節見 [程式怎麼跑起來](#/skill/how-programs-run)，worker 數量怎麼定見 [應用伺服器與程序管理](#/skill/process-servers)。
+用 `uvicorn app.main:app --workers 4` 啟動時，會有 4 個獨立的 Python 行程，各自把 `app/main.py` import 一次。行程之間不共用記憶體。
 
 ```text
             ┌──────────── worker 1（PID 101）────────────┐
@@ -44,26 +44,9 @@ items = add_to_cart(product_id)
 | 模組層級變數、預設參數、類別屬性 | 整個 worker 行程 | 這個 worker 的所有請求 | 唯讀設定、連線池、編譯好的 regex |
 | Redis、資料庫 | 獨立於行程 | 所有 worker、所有機器 | 計數器、session、快取 |
 
-兩個常見的誤用都來自這張表：
-
-- **把可變狀態放在模組層級**：`_cache = {}` 在單一 worker 時看起來是快取，開到 4 個 worker 就變成 4 份互不同步的快取；部署多台時更是各自為政。需要跨 worker 一致的狀態要放 Redis 或資料庫。
-- **在 import 時做 I/O**：模組最上層直接連資料庫、讀遠端設定，每個 worker 啟動都會做一次，測試只要 import 這個模組就會去連資料庫。這類初始化放進框架的 lifespan（啟動／關閉事件）或依賴裡。
-
-### import 做了什麼
-
-`import app.models` 第一次執行時，Python 會找到檔案、建立模組物件、放進 `sys.modules`，然後**從上到下執行整個檔案**。之後任何地方再 import 同一個模組，直接從 `sys.modules` 拿，不會再執行。所以模組層級的程式碼「每個行程只跑一次」，這也是預設參數那個 list 能活那麼久的原因。
-
-循環 import 就是這個機制的副作用：`a.py` 第一行 `from b import helper`，`b.py` 第一行又 `from a import a_func`。執行到 `b` 的時候，`a` 已經在 `sys.modules` 裡但還沒執行到 `def a_func`，於是拿不到。解法通常是把共用的東西抽到第三個模組，或是讓相依只往一個方向（router → service → repository，反過來不行）。
-
-### `if __name__ == "__main__"`
-
-每個模組都有 `__name__`：直接執行 `python app/seed.py` 時它是 `"__main__"`；被 import 時是模組路徑，例如 `"app.seed"`。把「直接執行才要做的事」（解析命令列、灌測試資料）放在這個判斷底下，模組就可以安全地被測試或其他程式 import，不會一 import 就開始灌資料。
-
-套件內的腳本建議用 `python -m app.seed`（或 `uv run python -m app.seed`）執行：`-m` 會以模組身分載入，`from app.models import User` 這類絕對 import 才找得到套件；直接 `python app/seed.py` 時，`sys.path` 的第一項是 `app/` 這個資料夾，如果專案本身沒有安裝進虛擬環境，常見結果是 `ModuleNotFoundError: No module named 'app'`。
+**可變狀態不要放在模組層級**：`_cache = {}` 在單一 worker 時看起來是快取，開到 4 個 worker 就變成 4 份互不同步的快取。需要跨 worker 一致的狀態要放 Redis 或資料庫。
 
 ## 型別提示、dataclass、pydantic：三個層次
-
-三者常被混為一談，分工如下：
 
 | 工具 | 執行時會檢查嗎 | 做什麼 | 用在哪 |
 |---|---|---|---|
@@ -71,23 +54,17 @@ items = add_to_cart(product_id)
 | `@dataclass` | 不會驗證型別 | 自動產生 `__init__`、`__repr__`、`__eq__`；欄位有名字、打錯字會報錯 | 程式內部傳遞的資料 |
 | pydantic `BaseModel` | **會**，而且會轉型 | 驗證、把 `"42"` 轉成 `42`、產生 JSON schema、序列化 | 系統邊界：HTTP body、環境變數、訊息佇列 |
 
-型別提示不會在執行時擋下錯誤：`def price(p: int)` 被傳進 `"100"` 照樣執行。它的價值在型別檢查器，例如函式回傳 `str | None`，呼叫端直接 `.upper()` 時，pyright 會在存檔時就指出「None 沒有 `upper`」，不必等到正式環境丟出 `AttributeError`（見 [型別檢查、lint 與格式化](#/skill/code-quality)）。
-
-`int | None`（Python 3.10 起的寫法）和 `Optional[int]` 意思完全一樣：可能是 int、也可能是 None。`list[str]`（3.9 起可以直接用內建型別加中括號）是「元素都是 str 的 list」。新程式碼用新寫法即可。
-
-原則是**在邊界驗證一次，內部就信任型別**：外部進來的資料一律經過 pydantic（或其他驗證），轉成明確的物件；之後在 service、repository 之間傳遞的是有型別的物件，不再到處 `data.get("user_id")`、到處防禦。用 dict 一路傳到底，打錯 key 只會在執行到那一行時變成 `KeyError` 或靜悄悄的 `None`。
+原則是**在邊界驗證一次，內部就信任型別**：外部進來的資料一律經過 pydantic（或其他驗證），轉成明確的物件；之後在 service、repository 之間傳遞的是有型別的物件，不再到處 `data.get("user_id")`、到處防禦。
 
 FastAPI 裡的 pydantic 模型長這樣（需要安裝 pydantic，不能在瀏覽器執行）：
 
 ```python
 from pydantic import BaseModel, Field
 
-
 class OrderIn(BaseModel):
     product_id: int                      # "42" 會被轉成 42；"abc" 會驗證失敗
     qty: int = Field(gt=0, le=10)        # 1～10
     note: str | None = None              # 選填
-
 
 order = OrderIn.model_validate({"product_id": "42", "qty": 3})
 print(order.product_id + 1)              # 43：已經是 int
@@ -104,9 +81,7 @@ qty
   Input should be greater than 0 [type=greater_than, input_value=0, input_type=int]
 ```
 
-## 實際程式
-
-### 可變預設參數與 late binding
+## 最小範例：可變預設參數與 late binding，與最常見的兩個錯誤
 
 ```python run
 # 1) 預設值在 def 執行時建立一次，存在函式物件上
@@ -135,11 +110,37 @@ handlers = [lambda i=i: i for i in range(3)]   # 用預設參數在定義時把�
 print([h() for h in handlers])        # [0, 1, 2]
 ```
 
-### 型別提示不檢查、邊界要自己驗
+### 最常見的兩個錯誤
+
+- **`ModuleNotFoundError: No module named 'fastapi'`**：用的 Python 不是專案虛擬環境裡那個（例如系統的 `python3`）。用 `uv run python …` 或 `uv run uvicorn …` 執行（見 [uv 與專案管理](#/skill/uv-packaging)）。
+- **`AttributeError: 'NoneType' object has no attribute 'upper'`**：某個函式回傳了 None（查無資料、忘了 `return`）。回傳型別標成可能是 None，讓型別檢查器逼呼叫端處理。
+
+:::stop 讀到這裡可以先停：會判斷一個物件被誰共用、活多久，避開可變預設參數，在邊界用 pydantic 驗資料。後面的 import 機制、`__name__`、pydantic 範例與例外轉換，在拆模組或設計錯誤回應時再回來讀。
+
+## import 時做了什麼
+
+**不要在 import 時做 I/O**：模組最上層直接連資料庫、讀遠端設定，每個 worker 啟動都會做一次，測試只要 import 這個模組就會去連資料庫。這類初始化放進框架的 lifespan（啟動／關閉事件）或依賴裡。
+
+`import app.models` 第一次執行時，Python 會找到檔案、建立模組物件、放進 `sys.modules`，然後**從上到下執行整個檔案**。之後任何地方再 import 同一個模組，直接從 `sys.modules` 拿，不會再執行。所以模組層級的程式碼「每個行程只跑一次」，這也是預設參數那個 list 能活那麼久的原因。
+
+循環 import 就是這個機制的副作用：`a.py` 第一行 `from b import helper`，`b.py` 第一行又 `from a import a_func`。執行到 `b` 的時候，`a` 已經在 `sys.modules` 裡但還沒執行到 `def a_func`，於是拿不到。解法通常是把共用的東西抽到第三個模組，或是讓相依只往一個方向（router → service → repository，反過來不行）。
+
+## `if __name__ == "__main__"` 與 `python -m`
+
+每個模組都有 `__name__`：直接執行 `python app/seed.py` 時它是 `"__main__"`；被 import 時是模組路徑，例如 `"app.seed"`。把「直接執行才要做的事」（解析命令列、灌測試資料）放在這個判斷底下，模組就可以安全地被測試或其他程式 import，不會一 import 就開始灌資料。
+
+套件內的腳本建議用 `python -m app.seed`（或 `uv run python -m app.seed`）執行：`-m` 會以模組身分載入，`from app.models import User` 這類絕對 import 才找得到套件；直接 `python app/seed.py` 時，`sys.path` 的第一項是 `app/` 這個資料夾，如果專案本身沒有安裝進虛擬環境，常見結果是 `ModuleNotFoundError: No module named 'app'`。
+
+## 型別提示的寫法與 pydantic 範例
+
+型別提示不會在執行時擋下錯誤：`def price(p: int)` 被傳進 `"100"` 照樣執行。它的價值在型別檢查器，例如函式回傳 `str | None`，呼叫端直接 `.upper()` 時，pyright 會在存檔時就指出「None 沒有 `upper`」，不必等到正式環境丟出 `AttributeError`（見 [型別檢查、lint 與格式化](#/skill/code-quality)）。
+
+`int | None`（Python 3.10 起的寫法）和 `Optional[int]` 意思完全一樣：可能是 int、也可能是 None。`list[str]`（3.9 起可以直接用內建型別加中括號）是「元素都是 str 的 list」。新程式碼用新寫法即可。
+
+## 動手跑：型別提示不檢查、邊界要自己驗
 
 ```python run
 from dataclasses import dataclass
-
 
 def total_price(unit: int, qty: int) -> int:
     return unit * qty
@@ -147,12 +148,10 @@ def total_price(unit: int, qty: int) -> int:
 # 型別提示不會在執行時擋：字串乘以 int 是「重複字串」
 print(repr(total_price("100", 3)))    # '100100100'，不是 300
 
-
 @dataclass(frozen=True)
 class OrderLine:
     product_id: int
     qty: int
-
 
 def parse_order_line(data: dict) -> OrderLine:
     """系統邊界：外部資料在這裡轉型＋驗證，之後的程式只處理 OrderLine。"""
@@ -166,7 +165,6 @@ def parse_order_line(data: dict) -> OrderLine:
     if not 1 <= qty <= 10:
         raise ValueError("qty 要在 1～10 之間")
     return OrderLine(product_id, qty)
-
 
 print(parse_order_line({"product_id": "42", "qty": "2"}))
 for bad in ({"qty": 1}, {"product_id": "abc"}, {"product_id": 1, "qty": 0}):
@@ -182,9 +180,7 @@ except TypeError as e:
     print("TypeError：", e)
 ```
 
-:::stop 讀到這裡可以先停：會用型別提示與 pydantic 在邊界驗資料、避開可變預設參數。後面的模組載入與例外轉換，在拆模組或設計錯誤回應時再回來讀。
-
-### 模組只執行一次、`__name__` 決定要不要跑
+## 動手跑：模組只執行一次、`__name__` 決定要不要跑
 
 ```python run
 import sys
@@ -220,7 +216,7 @@ exec(SOURCE, {"__name__": "__main__"})   # 直接執行時 __name__ 是 "__main_
 del sys.modules["demo_app.seed"]
 ```
 
-### 例外：在一個地方轉成 HTTP 狀態碼
+## 例外：在一個地方轉成 HTTP 狀態碼
 
 ```python run
 class AppError(Exception):
@@ -234,7 +230,6 @@ class NotFound(AppError):
 class Conflict(AppError):
     status, code = 409, "conflict"
 
-
 PRODUCTS = {1: {"name": "鍵盤", "stock": 0}}
 
 def reserve(product_id: int) -> dict:
@@ -247,7 +242,6 @@ def reserve(product_id: int) -> dict:
     product["stock"] -= 1
     return product
 
-
 def handle(func, *args):
     """模擬框架最外層的例外處理器：唯一一個把例外翻成 HTTP 的地方。"""
     try:
@@ -256,7 +250,6 @@ def handle(func, *args):
         return e.status, {"error": e.code, "message": str(e)}
     except Exception:                  # 預期外：500，細節只進 log，不回給客戶端
         return 500, {"error": "internal_error"}
-
 
 print(handle(reserve, 1))
 print(handle(reserve, 99))
@@ -271,16 +264,14 @@ print(handle(lambda: 1 / 0))
 - **轉換時用 `raise … from e`**：保留原始原因，traceback 會顯示 `The above exception was the direct cause of the following exception:`，查問題時看得到根源。
 - **不要吞掉之後回傳 None**：`except Exception: return None` 讓呼叫端拿到一個看不出原因的 None，錯誤往後延到別的地方才爆。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
 traceback 從**最後一行**讀起：最後一行是例外型別與訊息；往上找第一個屬於自己程式碼的檔案與行號，通常就是出事的地方。
 
 | 錯誤訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| `ModuleNotFoundError: No module named 'fastapi'` | 用的 Python 不是專案虛擬環境裡那個（例如系統的 `python3`） | 用 `uv run python …` 或 `uv run uvicorn …` 執行（見 [uv 與專案管理](#/skill/uv-packaging)） |
 | `ModuleNotFoundError: No module named 'app'` | 直接執行套件內的檔案，`sys.path` 指到子資料夾 | 在專案根目錄用 `python -m app.seed` |
 | `ImportError: cannot import name 'a_func' from partially initialized module 'a' (most likely due to a circular import)` | 循環 import（3.12 的訊息；不同版本措辭可能略有差異） | 把共用的部分抽到第三個模組，讓相依單向 |
-| `AttributeError: 'NoneType' object has no attribute 'upper'` | 某個函式回傳了 None（查無資料、忘了 `return`） | 回傳型別標成可能是 None，讓型別檢查器逼呼叫端處理 |
 | `TypeError: can't subtract offset-naive and offset-aware datetimes` | 一邊是 `datetime.now()`（沒時區），一邊是帶時區的時間 | 一律用 `datetime.now(timezone.utc)`，存與比較都用 UTC |
 | `TypeError: Object of type datetime is not JSON serializable` | 標準 `json.dumps` 不認得 datetime、Decimal | 序列化前轉成 ISO 字串，或交給 pydantic 的 `model_dump(mode="json")` |
 | `KeyError: 'user_id'` | 用 dict 傳資料，key 不存在或拼錯 | 在邊界轉成 dataclass／pydantic 模型 |

@@ -18,20 +18,20 @@ SELECT users.id, users.name FROM users WHERE users.id = 42
 ...（再 40 幾句，形狀一樣、只差參數）
 ```
 
-第一句取訂單，之後迴圈每碰一次 `o.user`，ORM 就送一句查使用者。每句只要 1–2 ms，但每趟都要付一次網路來回。這叫 **N+1 查詢**：1 句取清單，再加 N 句取每一筆的關聯資料。程式碼裡看不到任何 SQL，問題只在 log 裡看得見。
+第一句取訂單，之後迴圈每碰一次 `o.user`，ORM 就送一句查使用者，每句都要付一次網路來回。這叫 **N+1 查詢**：1 句取清單，再加 N 句取每一筆的關聯資料。程式碼裡看不到 SQL，問題只在 log 裡看得見。
 
-## ORM 做了什麼
+## ORM 做了什麼：延遲載入與 eager loading
 
-ORM（Object-Relational Mapping）把資料表映射成類別、把列映射成物件。以 SQLAlchemy 2.0 起的寫法為例（2026 年 11 月核對時最新是 2.1 版，本課用到的 API 在 2.1 相同）：
+ORM（Object-Relational Mapping）把資料表映射成類別、把列映射成物件。以 SQLAlchemy 2.0 起的寫法為例：
 
 | 機制 | 做什麼 |
 |---|---|
 | 映射（mapping） | `class Order` 對應 `orders` 表，`relationship()` 對應外鍵關係 |
 | Identity map | 同一個 session 裡，同一個主鍵只有一個 Python 物件；再取一次不一定再查 |
-| Unit of work | 追蹤新增、修改、刪除的物件，`flush()` 時依相依順序產生 INSERT / UPDATE / DELETE；`session.add()` 不會立刻寫資料庫 |
+
 | 延遲載入（lazy loading） | 關聯屬性第一次被讀取時才發 SELECT，N+1 的來源 |
 
-延遲載入本身不是錯誤，問題是**在迴圈裡**觸發它。N 到底是多少，要看關聯方向。`o.user` 是多對一，SQLAlchemy 在發 SELECT 前會先查 identity map，同一個使用者只查一次，所以 50 張訂單如果來自 20 位使用者，就是 1 + 20 句。反過來的一對多 `user.orders`，每個使用者都得查一次，就是 1 + N。
+延遲載入**在迴圈裡**觸發才是問題。N 是多少要看關聯方向：`o.user` 是多對一，SQLAlchemy 發 SELECT 前先查 identity map，同一個使用者只查一次，50 張訂單來自 20 位使用者就是 1 + 20 句。一對多的 `user.orders` 每個使用者都得查一次，是 1 + N。
 
 ### 兩種 eager loading
 
@@ -47,7 +47,7 @@ ORM（Object-Relational Mapping）把資料表映射成類別、把列映射成�
 
 ### 用 sqlite3 數查詢次數
 
-下面用標準函式庫的 `sqlite3` 重現三種載入方式。`set_trace_callback` 會把每一句實際執行的 SQL 交給你，效果相當於打開 ORM 的 SQL log。延遲載入的版本用一個 dict 模擬 identity map：
+用標準函式庫的 `sqlite3` 重現三種載入方式。`set_trace_callback` 收到每一句實際執行的 SQL，相當於打開 ORM 的 SQL log。延遲載入的版本用一個 dict 模擬 identity map：
 
 ```python run
 # 用標準函式庫 sqlite3 重現 ORM 的三種載入方式，數一數各送出幾句 SQL
@@ -105,7 +105,7 @@ run("selectinload", selectin)
 assert lazy() == joined() == selectin()     # 結果完全相同，差別只在查詢次數
 ```
 
-從 log 認 N+1 的特徵很固定：**一句取清單，緊接著一大串形狀相同、只有 WHERE 參數不同的 SELECT**。正式環境要看的是「每個請求的查詢次數」：APM 工具通常會把一個請求內的 SQL 列成時間軸；沒有工具時，在測試裡數查詢次數，超過門檻就讓測試失敗。
+N+1 在 log 裡的特徵：**一句取清單，緊接著一大串形狀相同、只有 WHERE 參數不同的 SELECT**。正式環境看「每個請求的查詢次數」：APM 工具通常把一個請求內的 SQL 列成時間軸；沒有工具時，在測試裡數查詢次數，超過門檻就讓測試失敗。
 
 ### SQLAlchemy 2.0 的寫法
 
@@ -151,42 +151,11 @@ with Session(engine) as session:
     stmt = select(Order).options(raiseload("*"))
 ```
 
-也可以用 `relationship(lazy="raise")` 把預設改成不准延遲載入：比較囉嗦，但 N+1 會在開發時以例外出現，而不是在正式環境變成慢。
+`relationship(lazy="raise")` 把預設改成不准延遲載入：比較囉嗦，但 N+1 在開發時就以例外出現。
 
-## Session 與交易邊界
+## Migration：用 Alembic 管 schema 版本
 
-SQLAlchemy 2.0 的 `Session` 在送出第一句 SQL 時自動開始交易（autobegin），到 `commit()` 或 `rollback()` 才結束。session 的壽命要跟一個工作單位對齊，通常是一個 HTTP 請求：
-
-```python
-from sqlalchemy.orm import sessionmaker
-
-SessionLocal = sessionmaker(engine, expire_on_commit=False)
-
-def create_order(user_id: int, amount: Decimal) -> int:
-    # session.begin()：區塊正常結束就 commit，丟例外就 rollback；外層 with 結束時關閉 session、歸還連線
-    with SessionLocal() as session, session.begin():
-        order = Order(user_id=user_id, amount=amount)
-        session.add(order)
-        session.flush()          # 送出 INSERT 拿到 order.id，但還沒 commit
-        return order.id
-
-# FastAPI 的常見寫法：每個請求一個 session，用 yield 依賴確保關閉
-def get_session():
-    with SessionLocal() as session:
-        yield session
-```
-
-幾個容易誤會的地方：
-
-- **`flush` 不是 `commit`**：flush 把變更送進資料庫，只有同一個交易看得到；commit 才讓別人看得到。
-- **`expire_on_commit` 預設是 True**：commit 之後屬性全部過期，下次讀取會再查資料庫；session 已經關了就會失敗。物件要拿到 session 外使用時，設成 False 或先轉成 dict / pydantic model。
-- **長壽的 session 是陷阱**：全域共用的 session 會一直握著舊交易的快照、identity map 越長越大、連線不歸還；它也不是執行緒安全的。
-- **交易裡不要做外部呼叫**，理由見 [交易與隔離等級](#/skill/transactions)。
-- **`AsyncSession` 不能延遲載入**：屬性存取時沒辦法偷偷 await，觸發就失敗，所以 async 程式幾乎一定要 eager loading。
-
-## Migration：schema 的版本控制
-
-Migration 工具把每次 schema 變更寫成有順序的腳本，並在資料庫裡記錄目前套用到哪一版。SQLAlchemy 生態系用 Alembic：
+Migration 工具把每次 schema 變更寫成有順序的腳本，並在資料庫裡記錄套用到哪一版。SQLAlchemy 生態系用 Alembic：
 
 ```bash
 alembic init migrations                              # 建立 migrations/ 與 alembic.ini
@@ -217,10 +186,43 @@ def downgrade() -> None:
 
 **autogenerate 的結果一定要人工檢查**。它比對的是 model 與資料庫的差異，看不出意圖：
 
-- 欄位 `name` 改名成 `full_name`，它看到的是少了一欄、多了一欄，產生**刪欄 + 加欄**，套用下去資料就沒了。改名要自己處理，而且通常不能直接改名（見下一節）。
+- 欄位 `name` 改名成 `full_name`，它看到的是少了一欄、多了一欄，產生**刪欄 + 加欄**，套用下去資料就沒了。改名要自己處理，而且通常不能直接改名（見選讀的 expand–contract）。
 - 有些變更偵測不到或不完整，以 Alembic 文件列出的限制為準；它也不會替你考慮鎖與大表。
 
-:::stop 讀到這裡可以先停：會從 SQL log 認出 N+1 並改用 eager loading，也知道 migration 怎麼記錄版本。後面的安全上線做法與部署順序，在要改一張已有資料的表時再回來讀。
+:::stop 讀到這裡可以先停：會從 SQL log 認出 N+1 並改用 eager loading，也知道 Alembic 怎麼記錄版本、autogenerate 為什麼要人工檢查。後面的 session 與交易邊界在出現 `DetachedInstanceError` 時回來讀；安全上線做法與部署順序，在要改一張已有資料的表時再讀。
+
+## Session 與交易邊界
+
+本課的 API 以 SQLAlchemy 2.0 為準（2026 年 11 月核對時最新是 2.1 版，用到的 API 在 2.1 相同）。`Session` 是 unit of work：它追蹤新增、修改、刪除的物件，`flush()` 時依相依順序產生 INSERT / UPDATE / DELETE，`session.add()` 不會立刻寫資料庫。
+
+`Session` 在送出第一句 SQL 時自動開始交易（autobegin），到 `commit()` 或 `rollback()` 才結束。session 的壽命要跟一個工作單位對齊，通常是一個 HTTP 請求：
+
+```python
+from sqlalchemy.orm import sessionmaker
+
+SessionLocal = sessionmaker(engine, expire_on_commit=False)
+
+def create_order(user_id: int, amount: Decimal) -> int:
+    # session.begin()：區塊正常結束就 commit，丟例外就 rollback；外層 with 結束時關閉 session、歸還連線
+    with SessionLocal() as session, session.begin():
+        order = Order(user_id=user_id, amount=amount)
+        session.add(order)
+        session.flush()          # 送出 INSERT 拿到 order.id，但還沒 commit
+        return order.id
+
+# FastAPI 的常見寫法：每個請求一個 session，用 yield 依賴確保關閉
+def get_session():
+    with SessionLocal() as session:
+        yield session
+```
+
+幾個容易誤會的地方：
+
+- **`flush` 不是 `commit`**：flush 把變更送進資料庫，只有同一個交易看得到；commit 才讓別人看得到。
+- **`expire_on_commit` 預設是 True**：commit 之後屬性全部過期，下次讀取會再查資料庫；session 已經關了就會失敗。物件要拿到 session 外使用時，設成 False 或先轉成 dict / pydantic model。
+- **長壽的 session 是陷阱**：全域共用的 session 會一直握著舊交易的快照、identity map 越長越大、連線不歸還；它也不是執行緒安全的。
+- **交易裡不要做外部呼叫**，理由見 [交易與隔離等級](#/skill/transactions)。
+- **`AsyncSession` 不能延遲載入**：屬性存取時沒辦法偷偷 await，觸發就失敗，所以 async 程式幾乎一定要 eager loading。
 
 ## 可安全上線的 migration
 

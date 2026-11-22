@@ -1,17 +1,17 @@
 ## 從一個具體問題開始：對帳腳本用的是工程師的帳號
 
-一個電商後台每天凌晨跑對帳腳本，呼叫內部 API 拉前一天的訂單。腳本裡寫的是工程師 kevin 的帳號密碼，因為「當初他設的」。接下來一年發生了這些事：
+一個電商後台每天凌晨跑對帳腳本，呼叫內部 API 拉前一天的訂單。腳本裡寫的是工程師 kevin 的帳號密碼。接下來一年：
 
-1. 公司要求所有帳號啟用 MFA。kevin 啟用後，腳本登入時要輸入驗證碼，每天凌晨失敗。有人的修法是：幫 kevin 的帳號加一個「略過 MFA」的例外。
+1. 公司要求所有帳號啟用 MFA。kevin 啟用後，腳本登入要輸入驗證碼，每天凌晨失敗。有人幫 kevin 的帳號加了「略過 MFA」的例外。
 2. 稽核紀錄裡，kevin 每天凌晨 3 點都在下載全部訂單。沒有人分得出哪些是腳本、哪些是 kevin 本人。
 3. kevin 離職，帳號依規定停用。對帳中斷三天才有人發現原因。
-4. 事後清查發現，那組密碼兩年前曾經被 commit 進 repo，而那個帳號正好是全公司唯一沒有 MFA 的帳號。
+4. 事後清查，那組密碼兩年前被 commit 進 repo，而那個帳號是全公司唯一沒有 MFA 的帳號。
 
-問題的根源是**機器借用了人的身分**。人的身分要有 MFA、會離職、權限跟著職務走；機器的身分要能無人值守地使用、權限只限它的工作、和任何一個人的去留無關。這一課分兩半：沒有使用者在場的呼叫怎麼驗（API key、client credentials、mTLS），以及人的登入怎麼加上第二個因素（MFA）與交給企業的身分提供者（SSO）。
+根源是**機器借用了人的身分**。人的身分要有 MFA、會離職、權限跟著職務走；機器的身分要能無人值守地使用、權限只限它的工作、和任何一個人的去留無關。
 
 ## 機器的身分：API key
 
-API key 是最簡單的機器憑證：一個長隨機字串，呼叫時放在 header：
+API key 是最簡單的機器憑證：一個長隨機字串，放在 header：
 
 ```http
 GET /v1/orders?date=2026-10-19 HTTP/1.1
@@ -19,18 +19,16 @@ Host: api.example.com
 Authorization: Bearer atl_live_Xb3kQ9vT2mN8pL4rW7yZ1cF6hJ0sD5gA8eK3nM2qR9u
 ```
 
-設計上的要點和密碼一樣嚴格：固定前綴（`atl_live_`、`atl_test_`，讓人與 secret 掃描工具一眼認出）、資料庫只存 `SHA-256(key)`、完整 key 只在建立時顯示一次、每把 key 有 scope 與到期日、記錄建立者與最後使用時間。格式、資料表、驗證流程與實際程式在 [金鑰的範圍與壽命](#/skill/key-scope-lifetime) 有完整的設計，這裡不重複，只補兩個常見的錯誤：
+設計要點和密碼一樣嚴格：固定前綴（`atl_live_`、`atl_test_`，讓人與 secret 掃描工具一眼認出）、資料庫只存 `SHA-256(key)`、完整 key 只在建立時顯示一次、每把 key 有 scope 與到期日、記錄建立者與最後使用時間。格式、資料表、驗證流程與程式在 [金鑰的範圍與壽命](#/skill/key-scope-lifetime)。兩個常見的錯誤：
 
 - **key 放在網址的 query string**（`?api_key=…`）：網址會進入存取 log、代理伺服器 log、瀏覽器歷史、`Referer` header。key 一律放在 header。
-- **API key 綁在個人帳號上**：開頭那個問題的另一種形式。給機器用的 key 應該屬於一個「服務帳號」或「整合」，有自己的擁有團隊，人員異動時不受影響。
+- **API key 綁在個人帳號上**：給機器用的 key 應該屬於一個「服務帳號」或「整合」，有自己的擁有團隊，人員異動時不受影響。
 
-API key 的限制是：它是長效的共享祕密，呼叫端每次都送出同一個值。只要被看到一次（log、錯誤回報、被入侵的 CI），就能在別處重放到被撤銷為止。下面兩種做法分別從「短效」與「不送出祕密」兩個方向改善。
+API key 是長效的共享祕密，每次呼叫都送出同一個值。被看到一次（log、錯誤回報、被入侵的 CI），就能在別處重放到被撤銷為止。
 
-## 服務間驗證：client credentials 與 mTLS
+## OAuth client credentials：用長效憑證換短效 token
 
-### OAuth client credentials：用長效憑證換短效 token
-
-服務向授權伺服器註冊成一個 client，拿到 `client_id` 與 `client_secret`（或註冊一把公鑰）。需要呼叫 API 時，先換一張短效 access token（RFC 6749 §4.4）：
+服務向授權伺服器註冊成一個 client，拿到 `client_id` 與 `client_secret`（或註冊一把公鑰）。呼叫 API 前先換一張短效 access token（RFC 6749 §4.4）：
 
 ```http
 POST /oauth2/token HTTP/1.1
@@ -51,11 +49,29 @@ Cache-Control: no-store
 
 這張 token 的 `sub` 是服務自己（例如 `reconcile-job`），不是任何人；效期 10 分鐘，過期再換。和直接用 API key 比：
 
-- 送到各個 API 的是短效 token，被 log 記下來，10 分鐘後就沒用了。長效的 `client_secret` 只送給授權伺服器。
+- 送到各個 API 的是短效 token，被 log 記下來，10 分鐘後就沒用。長效的 `client_secret` 只送給授權伺服器。
 - 各個 API 用驗 JWT 的方式驗 token，不用各自維護一份 API key 表；撤銷、scope、稽核集中在授權伺服器。
-- 沒有使用者、沒有瀏覽器，所以沒有 redirect、沒有同意畫面，也**不會發 refresh token**（需要時重新換一張即可）。
+- 沒有使用者、沒有瀏覽器，所以沒有 redirect、沒有同意畫面，也**不會發 refresh token**（需要時重新換一張）。
 
-`client_secret` 本身仍是共享祕密。更進一步的做法是 `private_key_jwt`：client 只註冊公鑰，換 token 時用私鑰簽一個短效的 JWT 當作證明（RFC 7523），授權伺服器從頭到尾不持有能冒充這個 client 的祕密。三種 OAuth 流程的對照可以在 [OAuth 三種流程](#/lab/DeviceCodeLab) 實驗室切換到 Client Credentials 看。
+三種 OAuth 流程的對照，在 [OAuth 三種流程](#/lab/DeviceCodeLab) 實驗室切換到 Client Credentials 看。
+
+## 機器憑證怎麼選
+
+| 做法 | 祕密有沒有送出 | 效期 | 適合 |
+|---|---|---|---|
+| API key | 每個請求都送 | 長（要設到期） | 給外部開發者、簡單整合 |
+| client credentials + `client_secret` | 只送給授權伺服器 | access token 短 | 已經有授權伺服器的內部服務、B2B 整合 |
+| client credentials + `private_key_jwt` | 不送祕密，只送簽章 | access token 短 | 同上，安全要求較高 |
+| mTLS | 不送祕密 | 憑證可以很短（例如幾小時，自動輪替） | 同一個平台內的服務對服務，有 mesh 或內部 CA |
+| 雲端工作負載身分（例如 CI 用 OIDC 換雲端臨時憑證） | 不存長效祕密 | 臨時憑證短 | 雲端或 CI 上的工作；見 [CLI 的 token 儲存](#/skill/cli-token-storage) |
+
+:::stop 讀到這裡可以先停：會設計 API key 的儲存、scope 與撤銷，會用 client credentials 換短效 token，也看得懂五種機器憑證的選擇表。後面的 private_key_jwt 與 mTLS 在服務間不想傳送祕密時回來讀；MFA、SSO 與 TOTP 程式，在要替人員帳號加第二因素或接企業登入時再讀。
+
+## 不送出祕密：private_key_jwt 與 mTLS
+
+### private_key_jwt：連 client_secret 都不送
+
+`client_secret` 本身仍是共享祕密。更進一步的做法是 `private_key_jwt`：client 只註冊公鑰，換 token 時用私鑰簽一個短效的 JWT 當作證明（RFC 7523），授權伺服器從頭到尾不持有能冒充這個 client 的祕密。
 
 ### mTLS：用憑證證明身分
 
@@ -71,18 +87,6 @@ Cache-Control: no-store
 私鑰從不離開客戶端，也沒有任何祕密在網路上傳送；被動監聽或 log 拿不到可以重放的東西。代價是要經營一套內部 CA：簽發、輪替、撤銷。實務上常交給 service mesh（例如 Istio、Linkerd）自動簽發短效憑證並在 sidecar 處理 mTLS，服務程式本身不用改。服務身分常用 SPIFFE ID 的格式寫在 SAN 裡，例如 `spiffe://example.org/ns/prod/sa/reconcile-job`。
 
 mTLS 也能和 OAuth 結合：RFC 8705 定義了用客戶端憑證向授權伺服器驗證，以及把 access token 綁定到憑證（certificate-bound token），token 被偷了，沒有對應私鑰也用不了。
-
-### 怎麼選
-
-| 做法 | 祕密有沒有送出 | 效期 | 適合 |
-|---|---|---|---|
-| API key | 每個請求都送 | 長（要設到期） | 給外部開發者、簡單整合 |
-| client credentials + `client_secret` | 只送給授權伺服器 | access token 短 | 已經有授權伺服器的內部服務、B2B 整合 |
-| client credentials + `private_key_jwt` | 不送祕密，只送簽章 | access token 短 | 同上，安全要求較高 |
-| mTLS | 不送祕密 | 憑證可以很短（例如幾小時，自動輪替） | 同一個平台內的服務對服務，有 mesh 或內部 CA |
-| 雲端工作負載身分（例如 CI 用 OIDC 換雲端臨時憑證） | 不存長效祕密 | 臨時憑證短 | 跑在雲端或 CI 上的工作；見 [CLI 的 token 儲存](#/skill/cli-token-storage) |
-
-:::stop 讀到這裡可以先停：會設計 API key 的儲存、scope 與撤銷，也分得出 client credentials 與 mTLS 的使用時機。後面的 MFA、SSO 與 TOTP 程式，在要替人員帳號加第二因素或接企業登入時再回來讀。
 
 ## MFA：第二個因素
 

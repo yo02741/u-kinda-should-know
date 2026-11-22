@@ -1,4 +1,4 @@
-## 從一個具體問題開始：按了取消，清單上的電話還是變了
+## 具體問題：按了取消，清單上的電話還是變了
 
 預約清單的每一筆有「編輯」按鈕，打開 Dialog `EditAppointment` 修改病患的聯絡電話。AI 產生的程式先複製一份再綁到表單上：
 
@@ -8,15 +8,9 @@ const props = defineProps({ appointment: Object })
 const draft = reactive({ ...props.appointment })   // 「複製」一份給表單用
 ```
 
-櫃台把王小明的電話從 `0912-000-111` 改成 `0912-000-999`，想想不對，按了「取消」。Dialog 關掉了，清單上那一筆的電話卻已經是 `0912-000-999`。展開 `{ ...props.appointment }` 只複製第一層：`draft.status` 是新的，`draft.patient` 和原資料指向同一個物件，改 `draft.patient.contact.phone` 就是改清單的資料。
+櫃台把王小明的電話從 `0912-000-111` 改成 `0912-000-999`，想想不對，按了「取消」。Dialog 關掉了，清單上那一筆的電話卻已經是 `0912-000-999`。
 
-第二版改成 `JSON.parse(JSON.stringify(props.appointment))`，取消的問題沒了，儲存時卻出現 `TypeError: draft.date.getTime is not a function`：`date` 原本是 `Date`，經過 JSON 變成了字串。第三版改用 `structuredClone(props.appointment)`，一打開 Dialog 就出現 `DataCloneError: Failed to execute 'structuredClone' on 'Window': #<Object> could not be cloned.`，因為 `props.appointment` 是父元件 `reactive` 清單裡的一筆，拿到的是 Vue 的 Proxy。
-
-三個錯都來自同一件事：物件與陣列在變數之間傳來傳去時，傳的是參考。要寫對編輯表單、要讓 Vue 的 `watch` 與 `shallowRef` 照預期觸發，都得知道什麼時候是同一份資料、什麼時候是複本。
-
-## 運作原理
-
-### 變數裡放的是值還是參考
+## 變數裡放的是值還是參考，複製了幾層
 
 ```
 const a = 3
@@ -28,11 +22,7 @@ const same = appt        appt ─┐
                                      （只有一份，改 same.status 就是改 appt.status）
 ```
 
-數字、字串、布林、`null`、`undefined`（以及 `bigint`、`symbol`）是原始值，指定給另一個變數就是一份新的值。物件、陣列、函式、`Date`、`Map` 是物件，變數裡放的是指向那份資料的參考。把物件傳進函式、放進另一個陣列、指定給另一個變數，都只多了一個參考。
-
-`===` 比較物件時比的也是參考：`{ id: 1 } === { id: 1 }` 是 `false`，`same === appt` 是 `true`。
-
-### 淺拷貝只複製第一層
+原始值（數字、字串、布林、`null`、`undefined`、`bigint`、`symbol`）指定給另一個變數就是一份新的值。物件、陣列、函式、`Date`、`Map` 是物件，變數裡放的是參考：傳進函式、放進陣列、指定給另一個變數，都只多了一個參考。`===` 比較物件時比的也是參考，`{ id: 1 } === { id: 1 }` 是 `false`。
 
 ```
 const copy = { ...appt }
@@ -42,9 +32,7 @@ copy ──→ { id: 501, status: 'booked', patient ──┴──→ { name: '
           ↑ 第一層是新的                               ↑ 內層仍是同一份
 ```
 
-`{ ...obj }`、`Object.assign({}, obj)`、`[...arr]`、`arr.slice()`、`Array.from(arr)` 都是淺拷貝。改 `copy.status` 不影響 `appt`，改 `copy.patient.contact.phone` 會。
-
-### 四種「複製」的差別
+`{ ...obj }`、`Object.assign({}, obj)`、`[...arr]`、`arr.slice()`、`Array.from(arr)` 都是淺拷貝。開頭的 `draft.patient` 和原資料指向同一個物件，改 `draft.patient.contact.phone` 就是改清單的資料。
 
 | 寫法 | 複製幾層 | `Date` | `Map`、`Set` | 值是 `undefined` 的欄位 | 函式 | 循環參考 | Vue 的 Proxy |
 |---|---|---|---|---|---|---|---|
@@ -53,62 +41,7 @@ copy ──→ { id: 501, status: 'booked', patient ──┴──→ { name: '
 | `structuredClone(a)` | 每一層 | 新的 `Date` | 新的 | 保留 | 丟出 `DataCloneError` | 保留結構 | 丟出 `DataCloneError`，先 `toRaw` |
 | `JSON.parse(JSON.stringify(a))` | 每一層 | 變成字串 | 變成 `{}` | 欄位消失 | 欄位消失 | 丟出 TypeError | 可以（透過 Proxy 讀值） |
 
-`structuredClone` 是 Baseline 2022，主流瀏覽器與 Node 17 以後都能用，也能在 Web Worker 裡用。它複製不了函式、DOM 節點、class 實例的方法（複製出來只剩資料欄位），以及 Proxy。
-
-### 不可變更新
-
-不改原本的物件與陣列，改完的部分做成新的，沒改的部分沿用原本的參考：
-
-| 要做的事 | 會改到原資料的寫法 | 不可變更新 |
-|---|---|---|
-| 改一個欄位 | `appt.status = 'checked-in'` | `{ ...appt, status: 'checked-in' }` |
-| 改內層欄位 | `appt.patient.phone = p` | `{ ...appt, patient: { ...appt.patient, phone: p } }` |
-| 加一筆 | `list.push(a)` | `[...list, a]` |
-| 刪一筆 | `list.splice(i, 1)` | `list.filter((x) => x.id !== id)` |
-| 換一筆 | `list[i] = a` | `list.map((x) => (x.id === a.id ? a : x))` 或 `list.with(i, a)` |
-| 排序 | `list.sort(fn)` | `list.toSorted(fn)` |
-
-不可變更新之後，有變的那一筆與外層陣列是新的參考，其他筆還是原本的物件。程式只要比 `old !== next` 就知道哪裡變了，不必逐欄比較。React 的 state、Vue 的 `shallowRef` 與 `watch` 的預設比較都靠這一點。
-
-### Vue 的響應式和參考的關係
-
-- `reactive(obj)` 回傳一個包住 `obj` 的 Proxy，`reactive(obj) !== obj`；`ref` 的值是物件時，`.value` 也是這樣的 Proxy。`toRaw(proxy)` 取回原始物件。
-- 預設是深層的：改 `state.patient.contact.phone`，用到它的畫面會更新。所以在 Vue 裡直接改內層欄位「能動」，問題只在改到的是不是自己的資料。
-- `shallowRef` 只追蹤 `.value` 本身。從 API 拿回一大包只會整批替換的資料時常用它（省下深層追蹤的成本），代價是更新一定要換成新物件：`list.value.push(x)` 畫面不會變，`list.value = [...list.value, x]` 才會。
-- `watch` 的深度依來源而定：
-
-| 監看的來源 | 改內層欄位會不會觸發 |
-|---|---|
-| `watch(appointment, …)`，`appointment` 是物件型的 `ref` | 不會，`.value` 被換掉才會 |
-| `watch(state, …)`，`state` 是 `reactive` 物件 | 會，直接監看 reactive 物件時隱含 deep |
-| `watch(() => state.patient, …)` | 不會，getter 回傳不同物件才會 |
-| `watch(() => state.patient.phone, …)` | 會，監看的就是那個值 |
-| 以上任何一種加 `{ deep: true }` | 會 |
-
-- props 屬於父元件。`<script setup>` 裡寫 `props.appointment = {}`，Console 出現 `[Vue warn] Set operation on key "appointment" failed: target is readonly.`；改 `props.appointment.patient.phone` 不會有任何警告，父元件的資料直接被改掉。要改就 `emit` 給父元件，由擁有資料的一方更新。
-
-React 的對應規則更嚴格：state 一律要換成新的參考。`list.push(x); setList(list)` 不會重新渲染，因為 React 用 `Object.is` 比較前後的值，兩者是同一個陣列；要寫 `setList([...list, x])`。
-
-## 實際程式碼
-
-下面幾段在本站的 JavaScript 執行環境（Web Worker）裡跑。Worker 裡沒有 Vue，第四段用一般的 `Proxy` 模擬 `reactive` 回傳的物件。
-
-### 參考：指定與傳參數都不複製
-
-```js run
-const appt = { id: 501, status: 'booked', patient: { name: '王小明' } }
-const same = appt
-same.status = 'checked-in'
-console.log('appt.status =', appt.status)          // checked-in：同一份
-console.log('same === appt：', same === appt)
-console.log('內容一樣的兩個物件：', { id: 1 } === { id: 1 })
-
-function cancel(a) { a.status = 'cancelled' }      // 函式改到呼叫端的資料
-cancel(appt)
-console.log('呼叫 cancel 之後：', appt.status)
-```
-
-### 淺拷貝與逐層展開
+## 最小範例：淺拷貝與逐層展開，以及編輯 Dialog
 
 ```js run
 const appt = { id: 501, status: 'booked', patient: { name: '王小明', contact: { phone: '0912-000-111' } } }
@@ -126,9 +59,51 @@ const next = { ...appt, patient: { ...appt.patient, contact: { ...appt.patient.c
 console.log('next 的電話：', next.patient.contact.phone, '／原資料：', appt.patient.contact.phone)
 ```
 
-:::stop 讀到這裡可以先停：分得出兩個變數是同一份資料還是複本，會用逐層展開改內層。後面的 `structuredClone`、Proxy 與 Vue 元件寫法，在寫編輯 Dialog 或遇到 `DataCloneError` 時再回來讀。
+編輯 Dialog 開啟時複製每一層，取消時原資料一個欄位都沒動過：
 
-### `structuredClone` 與 JSON 來回
+```vue
+<script setup>
+import { ref, toRaw, watch } from 'vue'
+
+const props = defineProps({ appointment: { type: Object, required: true } })
+const emit = defineEmits(['save', 'close'])
+
+// 開啟時複製一份：每一層都是新的，Date 仍是 Date
+const draft = ref(structuredClone(toRaw(props.appointment)))
+
+// 換一筆要編輯的掛號時重新複製；監看的是 props.appointment 這個參考
+watch(() => props.appointment, (next) => { draft.value = structuredClone(toRaw(next)) })
+
+function save() { emit('save', draft.value) }   // 父元件決定怎麼換進清單
+function cancel() { emit('close') }             // 原資料一個欄位都沒動過
+</script>
+```
+
+## 最常見的兩個錯誤
+
+- **`DataCloneError: Failed to execute 'structuredClone' on 'Window': #<Object> could not be cloned.`**：`props.appointment` 是父元件 `reactive` 清單裡的一筆，拿到的是 Vue 的 Proxy。先 `toRaw()`；Pinia store 的狀態也一樣。
+- **`TypeError: draft.date.getTime is not a function`**：用 `JSON.parse(JSON.stringify(…))` 複製，`Date` 變成了字串。改用 `structuredClone`，或複製後 `new Date(draft.date)`。
+
+:::stop 讀到這裡可以先停：分得出兩個變數是同一份資料還是複本，會用逐層展開改內層、用 `structuredClone(toRaw(…))` 做編輯表單的複本。後面的不可變更新、`watch` 與 `shallowRef` 的觸發條件，在 `watch` 沒觸發、畫面沒更新或要更新清單時再回來讀。
+
+## 參考：指定與傳參數都不複製
+
+```js run
+const appt = { id: 501, status: 'booked', patient: { name: '王小明' } }
+const same = appt
+same.status = 'checked-in'
+console.log('appt.status =', appt.status)          // checked-in：同一份
+console.log('same === appt：', same === appt)
+console.log('內容一樣的兩個物件：', { id: 1 } === { id: 1 })
+
+function cancel(a) { a.status = 'cancelled' }      // 函式改到呼叫端的資料
+cancel(appt)
+console.log('呼叫 cancel 之後：', appt.status)
+```
+
+## `structuredClone` 與 JSON 來回
+
+`structuredClone` 是 Baseline 2022，主流瀏覽器與 Node 17 以後都能用，也能在 Web Worker 裡用。它複製不了函式、DOM 節點、class 實例的方法（複製出來只剩資料欄位），以及 Proxy。
 
 ```js run
 const appt = {
@@ -153,7 +128,7 @@ const c = structuredClone(a)
 console.log('structuredClone 保留循環：', c.self === c)
 ```
 
-### Proxy 與函式複製不了
+## Proxy 與函式複製不了
 
 ```js run
 // Vue 的 reactive() 回傳 Proxy；這裡用一般的 Proxy 模擬
@@ -176,7 +151,20 @@ try {
 }
 ```
 
-### 不可變更新：只換掉有變的部分
+## 不可變更新：只換掉有變的部分
+
+不改原本的物件與陣列，改完的部分做成新的，沒改的部分沿用原本的參考：
+
+| 要做的事 | 會改到原資料的寫法 | 不可變更新 |
+|---|---|---|
+| 改一個欄位 | `appt.status = 'checked-in'` | `{ ...appt, status: 'checked-in' }` |
+| 改內層欄位 | `appt.patient.phone = p` | `{ ...appt, patient: { ...appt.patient, phone: p } }` |
+| 加一筆 | `list.push(a)` | `[...list, a]` |
+| 刪一筆 | `list.splice(i, 1)` | `list.filter((x) => x.id !== id)` |
+| 換一筆 | `list[i] = a` | `list.map((x) => (x.id === a.id ? a : x))` 或 `list.with(i, a)` |
+| 排序 | `list.sort(fn)` | `list.toSorted(fn)` |
+
+不可變更新之後，有變的那一筆與外層陣列是新的參考，其他筆還是原本的物件。程式只要比 `old !== next` 就知道哪裡變了，不必逐欄比較。React 的 state、Vue 的 `shallowRef` 與 `watch` 的預設比較都靠這一點。
 
 ```js run
 const list = [
@@ -203,27 +191,7 @@ frozen.patient.name = '王大明'
 console.log('第一層沒變：', frozen.status, '／內層變了：', frozen.patient.name)
 ```
 
-### 寫成 Vue 元件
-
-```vue
-<script setup>
-import { ref, toRaw, watch } from 'vue'
-
-const props = defineProps({ appointment: { type: Object, required: true } })
-const emit = defineEmits(['save', 'close'])
-
-// 開啟時複製一份：每一層都是新的，Date 仍是 Date
-const draft = ref(structuredClone(toRaw(props.appointment)))
-
-// 換一筆要編輯的掛號時重新複製；監看的是 props.appointment 這個參考
-watch(() => props.appointment, (next) => { draft.value = structuredClone(toRaw(next)) })
-
-function save() { emit('save', draft.value) }   // 父元件決定怎麼換進清單
-function cancel() { emit('close') }             // 原資料一個欄位都沒動過
-</script>
-```
-
-父元件收到 `save` 時用不可變更新換掉那一筆：
+父元件收到編輯 Dialog 的 `save` 時，用不可變更新換掉那一筆：
 
 ```js
 function onSave(updated) {
@@ -231,14 +199,31 @@ function onSave(updated) {
 }
 ```
 
-## 常見錯誤與錯誤訊息
+## Vue 的響應式和參考的關係
+
+- `reactive(obj)` 回傳一個包住 `obj` 的 Proxy，`reactive(obj) !== obj`；`ref` 的值是物件時，`.value` 也是這樣的 Proxy。`toRaw(proxy)` 取回原始物件。
+- 預設是深層的：改 `state.patient.contact.phone`，用到它的畫面會更新。所以在 Vue 裡直接改內層欄位「能動」，問題只在改到的是不是自己的資料。
+- `shallowRef` 只追蹤 `.value` 本身。從 API 拿回一大包只會整批替換的資料時常用它（省下深層追蹤的成本），代價是更新一定要換成新物件：`list.value.push(x)` 畫面不會變，`list.value = [...list.value, x]` 才會。
+- `watch` 的深度依來源而定：
+
+| 監看的來源 | 改內層欄位會不會觸發 |
+|---|---|
+| `watch(appointment, …)`，`appointment` 是物件型的 `ref` | 不會，`.value` 被換掉才會 |
+| `watch(state, …)`，`state` 是 `reactive` 物件 | 會，直接監看 reactive 物件時隱含 deep |
+| `watch(() => state.patient, …)` | 不會，getter 回傳不同物件才會 |
+| `watch(() => state.patient.phone, …)` | 會，監看的就是那個值 |
+| 以上任何一種加 `{ deep: true }` | 會 |
+
+- props 屬於父元件。`<script setup>` 裡寫 `props.appointment = {}`，Console 出現 `[Vue warn] Set operation on key "appointment" failed: target is readonly.`；改 `props.appointment.patient.phone` 不會有任何警告，父元件的資料直接被改掉。要改就 `emit` 給父元件，由擁有資料的一方更新。
+
+React 的對應規則更嚴格：state 一律要換成新的參考。`list.push(x); setList(list)` 不會重新渲染，因為 React 用 `Object.is` 比較前後的值，兩者是同一個陣列；要寫 `setList([...list, x])`。
+
+## 其他錯誤與訊息
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | 按「取消」後原資料也變了 | 表單綁在 props 上，或用展開做淺拷貝，內層共用 | `structuredClone(toRaw(…))`，或逐層展開 |
-| `DataCloneError: Failed to execute 'structuredClone' on 'Window': #<Object> could not be cloned.` | 複製了 Vue 的 Proxy | 先 `toRaw()`；Pinia store 的狀態也一樣 |
 | `DataCloneError: … could not be cloned.`，訊息裡是一段函式 | 物件裡有函式（方法、回呼） | 只複製資料欄位，函式另外處理 |
-| `TypeError: draft.date.getTime is not a function` | JSON 來回複製讓 `Date` 變成字串 | 改用 `structuredClone`，或複製後 `new Date(draft.date)` |
 | `TypeError: Converting circular structure to JSON` | 物件裡有循環參考（例如子節點指回父節點） | 不用 JSON 複製；送 API 前只挑需要的欄位 |
 | `[Vue warn] Set operation on key "appointment" failed: target is readonly.` | 在子元件指定了 props | `emit` 給父元件 |
 | 改內層欄位，`watch` 沒有觸發 | 監看的是物件型 ref 或回傳物件的 getter | 加 `{ deep: true }`，或監看那個欄位 |

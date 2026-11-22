@@ -1,4 +1,4 @@
-## 從一個具體問題開始：同一筆訂單，三個地方三個樣子
+## 具體問題：同一筆訂單，三個地方三個樣子
 
 後端從資料庫讀出一筆訂單，回傳給前端：
 
@@ -12,7 +12,89 @@
 - 金額是三筆 `0.1` 元的手續費加起來的，畫面顯示 `0.30000000000000004`；對帳時和金流的數字差了一點點。
 - 訂單時間 `01:30`，客服說客人明明是早上 9:30 下單的。
 
-這三個問題的共同點：資料在程式內部的型別和傳輸或儲存的格式之間轉換時，被用不同的規則解讀了。數字、文字、時間、金額各有自己的陷阱。
+## 大整數：超過 2^53 的 ID 用字串傳
+
+JSON 規格本身沒有限制數字大小，但 RFC 8259 提醒：很多實作把數字讀成 IEEE 754 雙精度浮點數。JavaScript 的 `Number` 就是這種浮點數，只能精確表示到 `2^53 − 1`（`Number.MAX_SAFE_INTEGER`，9007199254740991）。超過的整數會被捨入到最接近的可表示值。
+
+Python 的 `int` 沒有上限，所以後端自己測永遠正常，問題出現在前端 `JSON.parse` 的那一刻：
+
+```js run
+const body = '{"order_id": 9007199254740993, "amount": "990.00"}'
+const data = JSON.parse(body)
+console.log(`解析後的 order_id：${data.order_id}`)            // 少了 1
+console.log(`安全整數上限：${Number.MAX_SAFE_INTEGER}`)
+console.log(`還是安全整數嗎？${Number.isSafeInteger(data.order_id)}`)
+console.log(`兩個不同的數字相等？${9007199254740992 === 9007199254740993}`)
+
+// 解法：ID 用字串傳；真的要算再轉 BigInt
+const safe = JSON.parse('{"order_id": "9007199254740993"}')
+console.log(`字串傳輸：${safe.order_id}，BigInt 運算：${BigInt(safe.order_id) + 1n}`)
+```
+
+64 位元的 ID（例如 Snowflake 這類分散式 ID 產生器的輸出）很容易超過 2^53。對外的 API 一律把這類 ID 當**字串**傳，前端只拿來比對與顯示，不做運算。
+
+## 時間：UTC 儲存、ISO 8601 傳輸、顯示時才轉時區
+
+一個時間點要完整，必須帶時區或 UTC 偏移。Python 的 `datetime` 分兩種：
+
+- **naive**：沒有 `tzinfo`，`datetime(2026, 10, 20, 9, 30)` 不知道是哪裡的 9:30
+- **aware**：有 `tzinfo`，是一個確定的時間點
+
+規則只有三條：
+
+1. **存 UTC**。程式裡用 `datetime.now(timezone.utc)`，不用 `datetime.now()`（naive、機器的本地時間）也不用 `datetime.utcnow()`（naive，Python 3.12 起已標為 deprecated）。PostgreSQL 用 `timestamptz`。
+2. **傳 ISO 8601**（RFC 3339 是它在網路協定上的子集）：`2026-10-20T01:30:00Z` 或 `2026-10-20T09:30:00+08:00`。永遠帶 `Z` 或偏移，不要傳 `2026-10-20 01:30:00` 這種沒有時區的字串。
+3. **顯示時才轉**成使用者的時區，而且只在最後一步轉。
+
+### 兩個最常見的錯誤訊息
+
+- **`TypeError: Object of type datetime is not JSON serializable`**：JSON 沒有日期型別（`Decimal` 也一樣）。轉成 ISO 8601 字串（aware 的 `isoformat()`）；用 pydantic 時它會處理。
+- **`TypeError: can't compare offset-naive and offset-aware datetimes`**：混用了有時區與沒時區的 datetime。在資料進來的邊界統一轉成 aware UTC。
+
+## 金額：Decimal 或整數分，不用 float
+
+`float` 是二進位浮點數，`0.1` 在二進位裡是無窮循環小數，存進去就已經有誤差。誤差在一次加法裡很小，但累積、比較、四捨五入時就會出現錯誤的結果。
+
+兩種正確做法：
+
+- **`Decimal`**：十進位運算，`Decimal("0.1") + Decimal("0.2") == Decimal("0.3")`。一定要從字串建立，`Decimal(0.1)` 會把 float 的誤差一起帶進來。四捨五入用 `quantize` 並指定規則。資料庫對應 `numeric(12, 2)`。
+- **整數的最小單位**（分）：990.00 元存成 `99000`。加減乘都是整數運算，沒有誤差；除法要明確決定怎麼取整。不同幣別的小數位數不同（例如日圓沒有小數、美元兩位），要和幣別代碼一起存。
+
+```python run
+from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN
+
+total = 0.0
+for _ in range(10):
+    total += 0.1
+print("float 加十次 0.1：", total, total == 1.0)
+print("0.1 + 0.2 =", 0.1 + 0.2)
+
+print("Decimal：", Decimal("0.1") + Decimal("0.2"))
+print("從 float 建立：", Decimal(0.1))           # 誤差一起帶進來
+print("從字串建立：", Decimal("0.1"))
+
+# 四捨五入要指定規則
+price = Decimal("2.665")
+print("ROUND_HALF_UP：", price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))      # 2.67
+print("ROUND_HALF_EVEN：", price.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))  # 2.66
+print("float 的 round(2.675, 2)：", round(2.675, 2))   # 2.67：2.675 實際存成 2.67499999...
+print("round(2.5), round(3.5)：", round(2.5), round(3.5))   # 2 4：Python 的 round 是銀行家捨入
+
+# 整數分：單價 990.00 元 = 99000 分
+subtotal = 99_000 * 3
+discount = subtotal * 15 // 100                   # 打 85 折，折扣金額向下取到整數分
+print("小計、折扣、應付（分）：", subtotal, discount, subtotal - discount)
+
+# 拆帳：100 元三人分，多出來的一分要分給某個人，總和才對得上
+def split(total_cents, n):
+    base, rest = divmod(total_cents, n)
+    return [base + (1 if i < rest else 0) for i in range(n)]
+
+parts = split(10_000, 3)
+print("拆帳：", parts, "總和：", sum(parts))
+```
+
+:::stop 讀到這裡可以先停：會把大整數 ID 用字串傳、時間存 UTC 傳 ISO 8601、金額用 Decimal 或整數分。後面的 UTF-8 與亂碼、JSON 的型別限制、時區換算範例、時間戳記單位與錯誤訊息對照，在遇到亂碼、時間差 8 小時或對帳差一分錢時再回來查。
 
 ## 文字：字元、Unicode 與 UTF-8 位元組
 
@@ -44,7 +126,7 @@ except UnicodeDecodeError as e:
 
 「長度」因此有三種意思：字元數、位元組數、畫面上佔的寬度。欄位限制要講清楚是哪一種：PostgreSQL 的 `varchar(20)` 算的是字元；網路協定、訊息佇列、某些 API 的大小上限算的是位元組。MySQL 的 `utf8` 字元集最多只有 3 個位元組（`utf8mb3`），存不了 emoji，要用 `utf8mb4`。
 
-### 亂碼怎麼來
+## 亂碼怎麼來
 
 亂碼幾乎都是同一件事：**位元組本身沒壞，是被用錯的編碼解讀**。
 
@@ -118,39 +200,9 @@ print(json.dumps({"name": "王小明"}))                            # 預設把�
 print(json.dumps({"name": "王小明"}, ensure_ascii=False))         # 直接輸出 UTF-8 字元
 ```
 
-### 大整數：2^53 之後就不準了
+## 時區換算範例、日光節約與只有日期的資料
 
-JSON 規格本身沒有限制數字大小，但 RFC 8259 提醒：很多實作把數字讀成 IEEE 754 雙精度浮點數。JavaScript 的 `Number` 就是這種浮點數，只能精確表示到 `2^53 − 1`（`Number.MAX_SAFE_INTEGER`，9007199254740991）。超過的整數會被捨入到最接近的可表示值。
-
-Python 的 `int` 沒有上限，所以後端自己測永遠正常，問題出現在前端 `JSON.parse` 的那一刻：
-
-```js run
-const body = '{"order_id": 9007199254740993, "amount": "990.00"}'
-const data = JSON.parse(body)
-console.log(`解析後的 order_id：${data.order_id}`)            // 少了 1
-console.log(`安全整數上限：${Number.MAX_SAFE_INTEGER}`)
-console.log(`還是安全整數嗎？${Number.isSafeInteger(data.order_id)}`)
-console.log(`兩個不同的數字相等？${9007199254740992 === 9007199254740993}`)
-
-// 解法：ID 用字串傳；真的要算再轉 BigInt
-const safe = JSON.parse('{"order_id": "9007199254740993"}')
-console.log(`字串傳輸：${safe.order_id}，BigInt 運算：${BigInt(safe.order_id) + 1n}`)
-```
-
-64 位元的 ID（例如 Snowflake 這類分散式 ID 產生器的輸出）很容易超過 2^53。對外的 API 一律把這類 ID 當**字串**傳，前端只拿來比對與顯示，不做運算。
-
-## 時間：UTC 儲存、ISO 8601 傳輸、顯示時才轉時區
-
-一個時間點要完整，必須帶時區或 UTC 偏移。Python 的 `datetime` 分兩種：
-
-- **naive**：沒有 `tzinfo`，`datetime(2026, 10, 20, 9, 30)` 不知道是哪裡的 9:30
-- **aware**：有 `tzinfo`，是一個確定的時間點
-
-規則只有三條：
-
-1. **存 UTC**。程式裡用 `datetime.now(timezone.utc)`，不用 `datetime.now()`（naive、機器的本地時間）也不用 `datetime.utcnow()`（naive，Python 3.12 起已標為 deprecated）。PostgreSQL 用 `timestamptz`：它存的是一個時間點，寫入時依連線時區換算、讀出時換成連線時區顯示；`timestamp`（without time zone）只存數字，不記得是哪個時區。
-2. **傳 ISO 8601**（RFC 3339 是它在網路協定上的子集）：`2026-10-20T01:30:00Z` 或 `2026-10-20T09:30:00+08:00`。永遠帶 `Z` 或偏移，不要傳 `2026-10-20 01:30:00` 這種沒有時區的字串。
-3. **顯示時才轉**成使用者的時區，而且只在最後一步轉。
+PostgreSQL 的 `timestamptz` 存的是一個時間點，寫入時依連線時區換算、讀出時換成連線時區顯示；`timestamp`（without time zone）只存數字，不記得是哪個時區。
 
 台灣是 UTC+8，沒有日光節約時間，所以固定偏移 `timezone(timedelta(hours=8))` 換算是正確的。有日光節約的地區不能用固定偏移，要用 `zoneinfo.ZoneInfo("America/New_York")` 這類 IANA 時區名稱。本站的瀏覽器 Python 沒有時區資料庫，所以範例都用固定偏移。
 
@@ -187,7 +239,7 @@ print(late.date(), "→ 台灣日期", late.astimezone(TAIPEI).date())
 
 生日、到期日這類**只有日期**的資料，用 `date`（PostgreSQL 的 `date`）存，不要存成某一天午夜的時間點，否則換時區顯示會差一天。
 
-### 時間戳記：秒還是毫秒
+## 時間戳記：秒還是毫秒
 
 Unix 時間戳記是從 1970-01-01T00:00:00Z 起算的經過時間，本身沒有時區問題，但**單位**常常搞混：
 
@@ -218,62 +270,17 @@ print("秒當成毫秒：", datetime.fromtimestamp(seconds / 1000, tz=timezone.u
 
 畫面上出現 1970 年，或解析時丟出年份超出範圍（訊息的細節依 Python 版本與平台而異，也可能是 `OverflowError`），第一個要懷疑秒與毫秒。API 欄位名稱最好直接寫出單位（`expires_at_ms`），或乾脆傳 ISO 8601 字串。
 
-## 金額：Decimal 或整數分，不用 float
-
-`float` 是二進位浮點數，`0.1` 在二進位裡是無窮循環小數，存進去就已經有誤差。誤差在一次加法裡很小，但累積、比較、四捨五入時就會出現錯誤的結果。
-
-兩種正確做法：
-
-- **`Decimal`**：十進位運算，`Decimal("0.1") + Decimal("0.2") == Decimal("0.3")`。一定要從字串建立，`Decimal(0.1)` 會把 float 的誤差一起帶進來。四捨五入用 `quantize` 並指定規則。資料庫對應 `numeric(12, 2)`。
-- **整數的最小單位**（分）：990.00 元存成 `99000`。加減乘都是整數運算，沒有誤差；除法要明確決定怎麼取整。不同幣別的小數位數不同（例如日圓沒有小數、美元兩位），要和幣別代碼一起存。
-
-```python run
-from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN
-
-total = 0.0
-for _ in range(10):
-    total += 0.1
-print("float 加十次 0.1：", total, total == 1.0)
-print("0.1 + 0.2 =", 0.1 + 0.2)
-
-print("Decimal：", Decimal("0.1") + Decimal("0.2"))
-print("從 float 建立：", Decimal(0.1))           # 誤差一起帶進來
-print("從字串建立：", Decimal("0.1"))
-
-# 四捨五入要指定規則
-price = Decimal("2.665")
-print("ROUND_HALF_UP：", price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))      # 2.67
-print("ROUND_HALF_EVEN：", price.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))  # 2.66
-print("float 的 round(2.675, 2)：", round(2.675, 2))   # 2.67：2.675 實際存成 2.67499999...
-print("round(2.5), round(3.5)：", round(2.5), round(3.5))   # 2 4：Python 的 round 是銀行家捨入
-
-# 整數分：單價 990.00 元 = 99000 分
-subtotal = 99_000 * 3
-discount = subtotal * 15 // 100                   # 打 85 折，折扣金額向下取到整數分
-print("小計、折扣、應付（分）：", subtotal, discount, subtotal - discount)
-
-# 拆帳：100 元三人分，多出來的一分要分給某個人，總和才對得上
-def split(total_cents, n):
-    base, rest = divmod(total_cents, n)
-    return [base + (1 if i < rest else 0) for i in range(n)]
-
-parts = split(10_000, 3)
-print("拆帳：", parts, "總和：", sum(parts))
-```
+## 金額的傳輸與捨入規則
 
 傳輸時，金額用字串（`"990.00"`）或整數分（`99000`）加上幣別（`"currency": "TWD"`），不要用 JSON number 的小數：對方一用浮點數解析，誤差就回來了。四捨五入規則（四捨五入、銀行家捨入、無條件捨去）是業務規則，要和財務確認，並且寫在同一個函式裡，不要散落各處。
 
-:::stop 讀到這裡可以先停：會處理 UTF-8、JSON 的型別限制、UTC 與時區、Decimal 金額。後面的錯誤訊息對照，在遇到亂碼、`TypeError` 或對帳差一分錢時再回來查。
-
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
 | 現象或訊息 | 原因 | 怎麼修 |
 |---|---|---|
 | `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa4 in position 0: invalid start byte` | 來源不是 UTF-8（例如 Big5 / cp950 的舊檔案） | 確認來源編碼後用正確的 `encoding` 讀；不要直接加 `errors="ignore"` |
 | `UnicodeDecodeError: ... unexpected end of data` | 位元組在一個字的中間被截斷 | 先 decode 成 `str` 再截字元；或用增量解碼器處理串流 |
 | 畫面出現 `Ã©`、`ä¸­` | UTF-8 的位元組被當成 latin-1 / cp1252 解讀 | 檢查讀取端的編碼設定與 `Content-Type` 的 charset |
-| `TypeError: Object of type datetime is not JSON serializable` | JSON 沒有日期型別 | 轉成 ISO 8601 字串（aware 的 `isoformat()`）；用 pydantic 時它會處理 |
-| `TypeError: can't compare offset-naive and offset-aware datetimes` | 混用了有時區與沒時區的 datetime | 在資料進來的邊界統一轉成 aware UTC |
 | 前端顯示的 ID 末幾位不對 | 整數超過 2^53，被 JavaScript 的 Number 捨入 | ID 用字串傳 |
 | 時間差 8 小時 | 存或傳的是沒有時區的時間，某一端當成 UTC、另一端當成本地時間 | 存 `timestamptz`、傳帶 `Z` 或偏移的 ISO 8601 |
 | 日期顯示成 1970 年，或 `ValueError: year must be in 1..9999` | 秒與毫秒搞混 | 看位數（10 位是秒、13 位是毫秒），欄位名稱寫明單位 |

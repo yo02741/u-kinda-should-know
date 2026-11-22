@@ -1,4 +1,4 @@
-## 從一個具體問題開始：按上一頁，篩選條件不見了
+## 具體問題：按上一頁，篩選條件不見了
 
 掛號清單頁用 Vue Router，網址是 `/appointments`。科別、日期、頁碼存在元件的 ref 裡：
 
@@ -13,11 +13,7 @@ watch([dept, date, page], load, { immediate: true })
 
 同一個專案部署之後又出現第二個問題：在 `/appointments/42` 按重新整理，畫面變成 nginx 的 `404 Not Found`。在本機用 `npm run dev` 與 `vite preview` 都測不出來。
 
-兩個問題都和「網址」有關：篩選條件沒有寫進網址，上一頁時元件重建就丟了；SPA 換頁時網址只在瀏覽器裡改，伺服器上沒有 `/appointments/42` 這個檔案。
-
-## 運作原理
-
-### 網址的組成
+## 網址的組成、瀏覽紀錄與 SPA 換頁
 
 ```
 https://clinic.example:8443/appointments/42?date=2026-11-20&dept=%E5%85%A7%E7%A7%91#notes
@@ -34,21 +30,7 @@ scheme       主機      port      path                       query             
 | query | `search`、`searchParams` | 怎麼看這個資源：篩選、排序、頁碼 | 是 |
 | hash | `hash` | 頁內的位置，或 hash 模式的路由 | 否，只留在瀏覽器 |
 
-### 編碼
-
-網址裡只能出現有限的字元，中文、空白、`&`、`=`、`#` 都要編碼。手動拼字串時，「耳鼻喉&頭頸」裡的 `&` 會被當成兩個參數的分隔，`#` 會把後面的內容變成 hash。`URLSearchParams` 會自動處理：
-
-| 寫法 | 空白 | `&` | 中文 |
-|---|---|---|---|
-| `URLSearchParams` | `+` | `%26` | `%E5%85%A7…` |
-| `encodeURIComponent` | `%20` | `%26` | `%E5%85%A7…` |
-| `encodeURI` | `%20` | 不編碼 | `%E5%85%A7…` |
-
-`encodeURI` 保留 `&`、`?`、`/` 這些網址結構的字元，用來編整個網址，不能用在單一個參數值上。query 裡的 `+` 多數伺服器框架都會解成空白。
-
-### 瀏覽紀錄與 History API
-
-每個分頁有一串瀏覽紀錄（session history）與一個「目前位置」。上一頁、下一頁是在這串紀錄裡移動：
+每個分頁有一串瀏覽紀錄與一個「目前位置」，上一頁、下一頁是在這串紀錄裡移動：
 
 | API 或動作 | 瀏覽紀錄 | 重新載入頁面嗎 | 觸發的事件 |
 |---|---|---|---|
@@ -58,10 +40,6 @@ scheme       主機      port      path                       query             
 | `history.replaceState(state, '', url)` | 換掉目前這一筆 | 否 | 無 |
 | 使用者按上一頁、下一頁（在同一份文件的紀錄之間） | 移動目前位置 | 否 | `popstate` |
 | 改 `location.hash` | 新增一筆 | 否 | `hashchange` |
-
-`pushState` 之後在目前位置後面的紀錄會被丟掉：從第 1 頁點進 A 再按上一頁，接著點 B，原本的 A 就沒辦法用「下一頁」回去了。`pushState` 的網址必須和目前頁面同源，否則丟出 `SecurityError`。
-
-### SPA 的路由怎麼運作
 
 ```
 使用者點 <RouterLink to="/appointments/42">
@@ -74,9 +52,75 @@ scheme       主機      port      path                       query             
   → Vue Router 讀新的網址，渲染 AppointmentList 元件（元件是重建的）
 ```
 
-上一頁時清單元件是重新建立的，ref 回到初始值。條件寫在網址的 query 裡，新元件才讀得回來；捲動位置則交給 Vue Router 的 `scrollBehavior`，它在 `popstate` 時拿到瀏覽器記下的位置。
+上一頁時清單元件是重新建立的，ref 回到初始值。條件寫在網址的 query 裡，新元件才讀得回來。SPA 換頁時網址只在瀏覽器裡改，伺服器上沒有 `/appointments/42` 這個檔案，重新整理就是 404。
 
-### 重新整理時伺服器看到什麼
+## 最小範例：篩選條件放進 query
+
+```vue
+<script setup>
+import { computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
+const route = useRoute()
+const router = useRouter()
+
+// 從網址讀條件：query 的值都是字串（或字串陣列），要自己轉型、給預設值
+const filters = computed(() => ({
+  date: /^\d{4}-\d{2}-\d{2}$/.test(route.query.date) ? route.query.date : today(),
+  dept: typeof route.query.dept === 'string' ? route.query.dept : '',
+  page: Math.max(1, Number(route.query.page) || 1),
+}))
+
+// 改日期、科別：replace，不新增紀錄；頁碼回到 1
+function setFilter(patch) {
+  router.replace({ query: { ...route.query, ...patch, page: undefined } })
+}
+// 換頁：push，使用者可以用上一頁回到前一頁
+function goPage(page) {
+  router.push({ query: { ...route.query, page } })
+}
+
+// 網址變了就重新載入；上一頁回來時元件重建，也從網址讀回同樣的條件
+watch(filters, (f) => load(f), { immediate: true })
+</script>
+```
+
+`page: undefined` 會讓 Vue Router 把這個參數從網址拿掉。`route.query.page` 是字串 `'2'`，直接和數字 `2` 用 `===` 比較永遠是 `false`。
+
+## 最常見的兩個錯誤
+
+- **重新整理 `/appointments/42` 出現伺服器的 `404 Not Found`**：history 模式下伺服器要對找不到的路徑回 `index.html`，讓前端的路由接手。`vite` 與 `vite preview` 預設就有這個 fallback（`appType: 'spa'`），部署後才看得到問題。nginx 的寫法：
+
+```nginx
+location /assets/ {
+    try_files $uri =404;
+}
+location / {
+    try_files $uri $uri/ /index.html;
+}
+```
+
+- **搜尋框打一個字就多一筆紀錄，上一頁要按很多次**：輸入時用了 `router.push`。輸入中的條件用 `router.replace`，換頁才用 `push`。
+
+:::stop 讀到這裡可以先停：會說出網址每一段的用途、push 與 replace 的差別，把篩選條件寫進 query，並修好重新整理的 404。後面的編碼、hash 模式、`scrollBehavior` 與錯誤訊息表，在網址出現亂碼、要還原捲動位置或部署到子路徑時再回來讀。
+
+## 編碼：`URLSearchParams`、`encodeURIComponent`、`encodeURI`
+
+網址裡只能出現有限的字元，中文、空白、`&`、`=`、`#` 都要編碼。手動拼字串時，「耳鼻喉&頭頸」裡的 `&` 會被當成兩個參數的分隔，`#` 會把後面的內容變成 hash。`URLSearchParams` 會自動處理：
+
+| 寫法 | 空白 | `&` | 中文 |
+|---|---|---|---|
+| `URLSearchParams` | `+` | `%26` | `%E5%85%A7…` |
+| `encodeURIComponent` | `%20` | `%26` | `%E5%85%A7…` |
+| `encodeURI` | `%20` | 不編碼 | `%E5%85%A7…` |
+
+`encodeURI` 保留 `&`、`?`、`/` 這些網址結構的字元，用來編整個網址，不能用在單一個參數值上。query 裡的 `+` 多數伺服器框架都會解成空白。
+
+## `pushState` 的兩個限制
+
+`pushState` 之後在目前位置後面的紀錄會被丟掉：從第 1 頁點進 A 再按上一頁，接著點 B，原本的 A 就沒辦法用「下一頁」回去了。`pushState` 的網址必須和目前頁面同源，否則丟出 `SecurityError`。
+
+## 重新整理時伺服器看到什麼：history 與 hash 模式
 
 | 網址列 | history 模式（`createWebHistory`）伺服器收到 | hash 模式（`createWebHashHistory`）伺服器收到 |
 |---|---|---|
@@ -84,15 +128,13 @@ scheme       主機      port      path                       query             
 | `https://clinic.example/#/appointments/42` | 不會出現這種網址 | `GET /` |
 | `https://clinic.example/assets/index-B3zU5jYu.js` | `GET /assets/index-B3zU5jYu.js` | 同左 |
 
-history 模式下，重新整理 `/appointments/42` 時伺服器要回 `index.html`，讓前端的路由接手；伺服器上的靜態檔（`/assets/` 底下）照常回傳，找不到的仍然回 404。`vite` 與 `vite preview` 預設就有這個 fallback（`appType: 'spa'`），所以問題要到部署後才看得到。
+history 模式下，伺服器上的靜態檔（`/assets/` 底下）照常回傳，找不到的仍然回 404，不要回 HTML。完整的 nginx 設定、`index.html` 與 `/assets/` 的快取規則，見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers)。
 
 hash 模式的網址多了 `#`，但伺服器只會收到 `/`，部署到不能設定 fallback 的靜態主機也能用。本站的網址用的是 `#/skill/…` 這種 hash 路由。hash 模式的缺點是網址比較醜、頁內錨點（`#notes`）不能再拿來跳到段落。
 
 網站放在子路徑（`https://clinic.example/booking/`）時，Vite 的 `base` 設成 `/booking/`，路由用 `createWebHistory(import.meta.env.BASE_URL)`，伺服器的 fallback 也要回 `/booking/index.html`。
 
 瀏覽器另有一套較新的 Navigation API（`navigation.navigate()`、`navigate` 事件），2026 年 1 月成為 Baseline（Chrome 102、Firefox 147、Safari 26.2 起支援）。Vue Router 5 仍然用 History API 實作。
-
-:::stop 讀到這裡可以先停：會說出網址每一段的用途、push 與 replace 的差別，以及重新整理出現 404 的原因。後面的示範與 Vue Router 寫法，在要把篩選條件寫進 query 時再回來讀。
 
 ## 一段可以跑的示範
 
@@ -134,9 +176,7 @@ push('/appointments/57')                                                     // 
 
 輸入搜尋字的三次 `replace` 只留下一筆紀錄；最後一次 `push` 發生在紀錄中間，原本後面的兩筆被丟掉了。
 
-## 實際程式碼
-
-### 路由設定
+## 路由設定與捲動位置
 
 ```js
 // src/router/index.js
@@ -158,64 +198,16 @@ export const router = createRouter({
 
 最後一條路由接住所有沒對到的路徑，顯示前端自己的「找不到頁面」；沒有它，Console 會出現 `[Vue Router warn]: No match found for location with path "/appointmentz"`，畫面一片空白。
 
-### 篩選條件放進 query
-
-```vue
-<script setup>
-import { computed, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-
-const route = useRoute()
-const router = useRouter()
-
-// 從網址讀條件：query 的值都是字串（或字串陣列），要自己轉型、給預設值
-const filters = computed(() => ({
-  date: /^\d{4}-\d{2}-\d{2}$/.test(route.query.date) ? route.query.date : today(),
-  dept: typeof route.query.dept === 'string' ? route.query.dept : '',
-  page: Math.max(1, Number(route.query.page) || 1),
-}))
-
-// 改日期、科別：replace，不新增紀錄；頁碼回到 1
-function setFilter(patch) {
-  router.replace({ query: { ...route.query, ...patch, page: undefined } })
-}
-// 換頁：push，使用者可以用上一頁回到前一頁
-function goPage(page) {
-  router.push({ query: { ...route.query, page } })
-}
-
-// 網址變了就重新載入；上一頁回來時元件重建，也從網址讀回同樣的條件
-watch(filters, (f) => load(f), { immediate: true })
-</script>
-```
-
-`page: undefined` 會讓 Vue Router 把這個參數從網址拿掉。`route.query.page` 是字串 `'2'`，直接和數字 `2` 用 `===` 比較永遠是 `false`。
+捲動位置交給 `scrollBehavior`，它在 `popstate` 時拿到瀏覽器記下的位置。
 
 清單資料要等 API 回來才有高度，`scrollBehavior` 回傳 `savedPosition` 時內容可能還沒畫出來，位置就還原不了。常見的處理是把清單資料快取起來（回上一頁時立刻有資料），或讓 `scrollBehavior` 回傳一個等資料載完才 resolve 的 Promise。
 
-### 伺服器的 fallback
-
-nginx 的寫法：找得到檔案就回檔案，找不到就回 `index.html`；`/assets/` 底下找不到的檔案直接回 404，不要回 HTML。
-
-```nginx
-location /assets/ {
-    try_files $uri =404;
-}
-location / {
-    try_files $uri $uri/ /index.html;
-}
-```
-
-完整的 nginx 設定、`index.html` 與 `/assets/` 的快取規則，見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers)。
-
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 錯誤訊息或現象 | 原因 | 修法 |
 |---|---|---|
-| 重新整理 `/appointments/42` 出現伺服器的 `404 Not Found` | history 模式，伺服器沒有 SPA fallback | 伺服器對找不到的路徑回 `index.html`；不能設定時改用 hash 模式 |
 | 重新整理後白畫面，Console 出現 `Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html".`（舊版 Chrome 寫 `Expected a JavaScript module script`） | JS 檔的網址錯了（常見是 `base` 設定不對），fallback 回了 `index.html` | 核對 Vite 的 `base`；`/assets/` 底下找不到的檔案回 404 而不是 HTML |
 | 上一頁回來，篩選條件與頁碼回到預設 | 條件只存在元件的 ref 裡 | 寫進 `route.query`，從網址讀 |
-| 搜尋框打一個字就多一筆紀錄，上一頁要按很多次 | 輸入時用了 `router.push` | 輸入中的條件用 `router.replace` |
 | 網址出現 `%25E5%2585%25A7` | 已經編碼過的字串又被編碼一次 | 只在組網址的那一層編碼一次，交給 `URLSearchParams` 或 Vue Router 的 `query` 物件 |
 | 科別是「耳鼻喉&頭頸」時只查到「耳鼻喉」 | 手動拼 query，`&` 沒有編碼 | 用 `URLSearchParams` 或 `query` 物件 |
 | `SecurityError: Failed to execute 'pushState' on 'History': A history state object with URL '…' cannot be created in a document with origin '…'` | `pushState` 的網址和目前頁面不同源，或用 `file://` 打開頁面 | 只傳同源的路徑；外部網址用 `location.assign()` |

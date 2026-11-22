@@ -5,9 +5,9 @@
 - `https://tickets.example.com/mcp`：工單系統，工具有 `list_tickets`、`close_ticket`
 - `https://weather.example.com/mcp`：某個團隊順手做的天氣查詢
 
-工單 server 驗 token 的程式只做了一件事：用授權伺服器的公鑰驗簽章。簽章對，就放行。
+工單 server 驗 token 的程式只做一件事：用授權伺服器的公鑰驗簽章。
 
-某天天氣 server 的主機被入侵。攻擊者在 log 裡撿到使用者連線時帶的 access token。這些 token 是同一個授權伺服器簽的，簽章完全正確，於是攻擊者把它們拿去打工單 server：
+天氣 server 的主機被入侵，攻擊者在 log 裡撿到使用者的 access token。它們是同一個授權伺服器簽的，簽章正確，攻擊者拿去打工單 server：
 
 ```http
 POST /mcp HTTP/1.1
@@ -18,30 +18,11 @@ Content-Type: application/json
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"close_ticket","arguments":{"id":"OPS-1182"}}}
 ```
 
-成功了。token 的 `aud`（audience，受眾）寫的明明是 `https://weather.example.com/mcp`，但工單 server 沒有檢查。**簽章只證明「這是授權伺服器發的」，不證明「這是發給我的」**。
+成功了。token 的 `aud`（audience，受眾）寫的是 `https://weather.example.com/mcp`，但工單 server 沒有檢查。**簽章只證明「這是授權伺服器發的」，不證明「這是發給我的」**。
 
-這一課講 MCP 規範怎麼把 OAuth 用在 MCP 上：client 怎麼從一個 401 一路找到該去哪裡登入、token 怎麼綁到特定的 MCP server、server 收到 token 要檢查哪幾件事，以及為什麼收到的 token 絕對不能往下游轉傳。
+## 發現流程：從一個 401 到拿到 token
 
-## 角色：MCP server 是受保護資源
-
-MCP 規範的 Authorization 章節（[modelcontextprotocol.io](https://modelcontextprotocol.io) 的 specification）以 OAuth 2.1 為基礎，把角色對應成這樣：
-
-| OAuth 角色 | 在 MCP 裡是誰 | 例子 |
-|---|---|---|
-| Resource Server（受保護資源） | MCP server | `tickets.example.com/mcp` |
-| Client | MCP client（跑在 IDE、桌面 App、CLI agent 裡） | 代表使用者呼叫工具的那個程式 |
-| Authorization Server | 簽發 token 的身分系統 | 公司 IdP 或專用授權伺服器 |
-| Resource Owner | 使用者 | 在瀏覽器上按「同意」的人 |
-
-幾個先講清楚的前提：
-
-- 授權在 MCP 裡是選用的；規範的授權流程是針對 **HTTP 傳輸**。用 stdio 在本機啟動的 MCP server 不走這套流程，憑證通常由環境提供（這時 token 怎麼存，見 [CLI 與 Agent 的 token 存哪裡](#/skill/cli-token-storage)）。
-- MCP client 多半是**公開客戶端**：裝在使用者電腦上，藏不住 client secret，所以授權碼流程一定要搭配 PKCE（細節見 [Device Code、PKCE、Client Credentials](#/skill/oauth-device-pkce)）。
-- 規範會隨版本調整細節（例如 client 註冊的方式）。下面講的是穩定的骨架；實作時以官方最新版為準。
-
-## 發現流程：從一個 401 開始
-
-MCP client 第一次連到一個 server 時，什麼都不知道：不知道要不要登入、去哪裡登入、要什麼 scope。整條發現鏈靠三份 metadata 串起來：
+MCP 規範的授權以 OAuth 2.1 為基礎：MCP server 是受保護資源，MCP client 是 OAuth client。client 第一次連到 server 時不知道去哪裡登入、要什麼 scope：
 
 ```text
  MCP client                     MCP server                    授權伺服器
@@ -69,14 +50,81 @@ MCP client 第一次連到一個 server 時，什麼都不知道：不知道要�
      │─────────────────────────────▶│ 驗 token → 執行工具              │
 ```
 
-### ① ② 被拒絕，同時拿到線索
+| 步驟 | 發生什麼 |
+|---|---|
+| ① ② | server 回 401，`WWW-Authenticate` 的 `resource_metadata`（RFC 9728）指向受保護資源 metadata |
+| ③ | metadata 的 `resource` 是這個 server 的**資源識別碼**，`authorization_servers` 是它信任的授權伺服器 |
+| ④ | 授權伺服器 metadata（RFC 8414）列出所有端點，client 不需要寫死 |
+| ⑤ | 沒有 `client_id` 時取得 client 身分（預先登記、Client ID Metadata Document 或 DCR） |
+| ⑥ ⑦ | 授權碼 + PKCE，兩個請求都帶 `resource`（RFC 8707），授權伺服器把 token 的 `aud` 設成這個 MCP server |
+
+起點是這個 401。server 只回 401、不帶 `WWW-Authenticate`，client 就無從得知該去哪裡登入：
 
 ```http
 HTTP/1.1 401 Unauthorized
 WWW-Authenticate: Bearer resource_metadata="https://tickets.example.com/.well-known/oauth-protected-resource/mcp"
 ```
 
-`resource_metadata` 這個參數由 RFC 9728 定義，指向這個受保護資源的 metadata。這個 401 是整條鏈的起點：server 如果只回 401、不帶 `WWW-Authenticate`，client 就無從得知該去哪裡登入。
+## 驗 token：簽章之外還有四件事
+
+授權伺服器簽發的 JWT access token，解開 payload 大概長這樣：
+
+```json
+{
+  "iss": "https://auth.example.com",
+  "aud": "https://tickets.example.com/mcp",
+  "sub": "u_4821",
+  "client_id": "agent-cli-7f3a",
+  "scope": "tickets.read tickets.write",
+  "iat": 1792483200,
+  "exp": 1792486800
+}
+```
+
+MCP server 收到每一個請求都要依序檢查：
+
+| 順序 | 檢查 | 失敗時代表什麼 |
+|---|---|---|
+| 1 | header 的 `alg` 在允許清單內（例如只收 `ES256`） | 有人想用 `none` 或演算法混淆攻擊繞過簽章（見 [JWT 解剖](#/skill/jwt)） |
+| 2 | 用 header 的 `kid` 在 JWKS 找到對應公鑰 | 金鑰剛輪替（重新抓一次 JWKS），或 token 根本不是這個授權伺服器簽的 |
+| 3 | 簽章正確 | 內容被竄改 |
+| 4 | `iss` 是信任的授權伺服器 | 別的授權伺服器簽的 token |
+| 5 | `aud` 是**自己的資源識別碼** | 發給別的服務的 token，被拿來重放 |
+| 6 | `exp`（與 `nbf`）在有效時間內 | 過期 token；容許幾十秒的時鐘誤差即可 |
+| 7 | `scope` 涵蓋這個工具需要的權限 | 權限不足，回 403 而不是 401 |
+
+第 5 項就是開頭事件少掉的那一項。第 7 項要做到**每個工具**：`list_tickets` 要 `tickets.read`，`close_ticket` 要 `tickets.write`，在 `tools/call` 時依工具名稱檢查。
+
+### 最常見的錯誤
+
+| 現象 | 原因 | 怎麼修 |
+|---|---|---|
+| server 回 `invalid_token`，log 寫 audience mismatch | token 是發給別的資源的；或 client 申請時沒帶 `resource`，授權伺服器給了預設 audience | client 在授權與 token 請求都帶 `resource`；server 端確認自己的資源識別碼設定正確 |
+
+:::stop 讀到這裡可以先停：會走從 401 到拿到 token 的發現流程，說得出 server 驗 token 的七項檢查。後面是角色對應、每一步的請求與回應、client 註冊、JWKS 輪替、錯誤回應、token 轉傳與驗章程式；自己寫 MCP server 的驗證層或排查 401／403 時回來讀。
+
+## 角色：MCP server 是受保護資源
+
+MCP 規範的 Authorization 章節（[modelcontextprotocol.io](https://modelcontextprotocol.io) 的 specification）以 OAuth 2.1 為基礎，把角色對應成這樣：
+
+| OAuth 角色 | 在 MCP 裡是誰 | 例子 |
+|---|---|---|
+| Resource Server（受保護資源） | MCP server | `tickets.example.com/mcp` |
+| Client | MCP client（跑在 IDE、桌面 App、CLI agent 裡） | 代表使用者呼叫工具的那個程式 |
+| Authorization Server | 簽發 token 的身分系統 | 公司 IdP 或專用授權伺服器 |
+| Resource Owner | 使用者 | 在瀏覽器上按「同意」的人 |
+
+幾個先講清楚的前提：
+
+- 授權在 MCP 裡是選用的；規範的授權流程是針對 **HTTP 傳輸**。用 stdio 在本機啟動的 MCP server 不走這套流程，憑證通常由環境提供（這時 token 怎麼存，見 [CLI 與 Agent 的 token 存哪裡](#/skill/cli-token-storage)）。
+- MCP client 多半是**公開客戶端**：裝在使用者電腦上，藏不住 client secret，所以授權碼流程一定要搭配 PKCE（細節見 [Device Code、PKCE、Client Credentials](#/skill/oauth-device-pkce)）。
+- 規範會隨版本調整細節（例如 client 註冊的方式）。下面講的是穩定的骨架；實作時以官方最新版為準。
+
+## 發現流程逐步：metadata、client 註冊、授權請求
+
+### ① ② 被拒絕，同時拿到線索
+
+上面那個 401 的 `resource_metadata` 參數由 RFC 9728 定義，指向這個受保護資源的 metadata。這個 401 是整條鏈的起點。
 
 ### ③ 受保護資源 metadata：我信任哪個授權伺服器
 
@@ -176,39 +224,8 @@ grant_type=authorization_code
 
 `resource` 的作用是讓授權伺服器把 token 的 `aud` 設成這個 MCP server。拿到的 token 只對 `tickets.example.com/mcp` 有效；開頭那個「天氣 server 的 token 打開工單 server」的事件，靠的就是這一步加上 server 端的 audience 檢查來擋。
 
-## 驗 token：簽章之外還有四件事
+## JWKS 與金鑰輪替
 
-授權伺服器簽發的 JWT access token，解開 payload 大概長這樣：
-
-```json
-{
-  "iss": "https://auth.example.com",
-  "aud": "https://tickets.example.com/mcp",
-  "sub": "u_4821",
-  "client_id": "agent-cli-7f3a",
-  "scope": "tickets.read tickets.write",
-  "iat": 1792483200,
-  "exp": 1792486800
-}
-```
-
-MCP server 收到每一個請求都要依序檢查：
-
-| 順序 | 檢查 | 失敗時代表什麼 |
-|---|---|---|
-| 1 | header 的 `alg` 在允許清單內（例如只收 `ES256`） | 有人想用 `none` 或演算法混淆攻擊繞過簽章（見 [JWT 解剖](#/skill/jwt)） |
-| 2 | 用 header 的 `kid` 在 JWKS 找到對應公鑰 | 金鑰剛輪替（重新抓一次 JWKS），或 token 根本不是這個授權伺服器簽的 |
-| 3 | 簽章正確 | 內容被竄改 |
-| 4 | `iss` 是信任的授權伺服器 | 別的授權伺服器簽的 token |
-| 5 | `aud` 是**自己的資源識別碼** | 發給別的服務的 token，被拿來重放 |
-| 6 | `exp`（與 `nbf`）在有效時間內 | 過期 token；容許幾十秒的時鐘誤差即可 |
-| 7 | `scope` 涵蓋這個工具需要的權限 | 權限不足，回 403 而不是 401 |
-
-第 5 項就是開頭事件少掉的那一項。第 7 項要做到**每個工具**：`list_tickets` 要 `tickets.read`，`close_ticket` 要 `tickets.write`，在 `tools/call` 時依工具名稱檢查。
-
-:::stop 讀到這裡可以先停：會走從 401 到拿到 token 的發現流程，說得出 server 驗 token 的七項檢查。後面的 JWKS 輪替、錯誤回應、token 轉傳與驗章程式，在自己寫 MCP server 的驗證層或排查 401／403 時再回來讀。
-
-### JWKS 與金鑰輪替
 
 授權伺服器把簽章用的公鑰以 JWK Set（RFC 7517）公布在 `jwks_uri`：
 
@@ -235,7 +252,8 @@ JWT header 裡的 `kid` 指出用哪一把簽的。輪替的順序是：
 
 如果授權伺服器發的是不透明的 token（隨機字串，不是 JWT），資源伺服器無法自己驗，要呼叫授權伺服器的 introspection 端點（RFC 7662）查詢，檢查項目一樣：有效、`aud`、`scope`。
 
-### 錯誤回應
+## 401 與 403 的錯誤回應
+
 
 ```http
 HTTP/1.1 401 Unauthorized
@@ -365,7 +383,6 @@ try { await verify(rotated, 'tickets.write', now); console.log('✔ 新金鑰簽
 |---|---|---|
 | client 連上去只看到 401，沒有跳出登入 | server 的 401 沒帶 `WWW-Authenticate` 的 `resource_metadata`，或 metadata 網址打不開 | 補上標頭；用 curl 依序打 ③ ④ 兩個 metadata 網址確認都回 JSON |
 | token 端點回 `{"error":"invalid_target"}` | `resource` 值不是授權伺服器認得的資源（RFC 8707 定義的錯誤碼） | 用受保護資源 metadata 裡的 `resource` 原值；注意結尾斜線、大小寫、路徑都要一致 |
-| server 回 `invalid_token`，log 寫 audience mismatch | token 是發給別的資源的；或 client 申請時沒帶 `resource`，授權伺服器給了預設 audience | client 在授權與 token 請求都帶 `resource`；server 端確認自己的資源識別碼設定正確 |
 | 某個時間點起所有請求都 `invalid_token`，log 寫找不到 `kid` | 授權伺服器輪替金鑰，資源伺服器的 JWKS 快取沒更新、或不支援未知 `kid` 時重抓 | 實作「未知 kid 重抓一次」；授權伺服器要先公布再使用新金鑰 |
 | 偶發的「token 尚未生效」或「已過期」 | 機器時鐘不同步，`nbf`、`iat`、`exp` 判斷錯 | 主機跑 NTP；驗證時給幾十秒的容許誤差，不要給到幾分鐘 |
 | 403 `insufficient_scope` | token 沒有這個工具要的 scope | client 依 `WWW-Authenticate` 的 `scope` 重新授權；server 端回應要帶出需要的 scope |

@@ -1,4 +1,4 @@
-## 從一個具體狀況開始：一個 nginx，站在前端與後端前面
+## 一個 nginx 站在前端與後端前面，設定有三個問題
 
 門診掛號系統的前端是 Vue 3 + Vite，後端是 Flask，用 gunicorn 跑在 9696。部署方式是 Docker：最前面一個 nginx 容器，設定如下（`backend` 是後端容器的名稱）：
 
@@ -36,17 +36,15 @@ server {
              └─ /api   轉給 gunicorn :9696（Flask）
 ```
 
-nginx 算前端還是後端？它是整個系統的入口，兩邊的事都在它身上：`/` 那一段是前端的交付物，dist 換版、快取規則跟著前端改；`/api` 那一段是路由，後端加路徑、調逾時，這裡也要改。搬上 Kubernetes 時要決定的，是這兩個角色要不要拆開。
+nginx 是整個系統的入口：`/` 那一段是前端的交付物，dist 換版、快取規則跟著前端改；`/api` 那一段是路由，後端加路徑、調逾時，這裡也要改。這份設定能用，但有三個問題：
 
-這份設定能用，但有三個問題：
+1. **`no-store` 套在整個 `/`。** 帶 hash 的 `assets/index-3f9c2a1b.js` 也不准存，每次開頁都重新下載全部的 JS 與 CSS。櫃台電腦一天開幾十次掛號頁，每次一兩 MB。
+2. **dist 怎麼進到容器裡說不清楚。** 可能是建置映像時 COPY 進去，也可能是啟動時用 volume 掛進去。使用者回報「畫面跟測試環境不一樣」時，查不出這台跑的是哪一版前端。
+3. **搬上 K8s 時不知道 nginx 該放哪。** 叢集的入口已經有 Ingress 或 Gateway，nginx 要留著當第二層入口，還是只送靜態檔？
 
-1. **`no-store` 套在整個 `/`。** 帶 hash 的 `assets/index-3f9c2a1b.js` 也跟著不准存，每次開頁都重新下載全部的 JS 與 CSS。院內的櫃台電腦一天開幾十次掛號頁，每次都是一兩 MB。
-2. **dist 怎麼進到容器裡說不清楚。** 可能是建置映像時 COPY 進去的，也可能是啟動時用 volume 掛進去的。使用者回報「畫面跟測試環境不一樣」時，查不出這台跑的是哪一版前端。
-3. **搬上 K8s 時不知道 nginx 該放哪。** 叢集的入口已經有 Ingress 或 Gateway，nginx 要留著當第二層入口，還是只負責送靜態檔？
+`location` 比對、`proxy_pass` 的斜線、upstream 與 502/504 在 [nginx：反向代理、靜態檔與 TLS](#/skill/nginx)。
 
-nginx 本身的 `location` 比對、`proxy_pass` 的斜線、upstream 與 502/504 在 [nginx：反向代理、靜態檔與 TLS](#/skill/nginx) 講過；這一課從這份設定出發，依序處理前端檔案怎麼進映像、快取標頭、執行期設定，再講搬上 K8s 的兩條路。
-
-## 前端檔案怎麼進 nginx：建置時打包，還是執行時掛載
+## 前端檔案怎麼進 nginx：建置時打包進映像
 
 先確認現在是哪一種。`docker inspect` 列出容器的掛載點：
 
@@ -55,7 +53,7 @@ $ docker inspect clinic-nginx --format '{{json .Mounts}}'
 [{"Type":"bind","Source":"/srv/clinic/dist","Destination":"/etc/nginx/html","Mode":"ro",...}]
 ```
 
-有一筆 `Destination` 是 `/etc/nginx/html` 的 bind mount，代表是執行時掛載：映像裡只有 nginx，前端檔案在主機的 `/srv/clinic/dist`。輸出是 `[]`，dist 是建置時打包進映像的。
+有一筆 `Destination` 是 `/etc/nginx/html` 的 bind mount，是執行時掛載：映像裡只有 nginx，前端檔案在主機的 `/srv/clinic/dist`。輸出是 `[]`，dist 是建置時打包進映像的。
 
 | | 建置時 COPY 進映像 | 執行時用 volume 掛載 |
 |---|---|---|
@@ -65,9 +63,7 @@ $ docker inspect clinic-nginx --format '{{json .Mounts}}'
 | 在 K8s 上 | 一般的 Deployment 就能跑，Pod 排到哪個節點都一樣 | 要把檔案放進每個節點能存取的 volume，見 [Kubernetes 儲存](#/skill/k8s-storage) |
 | 更新前端 | 重建映像、滾動更新 | 換目錄內容，nginx 不用重啟，但沒有版本紀錄 |
 
-建議用建置時打包。前端的 dist 只是靜態檔，和 nginx 設定一起變成一個不可變的映像，就套得上 [環境設定與 12-factor](#/skill/config-12factor) 的「建置、發布、執行分開」：同一個映像從測試推到正式，環境的差別交給下一節的執行期設定。
-
-### 多階段 Dockerfile
+建議用建置時打包：dist 和 nginx 設定一起變成不可變的映像，套得上 [環境設定與 12-factor](#/skill/config-12factor) 的「建置、發布、執行分開」，同一個映像從測試推到正式。多階段 Dockerfile：
 
 ```dockerfile
 # ---- build：照 lock 檔裝依賴、建置 ----
@@ -93,7 +89,55 @@ EXPOSE 8080
 docker build --build-arg GIT_SHA=3f9c2a1b -t registry.gitlab.example/clinic/web:3f9c2a1b .
 ```
 
-幾個細節：
+`nginx/nginx-unprivileged` 以非 root 執行、預設聽 8080，所以 `default.conf` 要寫 `listen 8080;`；`COPY --from=build` 的目的地要和 `default.conf` 的 `root` 一致。
+
+## 快取：index.html 每次驗證，帶 hash 的檔案存一年
+
+Vite 建置出的 JS、CSS 都在 `dist/assets/` 底下，檔名帶內容的 hash（`index-3f9c2a1b.js`）。內容一改檔名就變，同一個檔名可以存很久。`index.html` 檔名固定，又決定要載入哪些 assets，要每次向伺服器確認（理由見 [HTTP 快取](#/skill/http-caching)）：
+
+```nginx
+server {
+    listen 8080;
+    root /usr/share/nginx/html;
+
+    # 入口：可以存，但每次都要確認；沒變就回 304，新版部署後下一次載入就拿到
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # 帶 hash 的檔案：一年內不用再問
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    # 執行期設定（見「建置時設定與執行期設定」）：內容會換、檔名不變，跟 index.html 一樣
+    location = /config.js {
+        add_header Cache-Control "no-cache" always;
+    }
+
+    location /api/ {
+        # ...轉給後端，跟原本一樣；API 的快取由後端的回應標頭決定
+    }
+
+    # 其他路徑：有檔案就送檔案（favicon.ico、version.json），沒有就交給前端路由
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache" always;
+    }
+}
+```
+
+最常見的兩個錯誤：
+
+| 訊息或現象 | 原因 | 處理 |
+|---|---|---|
+| 打開網站是 nginx 的歡迎頁，或 403 | dist 複製到的目錄和 `root` 不一致 | 讓 `COPY --from=build` 的目的地等於 `root` |
+| `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 非 root 執行卻聽 80 | 聽 8080（unprivileged 映像的預設），Service 的 `targetPort` 跟著改 |
+
+:::stop 停靠點 1：只送靜態檔的前端映像。完成條件：`curl -sI` 打 `/patients/123` 與 `/assets/<檔名>` 分別得到 `no-cache` 與 `immutable`，`/assets/not-exist.js` 回 404。接下來兩章是這個映像的細節（`npm ci`、`.dockerignore`、非 root、`add_header` 的繼承），建置出錯或要加安全標頭時讀；換環境就要重建映像時，往下讀執行期設定。
+
+## 前端映像的細節：npm ci、`.dockerignore`、非 root
 
 - **用 `npm ci`**：`npm ci` 完全照 `package-lock.json` 安裝，lock 檔與 `package.json` 對不上時直接失敗；`npm install` 可能順手更新 lock 檔，同一個 commit 兩次建置裝到不同版本。
 - **最後一個階段只拿 `dist`**：node、`node_modules`、原始碼都留在 build 階段，最終映像只有 nginx 與幾 MB 的靜態檔。多階段建置的原理見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
@@ -125,44 +169,7 @@ coverage
 
 上面的 Dockerfile 用第一種，所以 `default.conf` 要寫 `listen 8080;`。把原本 `listen 80;` 的設定直接搬過去，在不允許非 root 綁低 port 的環境，nginx 會啟動失敗並印出 `bind() to 0.0.0.0:80 failed (13: Permission denied)`。
 
-## 快取：index.html 每次驗證，帶 hash 的檔案存一年
-
-Vite 建置出的 JS、CSS 都在 `dist/assets/` 底下，檔名帶內容的 hash（`index-3f9c2a1b.js`）。內容一改，檔名就變，所以同一個檔名可以放心存很久。`index.html` 檔名固定，又決定了要載入哪些 assets，它要每次向伺服器確認。兩種回應的設定與理由在 [HTTP 快取](#/skill/http-caching) 講過，這裡只寫 nginx 的做法：
-
-```nginx
-server {
-    listen 8080;
-    root /usr/share/nginx/html;
-
-    # 入口：可以存，但每次都要確認；沒變就回 304，新版部署後下一次載入就拿到
-    location = /index.html {
-        add_header Cache-Control "no-cache" always;
-    }
-
-    # 帶 hash 的檔案：一年內不用再問
-    location /assets/ {
-        try_files $uri =404;
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
-    }
-
-    # 執行期設定（下一節）：內容會換、檔名不變，跟 index.html 一樣
-    location = /config.js {
-        add_header Cache-Control "no-cache" always;
-    }
-
-    location /api/ {
-        # ...轉給後端，跟原本一樣；API 的快取由後端的回應標頭決定
-    }
-
-    # 其他路徑：有檔案就送檔案（favicon.ico、version.json），沒有就交給前端路由
-    location / {
-        try_files $uri $uri/ /index.html;
-        add_header Cache-Control "no-cache" always;
-    }
-}
-```
-
-兩個行為要知道：
+## 快取設定的細節：深層連結、`add_header` 不繼承、下載量模擬
 
 - **深層連結也會拿到 `no-cache`。** 使用者直接開 `/patients/123`，`location /` 的 `try_files` 找不到這個檔案，最後一個參數 `/index.html` 是一次內部轉址：nginx 用新的路徑重新選 location，選到 `location = /index.html`，所以回應帶的是那一段的標頭。
 - **`/assets/` 底下找不到檔案要回 404。** 原本的設定裡，不存在的 `/assets/Billing-77aa1c2e.js` 也會被 `try_files` 換成 `index.html`，回 200、`Content-Type: text/html`，瀏覽器拒絕把它當成 JS 執行。`try_files $uri =404;` 把這件事寫明，也避免日後有人在這裡加上 `/index.html` 的 fallback，讓一份 HTML 以一年的快取存在 `.js` 的網址下。
@@ -291,8 +298,6 @@ for name, conf in [("原本的設定", ORIGINAL), ("修正後", FIXED)]:
 ```
 
 原本的設定每次開頁都是 1.1 MB 左右；修正後第二次開頁只剩三個條件請求、沒有 body。部署 v2 之後，`index.html` 的 ETag 變了，拿到新內容，引用的 `index-a1b2c3d4.js` 是新網址所以下載，`vendor` 與 CSS 的檔名沒變，直接用快取。`/patients/123` 那一列顯示內部轉址後實際送出的是 `/index.html`。
-
-:::stop 停靠點 1：只送靜態檔的前端映像。完成條件：`curl -sI` 打 `/patients/123` 與 `/assets/<檔名>` 分別得到 `no-cache` 與 `immutable`，`/assets/not-exist.js` 回 404，每個回應都帶 `X-Content-Type-Options`。換環境就要重建映像時，再往下讀執行期設定。
 
 ## 建置時設定與執行期設定
 
@@ -793,8 +798,6 @@ Vite 把每個路由頁面拆成獨立的 chunk，點到才載入。滾動更新
 | 某個 location 的回應少了 `X-Content-Type-Options` 之類的安全標頭 | 那個 location 有自己的 `add_header`，不再繼承 server 層 | 每個 location 重寫一次、用 `include`，或 1.29.3 起的 `add_header_inherit merge` |
 | `npm ci can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync` | lock 檔沒有跟著 `package.json` 更新 | 本機 `npm install` 更新 lock 檔並 commit |
 | 建置時 `Cannot find module @rollup/rollup-linux-x64-musl` 這類訊息（套件名稱依 Vite 版本而異） | 開發機的 `node_modules` 被複製進容器 | `.dockerignore` 排除 `node_modules`，在容器裡 `npm ci` |
-| 打開網站是 nginx 的歡迎頁，或 403 | dist 複製到的目錄和 `root` 不一致 | 讓 `COPY --from=build` 的目的地等於 `root` |
-| `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 非 root 執行卻聽 80 | 聽 8080（unprivileged 映像的預設），Service 的 `targetPort` 跟著改 |
 | `[emerg] host not found in upstream "clinic-api:9696"`，Pod CrashLoopBackOff | 第一條路的 nginx 啟動時解析不到 Service：還沒建立、名稱打錯、不在同一個 namespace | 先建 Service；跨 namespace 寫 `clinic-api.<namespace>` |
 | Flask 產生的轉址變成 `http://`，或登入後被導回 http | 第一條路的 nginx 送 `X-Forwarded-Proto $scheme`，TLS 已經在 Gateway 終止 | 改成轉送 `$http_x_forwarded_proto` |
 | 換成 Gateway 分流後，偶發 503：`upstream connect error or disconnect/reset before headers. reset reason: connection termination` | Gateway 對後端的閒置逾時（Envoy 預設 1 小時）比 gunicorn 的 keep-alive 長 | 調短 Gateway 的上游閒置逾時，讓它比 gunicorn 的短 |

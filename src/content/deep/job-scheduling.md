@@ -1,13 +1,13 @@
-## 從一個具體問題開始：月結報表寄了三次，下個月一封都沒寄
+## 月結報表寄了三次，下個月一封都沒寄
 
-月結報表原本用程式內的排程器（例如 APScheduler）寫在 API 程序裡：「每月 1 日 02:00 產生報表並寄給客戶」。只有一個程序時沒問題。之後發生兩件事：
+月結報表用程式內的排程器（例如 APScheduler）寫在 API 程序裡：「每月 1 日 02:00 產生報表並寄給客戶」。只有一個程序時沒問題。之後發生兩件事：
 
-1. API 擴充成三個副本。11 月 1 日 02:00，三個程序各自的排程器同時觸發，每個客戶收到三封一模一樣的報表。
-2. 12 月 1 日 01:50 開始例行維護，主機重開機，02:10 才恢復。02:00 那一刻沒有任何程序在跑，排程器醒來後也不知道自己錯過了什麼。這個月沒有人收到報表，直到客戶來問。
+1. API 擴充成三個副本。11 月 1 日 02:00，三個程序的排程器同時觸發，每個客戶收到三封一樣的報表。
+2. 12 月 1 日 01:50 例行維護，主機重開機，02:10 才恢復。02:00 沒有任何程序在跑，排程器醒來後不知道自己錯過了什麼，這個月沒有人收到報表。
 
-這兩個問題是排程工作的核心：**觸發可能重複，也可能遺漏**。另外還有時區（02:00 是哪裡的 02:00）、工作跑太久和下一次重疊、失敗了沒人知道。下面依序處理。
+排程工作的**觸發可能重複，也可能遺漏**。
 
-## cron 語法
+## cron 表達式：五個欄位與兩個常見誤讀
 
 cron 表達式有五個欄位，依序是分、時、日、月、星期：
 
@@ -29,11 +29,68 @@ cron 表達式有五個欄位，依序是分、時、日、月、星期：
 | `*/n` | 每 n 個 | `*/15 * * * *`：每 15 分鐘（0、15、30、45 分） |
 | `a-b/n` | 範圍內每 n 個 | `0 8-20/4 * * *`：8、12、16、20 點 |
 
-幾個容易誤解的地方：
+- **用哪個時區解讀**：傳統 cron 用主機的系統時區。容器與雲端主機通常是 UTC，所以 `0 9 * * *` 在 UTC 的主機上是台灣時間 17:00。Kubernetes CronJob 預設依控制平面的時區解讀，可以用 `.spec.timeZone` 指定（例如 `Asia/Taipei`）。
+- **`*/n` 是「能被 n 整除的那些值」**，不是每隔 n 分鐘：`*/7` 在 0、7、…、56 分跑，下一個小時的 0 分又跑，56 分到 0 分只隔 4 分鐘。
 
-- **用哪個時區解讀**：傳統 cron 用主機的系統時區。容器與雲端主機通常是 UTC，所以 `0 9 * * *` 在 UTC 的主機上是台灣時間 17:00。Kubernetes CronJob 預設也依控制平面的時區解讀，可以用 `.spec.timeZone` 指定（例如 `Asia/Taipei`）。
+搬到 crontab 後最常見的兩個錯誤：
+
+| 現象 / 訊息 | 原因 | 怎麼修 |
+|---|---|---|
+| cron 的輸出：`/bin/sh: 1: python: not found` | cron 的環境變數很少，`PATH` 通常只有 `/usr/bin:/bin`，也不會載入你的 shell 設定 | 用絕對路徑（`/srv/app/.venv/bin/python`），或在 crontab 開頭設定 `PATH` |
+| 工作在錯的時間跑，剛好差 8 小時 | 主機是 UTC，表達式是照台灣時間寫的 | 改用 UTC 寫，或用平台的時區設定（CronJob 的 `timeZone`） |
+
+## 多個副本只執行一次：執行紀錄表
+
+排程器寫在 web 程序裡，有幾個副本就會觸發幾次。把排程獨立成副本數 1 的程序，或改用平台的排程（Kubernetes CronJob、systemd timer），都還是可能重複或遺漏。
+
+Kubernetes 的 CronJob 文件寫到：CronJob 大約每個排定時間建立一次 Job，但某些情況下可能建立兩次，也可能一次都沒有。換了觸發機制，工作仍然要冪等。
+
+執行紀錄表以「排定時間」當唯一鍵，同時與先後的重複都擋得住：
+
+```sql run
+CREATE TABLE job_runs (
+  job_name      text        NOT NULL,
+  scheduled_for timestamptz NOT NULL,      -- 排定的時間，不是實際開始的時間
+  host          text        NOT NULL,
+  status        text        NOT NULL DEFAULT 'running',
+  started_at    timestamptz NOT NULL DEFAULT now(),
+  finished_at   timestamptz,
+  PRIMARY KEY (job_name, scheduled_for)
+);
+
+-- 三台主機都被觸發，各自嘗試認領 11/1 02:00 這一次；只有第一個 INSERT 回傳一列
+INSERT INTO job_runs (job_name, scheduled_for, host)
+VALUES ('monthly-report', '2026-11-01 02:00+08', 'host-a')
+ON CONFLICT DO NOTHING RETURNING host;
+
+INSERT INTO job_runs (job_name, scheduled_for, host)
+VALUES ('monthly-report', '2026-11-01 02:00+08', 'host-b')
+ON CONFLICT DO NOTHING RETURNING host;
+
+-- 執行完畢，標記成功
+UPDATE job_runs SET status = 'succeeded', finished_at = now()
+WHERE job_name = 'monthly-report' AND scheduled_for = '2026-11-01 02:00+08';
+
+SELECT job_name, scheduled_for, host, status FROM job_runs;
+```
+
+## 錯過的執行與重跑：工作自己補、重跑不重複
+
+一般的 cron 不會補跑：排定的那一分鐘主機沒開，那一次就沒了。比起依賴觸發機制補跑，更穩的是讓工作本身能**自我修復**：
+
+- 不寫「處理昨天的資料」，改成「處理上次成功之後到現在的所有資料」。工作記住一個水位（watermark，例如 `last_processed_at` 或最後一筆的 id），每次從水位接著做。漏跑一天，下一次會把兩天的資料一起處理。
+
+重複觸發、逾時重試、接手重跑都會發生，同一個排定時間執行兩次，結果要跟執行一次一樣：
+
+- **用排定時間決定處理範圍**。11 月 1 日 02:00 的月報處理的是「10 月」，要從排定時間推算，不是從 `now()`：補跑發生在 11 月 3 日時，用 `now()` 會算成錯的月份。
+- **結果用 upsert 寫入**：`INSERT … ON CONFLICT (customer_id, period) DO UPDATE`，重跑只會覆寫同一份報表。
+- **副作用要記錄**：寄信、扣款、呼叫外部 API 前，先寫入 (對象, 期間) 的紀錄並設唯一約束，已經有紀錄就跳過。這和 [訊息佇列與背景工作](#/skill/queues-workers) 裡冪等消費者的做法相同。
+
+:::stop 讀到這裡可以先停：會讀 cron 表達式、用執行紀錄表讓多個副本只有一個執行、讓工作漏跑後自己補上且重跑不重複寫入。後面的 cron 解析器、advisory lock、各平台的補跑規則、時區與長時間工作，在換排程平台、排程對象跨時區或工作會跑超過一個週期時再回來讀。
+
+## cron 的其他規則與一個解析器
+
 - **日與星期同時指定時是「或」**：`0 0 15 * 5` 是「每月 15 號，以及每個星期五」，不是「15 號而且是星期五」。其中一個欄位是 `*` 時，才是一般直覺的「且」。
-- **`*/n` 不是「每隔 n 分鐘」**：它是「能被 n 整除的那些值」。`*/7` 會在 0、7、…、56 分跑，然後下一個小時的 0 分又跑，56 分到 0 分只隔 4 分鐘。
 - 有些實作支援第六個欄位（秒）或 `@daily`、`@hourly` 這類別名，有些不支援；換平台時要確認。
 
 下面是一個簡化的 cron 解析器，算出接下來幾次的執行時間。它支援上面表格裡的寫法，以及日與星期的「或」規則：
@@ -107,9 +164,7 @@ show("0 9 * * *（主機是 UTC）", "0 9 * * *", timezone.utc)   # 換算回台
 show("0 0 15 * 5（日或星期）", "0 0 15 * 5", TPE, n=4)   # 15 號是星期日也會跑
 ```
 
-## 多台主機同時跑：避免重複執行
-
-排程器寫在 web 程序裡，有幾個副本就會觸發幾次。可以選的做法：
+## 避免重複執行的五種做法、advisory lock 與當機後的接手
 
 | 做法 | 怎麼做 | 優點 | 要注意 |
 |---|---|---|---|
@@ -118,8 +173,6 @@ show("0 0 15 * 5（日或星期）", "0 0 15 * 5", TPE, n=4)   # 15 號是星期
 | 資料庫 advisory lock | 觸發後先 `pg_try_advisory_lock`，拿不到就跳過 | 不用額外元件；連線斷掉鎖自動釋放 | 只防「同時」，不防「先後各跑一次」；session 層級的鎖不適合交易模式的連線池（PgBouncer） |
 | Redis 鎖 | `SET lock:job host NX PX 600000` | 跨語言、跨資料庫 | 工作比鎖的到期時間久，鎖會自動消失，別人又拿到 |
 | 執行紀錄表 + 唯一約束 | 插入 (工作名稱, 排定時間)，插入成功的人執行 | 同時與先後都防得住；順便留下執行歷史 | 執行者中途掛掉，紀錄停在 running，要有逾時接手的規則 |
-
-Kubernetes 的 CronJob 文件明確寫到：CronJob 大約每個排定時間建立一次 Job，但在某些情況下可能建立兩次，也可能一次都沒有，所以工作本身要冪等：**換了觸發機制，冪等仍然不能省**。
 
 advisory lock 的寫法（需要真的 PostgreSQL，不能在瀏覽器跑）：
 
@@ -140,62 +193,24 @@ def run_if_free(conn: psycopg.Connection):
         conn.execute("SELECT pg_advisory_unlock(%s)", [MONTHLY_REPORT_LOCK])
 ```
 
-這只能防「同時」：主機 A 在 02:00:00 跑完（花了 2 秒）、主機 B 因為時鐘慢了 5 秒在 02:00:05 才觸發，B 拿得到鎖，又跑了一次。要同時防住「先後各跑一次」，用執行紀錄表，以「排定時間」當作唯一鍵：
-
-```sql run
-CREATE TABLE job_runs (
-  job_name      text        NOT NULL,
-  scheduled_for timestamptz NOT NULL,      -- 排定的時間，不是實際開始的時間
-  host          text        NOT NULL,
-  status        text        NOT NULL DEFAULT 'running',
-  started_at    timestamptz NOT NULL DEFAULT now(),
-  finished_at   timestamptz,
-  PRIMARY KEY (job_name, scheduled_for)
-);
-
--- 三台主機都被觸發，各自嘗試認領 11/1 02:00 這一次；只有第一個 INSERT 回傳一列
-INSERT INTO job_runs (job_name, scheduled_for, host)
-VALUES ('monthly-report', '2026-11-01 02:00+08', 'host-a')
-ON CONFLICT DO NOTHING RETURNING host;
-
-INSERT INTO job_runs (job_name, scheduled_for, host)
-VALUES ('monthly-report', '2026-11-01 02:00+08', 'host-b')
-ON CONFLICT DO NOTHING RETURNING host;
-
--- 執行完畢，標記成功
-UPDATE job_runs SET status = 'succeeded', finished_at = now()
-WHERE job_name = 'monthly-report' AND scheduled_for = '2026-11-01 02:00+08';
-
-SELECT job_name, scheduled_for, host, status FROM job_runs;
-```
+這只能防「同時」：主機 A 在 02:00:00 跑完（花了 2 秒）、主機 B 因為時鐘慢了 5 秒在 02:00:05 才觸發，B 拿得到鎖，又跑了一次。要同時防住「先後各跑一次」，用上面的執行紀錄表。
 
 認領的那台如果在執行中當機，紀錄會一直停在 `running`。常見的處理是：執行中定期更新一個 `heartbeat_at` 欄位，其他主機發現某筆 `running` 的心跳超過一段時間沒更新，就用條件更新（`UPDATE … WHERE status = 'running' AND heartbeat_at < now() - interval '10 minutes'`）把它接手過來重跑。所以接手後的重跑同樣要求工作冪等。
 
-## 錯過的執行：主機停機、部署中
+## 各平台怎麼補跑錯過的執行
 
-一般的 cron 不會補跑：排定的那一分鐘主機沒開，那一次就沒了。各平台有自己的補救機制，規則各不相同：
+工作自己補的另外兩種寫法，以及補跑策略：
+
+- 每一筆要處理的資料有自己的狀態（`pending` → `done`），工作每次撈出所有 `pending` 的。漏跑只是延遲，不會遺失。
+- 「每個期間一份」的產出（月報、帳單），檢查最近幾個期間是否都已產生，缺的補上。
+
+每個工作要決定錯過時怎麼做：全部補（帳單、對帳）、只補最近一次（快取重建、同步狀態）、或跳過（「每 5 分鐘檢查一次」的健康檢查）。
+
+各平台的補救機制規則各不相同：
 
 - **systemd timer**：`Persistent=true` 會記錄上次執行時間，開機後發現錯過就補跑一次。
 - **anacron**：給不一定一直開機的機器跑每日、每週工作，開機後補跑。
 - **Kubernetes CronJob**：控制器會檢查錯過的排定時間；設了 `startingDeadlineSeconds`，就只在排定時間後的這段時間內補啟動，超過就算錯過。錯過的次數超過 100 次時，控制器記一筆 `TooManyMissedTimes` 的警告事件（訊息是 `too many missed start times. Set or decrease .spec.startingDeadlineSeconds or check clock skew`），只替最近的那一次排定時間啟動 Job，更早錯過的都不補（2026 年 11 月對照 Kubernetes 官方文件；較早的文件版本寫的是不啟動 Job）。
-
-比起依賴觸發機制補跑，更穩的是讓工作本身能**自我修復**：
-
-- 不要寫「處理昨天的資料」，改成「處理上次成功之後到現在的所有資料」。工作記住一個水位（watermark，例如 `last_processed_at` 或最後一筆的 id），每次從水位接著做。漏跑一天，下一次會自動把兩天的資料一起處理。
-- 每一筆要處理的資料有自己的狀態（`pending` → `done`），工作每次撈出所有 `pending` 的。漏跑只是延遲，不會遺失。
-- 對「每個期間一份」的產出（月報、帳單），檢查最近幾個期間是否都已產生，缺的補上。
-
-每個工作要明確決定錯過時怎麼做：全部補（帳單、對帳）、只補最近一次（快取重建、同步狀態）、或直接跳過（「每 5 分鐘檢查一次」的健康檢查）。
-
-## 工作要冪等
-
-重複觸發、逾時重試、接手重跑都會發生，所以同一個排定時間執行兩次，結果要跟執行一次一樣：
-
-- **用排定時間決定處理範圍**。11 月 1 日 02:00 的月報處理的是「10 月」，這要從排定時間推算，不是從 `now()`：補跑發生在 11 月 3 日時，用 `now()` 會算成錯的月份。
-- **結果用 upsert 寫入**：`INSERT … ON CONFLICT (customer_id, period) DO UPDATE`，重跑只會覆寫同一份報表。
-- **副作用要記錄**：寄信、扣款、呼叫外部 API 前，先寫入 (對象, 期間) 的紀錄並設唯一約束，已經有紀錄就跳過。這和 [訊息佇列與背景工作](#/skill/queues-workers) 裡冪等消費者的做法相同。
-
-:::stop 讀到這裡可以先停：會讀 cron 表達式、讓多個副本只有一個執行、決定錯過的執行要不要補跑，並讓工作重跑也不會重複寫入。後面的時區、夏令時間與長時間工作，在排程對象跨時區或工作會跑超過一個週期時再回來讀。
 
 ## 時區與夏令時間
 
@@ -259,9 +274,7 @@ def main():
 
 | 現象 / 訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| cron 的輸出：`/bin/sh: 1: python: not found` | cron 的環境變數很少，`PATH` 通常只有 `/usr/bin:/bin`，也不會載入你的 shell 設定 | 用絕對路徑（`/srv/app/.venv/bin/python`），或在 crontab 開頭設定 `PATH` |
 | `date +%F` 在 crontab 裡變成奇怪的結果 | crontab 的指令中 `%` 代表換行 | 寫成 `\%`，或把指令放進腳本檔 |
-| 工作在錯的時間跑，剛好差 8 小時 | 主機是 UTC，表達式是照台灣時間寫的 | 改用 UTC 寫，或用平台的時區設定（CronJob 的 `timeZone`） |
 | 工作的輸出不知道去哪了 | cron 預設把輸出寄到本機信箱（`MAILTO`），通常沒有人看 | 輸出導到 log（`>> /var/log/app/job.log 2>&1`）或讓工作自己寫結構化 log |
 | 每個客戶收到兩三封一樣的信 | 排程在多個副本裡觸發，或工作重試時沒有冪等 | 只在一處觸發、加執行紀錄表、副作用記錄防重送 |
 | Kubernetes 的事件出現 `TooManyMissedTimes`（`too many missed start times`） | 控制器異常或時鐘偏差一段時間後，錯過的排程超過 100 次；只有最近的一次會被啟動 | 設定 `startingDeadlineSeconds` 縮小計算範圍；檢查控制平面的時鐘；需要補跑的工作自己依執行紀錄補 |

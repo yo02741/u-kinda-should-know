@@ -1,4 +1,4 @@
-## 從一個具體問題開始：三個「看起來有加密」的功能
+## 三段都呼叫了密碼學函式，三段都有問題
 
 一次程式碼審查裡出現了三段程式：
 
@@ -15,15 +15,13 @@ signature = hashlib.sha256(SECRET + body).hexdigest()
 ciphertext = aes_encrypt(key=FIXED_KEY, iv=b"\x00" * 12, data=national_id)
 ```
 
-每一段都用了密碼學相關的函式，每一段都有問題：
-
-1. `random` 是可預測的偽亂數產生器。觀察到足夠多的輸出後，可以推回內部狀態、算出接下來的 token。
+1. `random` 是可預測的偽亂數產生器。觀察到足夠多的輸出，可以推回內部狀態、算出接下來的 token。
 2. `SHA-256(secret + body)` 對 SHA-256 這類 Merkle–Damgård 結構的雜湊有 **length extension** 問題：知道一組合法的 `(body, signature)`，不知道 secret 也能算出「body 後面再接一段資料」的合法簽章。
 3. 用 AES-GCM 時，同一把金鑰重複使用同一個 nonce，會讓兩筆密文互相洩露內容，甚至讓攻擊者偽造通過驗證的密文。
 
-三段都用了密碼學函式，問題出在**工具和問題不對應**。密碼學工具各自只解一種問題，選錯了就等於沒有保護。
+密碼學工具各自只解一種問題，三段都選錯了工具。
 
-## 運作原理：五種工具各解一種問題
+## 五種工具各解一種問題
 
 | 工具 | 回答的問題 | 需要金鑰嗎 | 典型用途 |
 |---|---|---|---|
@@ -34,6 +32,49 @@ ciphertext = aes_encrypt(key=FIXED_KEY, iv=b"\x00" * 12, data=national_id)
 | 安全亂數（CSPRNG） | 怎麼產生別人猜不到的值？ | 不需要 | token、session id、salt、nonce、金鑰 |
 
 密碼不在這張表上：存密碼要用加鹽慢雜湊，見 [密碼儲存](#/skill/password-storage)。
+
+對照開頭的三段程式：
+
+| 程式 | 該用的工具 | 寫法 |
+|---|---|---|
+| 1) 重設密碼的 token | 安全亂數 | `secrets.token_urlsafe(32)` |
+| 2) webhook 簽章 | HMAC | `hmac.new(secret, body, hashlib.sha256)`，比對用 `hmac.compare_digest` |
+| 3) 身分證字號欄位 | 對稱加密（AEAD） | AES-GCM，每次加密用 CSPRNG 產生新的 12 bytes nonce |
+
+## 最小的程式：安全亂數與 HMAC
+
+```python run
+import random, secrets, hmac, hashlib
+
+# random：同一個 seed 得到同一串數字。拿來產 token，等於 token 可以被重現
+random.seed(1234)
+a = [random.randint(0, 9) for _ in range(8)]
+random.seed(1234)
+b = [random.randint(0, 9) for _ in range(8)]
+print("random 可重現：", a == b, a)
+
+# secrets：從作業系統的 CSPRNG 取值，適合 token、重設連結、API key
+print("重設連結 token：", secrets.token_urlsafe(32))
+print("6 位數驗證碼：", f"{secrets.randbelow(10**6):06d}")
+
+# HMAC 與固定時間比對
+key = secrets.token_bytes(32)
+msg = b'{"event":"order.paid","order_id":1001}'
+tag = hmac.new(key, msg, hashlib.sha256).hexdigest()
+print("HMAC：", tag[:32], "…")
+print("驗證：", hmac.compare_digest(tag, hmac.new(key, msg, hashlib.sha256).hexdigest()))
+```
+
+最常見的兩個錯誤：
+
+| 現象 | 原因 | 修正 |
+|---|---|---|
+| webhook 簽章在本機對、上線後全部失敗 | 框架先 parse 了 JSON，驗證時用的是重新 serialize 的字串；或中間的 proxy 改了編碼 | 驗證用原始 body bytes；確認簽章對象（是否含 timestamp）與官方文件一致 |
+| WebCrypto 解密拋出 `OperationError`；Python `cryptography` 拋出 `InvalidTag` | 密文或 tag 被改、金鑰不對、nonce 不對、AAD 不一致。GCM 不會告訴你是哪一個 | 檢查 nonce 是否和密文一起存、AAD 是否用同樣的值組出來、金鑰版本是否對應 |
+
+:::stop 讀到這裡可以先停：能依用途在雜湊、HMAC、AES-GCM、簽章與安全亂數之間選一個，會用 `secrets` 產生 token、用 HMAC 驗證訊息。後面是每種工具的細節與 WebCrypto 程式，在要實作 webhook 驗證、欄位加密或簽章時再回來讀。
+
+## 五種工具的細節
 
 ### 雜湊：完整性，不是來源
 
@@ -106,9 +147,7 @@ Python 的 `random` 是 Mersenne Twister，設計目標是統計性質好與可�
 - 瀏覽器與 Node：WebCrypto（`crypto.subtle`）
 - 雲端：KMS 的 encrypt／decrypt／sign API，金鑰不出 KMS
 
-:::stop 讀到這裡可以先停：能依用途在雜湊、HMAC、AES-GCM、簽章與安全亂數之間選一個。後面的 WebCrypto 與 Python 程式，在要實作 webhook 驗證、欄位加密或產生 token 時再回來讀。
-
-## 實際程式
+## AES-GCM 與 webhook 簽章的程式
 
 ### AES-GCM 加解密、AAD 與竄改偵測（WebCrypto）
 
@@ -191,30 +230,6 @@ console.log('一小時後重送 →', await verify(body, ts, sig, ts + 3600))
 console.log('JSON 重排   →', await verify(JSON.stringify(JSON.parse(body), null, 1), ts, sig))
 ```
 
-### Python：secrets vs random、HMAC
-
-```python run
-import random, secrets, hmac, hashlib
-
-# random：同一個 seed 得到同一串數字。拿來產 token，等於 token 可以被重現
-random.seed(1234)
-a = [random.randint(0, 9) for _ in range(8)]
-random.seed(1234)
-b = [random.randint(0, 9) for _ in range(8)]
-print("random 可重現：", a == b, a)
-
-# secrets：從作業系統的 CSPRNG 取值，適合 token、重設連結、API key
-print("重設連結 token：", secrets.token_urlsafe(32))
-print("6 位數驗證碼：", f"{secrets.randbelow(10**6):06d}")
-
-# HMAC 與固定時間比對
-key = secrets.token_bytes(32)
-msg = b'{"event":"order.paid","order_id":1001}'
-tag = hmac.new(key, msg, hashlib.sha256).hexdigest()
-print("HMAC：", tag[:32], "…")
-print("驗證：", hmac.compare_digest(tag, hmac.new(key, msg, hashlib.sha256).hexdigest()))
-```
-
 ### 正式專案的 Python 寫法（需要 cryptography 套件）
 
 ```python
@@ -238,12 +253,10 @@ def decrypt_field(blob: bytes, user_id: int) -> str:
         raise ValueError("密文被竄改、金鑰不對，或 AAD 不符")
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤
 
 | 現象 | 原因 | 修正 |
 |---|---|---|
-| WebCrypto 解密拋出 `OperationError`；Python `cryptography` 拋出 `InvalidTag` | 密文或 tag 被改、金鑰不對、nonce 不對、AAD 不一致。GCM 不會告訴你是哪一個 | 檢查 nonce 是否和密文一起存、AAD 是否用同樣的值組出來、金鑰版本是否對應 |
-| webhook 簽章在本機對、上線後全部失敗 | 框架先 parse 了 JSON，驗證時用的是重新 serialize 的字串；或中間的 proxy 改了編碼 | 驗證用原始 body bytes；確認簽章對象（是否含 timestamp）與官方文件一致 |
 | 用 ECB 模式或固定 IV | 相同明文得到相同密文，資料的模式直接可見 | 用 AEAD（AES-GCM、ChaCha20-Poly1305），每次新的 nonce |
 | 金鑰寫在程式碼或和資料放同一個資料庫 | 資料外洩時金鑰一起外洩，加密沒有意義 | KMS／Secret Manager；envelope encryption |
 | 用雜湊「加密」可以查詢的欄位（例如 email） | email 的可能值有限，SHA-256 可以被字典反查 | 需要等值查詢時，另存一欄 `HMAC(key, email)` 當盲索引（blind index），金鑰另外保管 |

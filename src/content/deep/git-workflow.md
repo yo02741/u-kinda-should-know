@@ -1,6 +1,6 @@
-## 從一個具體問題開始：一個開了三週的分支
+## 具體問題：一個開了三週的分支
 
-`feature/coupon`（優惠券功能）從 main 切出來已經三週。這段期間 main 合進了 60 個 commit，其中有人重構了結帳模組。準備合併時發生的事：
+`feature/coupon`（優惠券功能）從 main 切出來已經三週。這段期間 main 合進了 60 個 commit，其中有人重構了結帳模組。
 
 | 時間 | 發生什麼 |
 |---|---|
@@ -13,23 +13,84 @@
 
 問題出在**整合得太晚**：分支越久，跟 main 的距離越大，衝突越多、審查越形式化、出事時越難切出「要撤掉的那一塊」。
 
-以下各節分別處理：多久整合一次、什麼東西能進 main、出事時能不能乾淨地撤、沒做完的功能怎麼每天合。
+## 短分支：每天把小變更合回 main
 
-## 分支策略：多久整合一次
+| 策略 | 做法 | 適合 |
+|---|---|---|
+| Trunk-based | 所有人至少每天把小變更合回 main（trunk）；分支只活幾小時到一兩天；未完成的功能藏在 flag 後面 | 持續部署的服務 |
+| GitHub Flow | 從 main 開分支 → PR → 審查與 CI → 合併 → 部署 | 大部分 web 服務 |
+| Git Flow | `develop`、`feature/*`、`release/*`、`hotfix/*`、`main` 多條長期分支 | 有明確版本號、需要同時維護多個已發行版本的產品 |
 
-| 策略 | 做法 | 適合 | 代價 |
-|---|---|---|---|
-| Trunk-based | 所有人至少每天把小變更合回 main（trunk）；分支只活幾小時到一兩天；未完成的功能藏在 flag 後面 | 持續部署的服務 | 需要好的 CI、要會拆小變更、要有 feature flag |
-| GitHub Flow | 從 main 開分支 → PR → 審查與 CI → 合併 → 部署 | 大部分 web 服務；和 trunk-based 的差別主要在分支壽命沒有明確要求 | 分支放太久就退化成上面那個三週的例子 |
-| Git Flow | `develop`、`feature/*`、`release/*`、`hotfix/*`、`main` 多條長期分支 | 有明確版本號、需要同時維護多個已發行版本的產品（例如安裝在客戶端的軟體） | 分支多、合併路徑多；對持續部署的服務來說流程偏重 |
-
-trunk-based 仍然會開分支，它要求的是 **main 永遠可以部署**，以及沒有人長時間離開 main。分支是開 PR、跑 CI 的載具，不是存放半成品的地方。
-
-把一個大功能拆成每天能合的小變更，常見的切法：
+trunk-based 仍然會開分支，它要求的是 **main 永遠可以部署**，以及沒有人長時間離開 main。把一個大功能拆成每天能合的小變更，常見的切法：
 
 - **先合不會被呼叫到的東西**：資料表新欄位（可為空）、新的函式與它的測試，還沒有任何路由用到它。
 - **用 flag 包住入口**：新的 API 路由或畫面入口先合進去，但 flag 預設關閉。
-- **重構和行為變更分開**：先合一個「只搬程式碼、行為不變」的 PR，再合改行為的 PR。審查者看前者只需要確認行為不變，看後者只需要看那幾行。
+- **重構和行為變更分開**：先合一個「只搬程式碼、行為不變」的 PR，再合改行為的 PR。
+
+## merge、squash、rebase：合回 main 之後歷史長什麼樣
+
+假設 main 在你開分支後又多了 `C`、`D` 兩個 commit，你的分支有 `X`、`Y`：
+
+```text
+main:     A---B---C---D
+               \
+feature:        X---Y
+```
+
+把分支整合回 main 的三種方式，結果不同：
+
+```text
+# merge commit：保留分支原貌，多一個有兩個 parent 的 M
+A---B---C---D-------M
+         \         /
+          X-------Y
+
+# squash merge：X、Y 壓成一個新的 commit S
+A---B---C---D---S
+
+# rebase and merge：X、Y 重新套用在 D 之後，變成新的 X'、Y'（SHA 不同）
+A---B---C---D---X'---Y'
+```
+
+| 方式 | 歷史 | revert 一個功能 | 注意 |
+|---|---|---|---|
+| merge commit | 保留每個 commit 與分支結構 | `git revert -m 1 <M>`，一次撤掉整個分支 | 歷史比較雜；衝突解法藏在 M 裡 |
+| squash merge | 一個 PR 一個 commit，main 是線性的 | `git revert <S>` | 分支內的細節 commit 不會進 main |
+| rebase and merge | 線性，保留每個 commit | 要逐一 revert 該 PR 的 commit | 每個 commit 都要能單獨通過測試，否則 `git bisect` 會卡在壞掉的中間狀態 |
+
+團隊選一種寫進規範，在平台設定裡只開放那一種。小 PR 搭配 squash merge 是常見的組合：main 上一個 commit 對應一個 PR，revert 的單位很清楚。
+
+每天跟上 main、出事時撤掉一個 commit：
+
+```bash
+git fetch origin
+git rebase origin/main                 # 把自己的 commit 重新套在最新的 main 上
+git push --force-with-lease            # 遠端被別人改過就拒絕，不會默默蓋掉
+```
+
+```bash
+git revert 3f9c2a1            # 一般 commit：產生一個「反向」的新 commit
+git revert -m 1 7c3d2a1       # merge commit：-m 1 表示以第一個 parent（main）為基準
+```
+
+rebase 會改寫歷史，只 rebase 還沒有別人在用的 commit（自己的功能分支）。
+
+## 最常見的兩個錯誤
+
+- **`! [rejected] main -> main (non-fast-forward)`**，提示 `Updates were rejected because the tip of your current branch is behind`：遠端有你本機沒有的 commit。`git pull --rebase`（或先 fetch 再合併），解完衝突再推；不要直接 `--force`。
+- **`CONFLICT (content): Merge conflict in ...`**：兩邊改了同一段。理解兩邊的意圖後合併，`git add` 標記，重跑測試。解到一半想放棄：`git merge --abort` 或 `git rebase --abort` 會回到開始前的狀態。
+
+:::stop 讀到這裡可以先停：會開短分支、把大功能拆成每天能合的小變更，依團隊規範選 merge、squash 或 rebase，並 revert 一個 commit。後面的審查與保護分支、commit 訊息、衝突處理、tag 與 feature flag，在要設定 repo 規則、解衝突、發版號或把沒做完的功能先合進 main 時再回來讀。
+
+## 分支策略的代價與分支的角色
+
+| 策略 | 代價 |
+|---|---|
+| Trunk-based | 需要好的 CI、要會拆小變更、要有 feature flag |
+| GitHub Flow | 和 trunk-based 的差別主要在分支壽命沒有明確要求；分支放太久就退化成開頭那個三週的例子 |
+| Git Flow | 分支多、合併路徑多；對持續部署的服務來說流程偏重。適合的例子是安裝在客戶端的軟體 |
+
+分支是開 PR、跑 CI 的載具，不是存放半成品的地方。重構和行為變更分開之後，審查者看前者只需要確認行為不變，看後者只需要看那幾行。
 
 ## PR／MR 審查：什麼東西能進 main
 
@@ -65,46 +126,9 @@ remote: error: Changes must be made through a pull request.
 
 GitLab 則會回 `You are not allowed to push code to protected branches on this project.`。這代表規則有效：開分支、發 PR，不是去找人把規則關掉。
 
-## rebase、merge、squash：歷史長什麼樣
+## rebase 會改寫歷史：`--force-with-lease`
 
-假設 main 在你開分支後又多了 `C`、`D` 兩個 commit，你的分支有 `X`、`Y`：
-
-```text
-main:     A---B---C---D
-               \
-feature:        X---Y
-```
-
-把分支整合回 main 的三種方式，結果不同：
-
-```text
-# merge commit：保留分支原貌，多一個有兩個 parent 的 M
-A---B---C---D-------M
-         \         /
-          X-------Y
-
-# squash merge：X、Y 壓成一個新的 commit S
-A---B---C---D---S
-
-# rebase and merge：X、Y 重新套用在 D 之後，變成新的 X'、Y'（SHA 不同）
-A---B---C---D---X'---Y'
-```
-
-| 方式 | 歷史 | revert 一個功能 | 注意 |
-|---|---|---|---|
-| merge commit | 保留每個 commit 與分支結構 | `git revert -m 1 <M>`，一次撤掉整個分支 | 歷史比較雜；衝突解法藏在 M 裡 |
-| squash merge | 一個 PR 一個 commit，main 是線性的 | `git revert <S>` | 分支內的細節 commit 不會進 main |
-| rebase and merge | 線性，保留每個 commit | 要逐一 revert 該 PR 的 commit | 每個 commit 都要能單獨通過測試，否則 `git bisect` 會卡在壞掉的中間狀態 |
-
-團隊選一種寫進規範，在平台設定裡只開放那一種。小 PR 搭配 squash merge 是常見的組合：main 上一個 commit 對應一個 PR，revert 的單位很清楚。
-
-**rebase 會改寫歷史**：X 變成 X'，SHA 不同。只 rebase 還沒有別人在用的 commit（例如自己的功能分支），不要 rebase 已經被別人拉下來的共享分支。rebase 自己的分支後要更新遠端時，用 `--force-with-lease` 而不是 `--force`：它會先確認遠端分支還停在你上次看到的位置，如果有人在這期間推了新 commit，就拒絕覆蓋。
-
-```bash
-git fetch origin
-git rebase origin/main                 # 把自己的 commit 重新套在最新的 main 上
-git push --force-with-lease            # 遠端被別人改過就拒絕，不會默默蓋掉
-```
+X 變成 X'，SHA 不同。不要 rebase 已經被別人拉下來的共享分支。rebase 自己的分支後要更新遠端時，用 `--force-with-lease` 而不是 `--force`：它會先確認遠端分支還停在你上次看到的位置，如果有人在這期間推了新 commit，就拒絕覆蓋。
 
 ## commit 訊息與可 revert 的 commit
 
@@ -153,12 +177,7 @@ BREAKING CHANGE: lowercase coupon codes are rejected with 422.
 
 ### revert 一個 merge commit
 
-```bash
-git revert 3f9c2a1            # 一般 commit：產生一個「反向」的新 commit
-git revert -m 1 7c3d2a1       # merge commit：-m 1 表示以第一個 parent（main）為基準
-```
-
-對 merge commit 直接 `git revert` 會失敗，因為 git 不知道要以哪個 parent 為基準：
+對 merge commit 直接 `git revert` 會失敗，因為 git 不知道要以哪個 parent 為基準；加 `-m 1` 表示以第一個 parent（main）為基準：
 
 ```text
 error: commit 7c3d2a1... is a merge but no -m option was given.
@@ -197,15 +216,13 @@ git commit                   # merge 的情況；rebase 則是 git rebase --cont
 uv run pytest                # 衝突解完一定要重跑測試：能編譯不代表邏輯對
 ```
 
-rebase 時衝突是**一個 commit 一個 commit**出現的，訊息是 `error: could not apply ...`，並提示解完後執行 `git rebase --continue`。解到一半想放棄：`git merge --abort` 或 `git rebase --abort` 會回到開始前的狀態。
+rebase 時衝突是**一個 commit 一個 commit**出現的，訊息是 `error: could not apply ...`，並提示解完後執行 `git rebase --continue`。
 
 幾個減少衝突的做法：
 
 - **常同步 main**：每天把 main 合進（或 rebase 到）自己的分支，衝突小的時候就解掉。
 - **lock 檔不要手動合**：`uv.lock`、`package-lock.json` 衝突時，接受其中一邊後重新執行 `uv lock` 或 `npm install` 產生，再確認差異。
 - **大規模的機械變更**（全專案重新排版、大量改名）約好時間一次合完。
-
-:::stop 讀到這裡可以先停：會開短分支、設 main 的保護規則、依團隊規範選 merge 或 squash、寫能單獨 revert 的 commit 並解衝突。後面的 tag 發版與 feature flag，在要發版號或把沒做完的功能先合進 main 時再回來讀。
 
 ## tag 與發版
 

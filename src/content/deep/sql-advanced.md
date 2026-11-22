@@ -28,45 +28,11 @@ WHERE created_at = (SELECT max(created_at) FROM orders o2 WHERE o2.user_id = o.u
 
 這次結果對了，但同一個使用者有兩筆訂單時間完全相同時會出現兩列，而且邏輯上對每一列訂單都要算一次子查詢。
 
-這三次分別踩到了子查詢的三種性質：純量子查詢只能回一個值、非相關子查詢只算一次、相關子查詢逐列求值。這一課從子查詢講起，接著是把查詢拆成步驟的 CTE、走樹狀資料的遞迴 CTE、不縮列的視窗函數，最後是寫入時常用的 UPSERT 與 `RETURNING`。
-
-## 子查詢：非相關與相關
-
-子查詢可以出現在三個位置，各有回傳形狀的限制：
-
-| 位置 | 例子 | 必須回傳 |
-|---|---|---|
-| 運算式（純量子查詢） | `WHERE amount > (SELECT avg(amount) FROM orders)` | 最多一列一欄；0 列時當成 NULL |
-| `IN` / `EXISTS` / `ANY` | `WHERE id IN (SELECT user_id FROM orders)` | 一欄、任意列（EXISTS 不在乎欄位） |
-| `FROM`（衍生資料表） | `FROM (SELECT user_id, sum(amount) … GROUP BY user_id) t` | 任意形狀，像一張暫時的表 |
-
-**非相關子查詢**不引用外層的欄位，邏輯上只算一次，結果代入外層。**相關子查詢**引用外層的欄位（上面的 `o.user_id`），邏輯上對外層每一列都要重算。規劃器常常能把 `EXISTS` / `IN` 改寫成 semi-join、anti-join，實際上不見得逐列執行；但 SELECT 清單裡的相關純量子查詢通常就是一個 `SubPlan`，外層每一列跑一次。
-
-```sql run
--- 非相關：全站平均只算一次，再拿來比較每筆訂單
-SELECT id, user_id, amount
-FROM orders
-WHERE amount > (SELECT avg(amount) FROM orders)
-ORDER BY id;
-
--- 相關：每筆訂單跟「同一位使用者自己的平均」比較
-SELECT o.id, o.user_id, o.amount
-FROM orders o
-WHERE o.amount > (SELECT avg(o2.amount) FROM orders o2 WHERE o2.user_id = o.user_id)
-ORDER BY o.id;
-
--- 純量子查詢放在 SELECT 清單：每位使用者跑一次；沒有訂單時回 NULL，用 coalesce 換成 0
-SELECT u.name,
-       coalesce((SELECT sum(o.amount) FROM orders o WHERE o.user_id = u.id), 0) AS total
-FROM users u
-ORDER BY u.id;
-```
-
-純量子查詢回傳超過一列時會在執行時報錯（`more than one row returned by a subquery used as an expression`），而不是在寫查詢時。這種錯常在上線後才出現：開發時每位使用者剛好只有一筆資料，正式資料一多就爆。純量子查詢要用聚合（`max`、`sum`）或 `LIMIT 1` 加 `ORDER BY` 保證只有一列。
+三次分別踩到子查詢的三種性質：純量子查詢只能回一個值、非相關子查詢只算一次、相關子查詢逐列求值。穩定的寫法是先用視窗函數替每位使用者的訂單編號，再用 CTE 在外層取第 1 筆。
 
 ## CTE：把查詢拆成有名字的步驟
 
-`WITH` 讓一個查詢裡先定義幾個暫時的結果集，後面的步驟可以引用前面的。巢狀子查詢要從最內層往外讀，CTE 則可以從上往下讀。
+`WITH` 在一個查詢裡先定義幾個暫時的結果集，後面的步驟可以引用前面的。巢狀子查詢要從最內層往外讀，CTE 從上往下讀。
 
 需求：「消費總額高於全體平均的使用者，以及他們所在城市」。巢狀寫法：
 
@@ -99,7 +65,115 @@ WHERE t.total > a.v
 ORDER BY t.total DESC;
 ```
 
-CTE 會不會被當成「先算完存起來」，跟版本有關：
+## 視窗函數：計算跨列的值，但不縮列
+
+聚合函數加 `GROUP BY` 把一組縮成一列；**視窗函數**對每一列算一個跨越「同一個視窗內其他列」的值，列數不變。語法是函數後面接 `OVER (…)`：
+
+```text
+函數() OVER (
+  PARTITION BY 分組欄位     -- 視窗依什麼切開（像 GROUP BY，但不縮列）；省略就是整個結果
+  ORDER BY 排序欄位         -- 視窗內的順序：排名、LAG、累計都靠它
+  ROWS BETWEEN … AND …      -- 視窗框（frame）：累計、移動平均要算哪幾列
+)
+```
+
+視窗函數在 `WHERE`、`GROUP BY`、`HAVING` **之後**才計算（邏輯執行順序見 [SQL 基礎](#/skill/sql-basics)）。寫 `WHERE row_number() OVER (…) = 1` 會報 `window functions are not allowed in WHERE`，要包一層子查詢或 CTE，在外層過濾。
+
+### 排名：ROW_NUMBER、RANK、DENSE_RANK
+
+```sql run
+-- 加一筆跟 106 金額相同的訂單，製造平手
+INSERT INTO orders (id, user_id, status, amount, created_at)
+VALUES (107, 3, 'paid', 3290, '2026-03-14 10:00+08');
+
+SELECT id, user_id, amount,
+       row_number() OVER (ORDER BY amount DESC) AS row_number,  -- 一律 1, 2, 3…，平手時順序不保證
+       rank()       OVER (ORDER BY amount DESC) AS rank,        -- 平手同名次，之後跳號：1, 2, 3, 3, 5
+       dense_rank() OVER (ORDER BY amount DESC) AS dense_rank   -- 平手同名次，不跳號：1, 2, 3, 3, 4
+FROM orders
+ORDER BY amount DESC, id;
+```
+
+| 函數 | 平手時 | 適合 |
+|---|---|---|
+| `row_number()` | 給不同的號碼（誰先誰後沒有保證，要在 ORDER BY 加上 id 這類唯一欄位） | 每組剛好取 N 筆、分頁、去重 |
+| `rank()` | 同名次，下一名跳號 | 比賽排名：「並列第三，下一位是第五」 |
+| `dense_rank()` | 同名次，不跳號 | 「前三種價位」這類以「不同值」計數的需求 |
+
+## 每組前 N 名：row_number 加外層過濾
+
+「每位使用者金額最高的 2 筆訂單」「每個分類銷量前 3 的商品」，以及開頭的「每位使用者最新一筆」，都是同一個寫法：
+
+```sql run
+WITH ranked AS (
+  SELECT o.*,
+         row_number() OVER (PARTITION BY o.user_id ORDER BY o.amount DESC, o.id) AS rn
+  FROM orders o
+)
+SELECT user_id, id, amount, rn
+FROM ranked
+WHERE rn <= 2                      -- 視窗函數的結果要在外層才能過濾
+ORDER BY user_id, rn;
+
+-- 每位使用者最新的一筆：開頭那個問題，平手時用 id 決定，保證一人一列
+WITH latest AS (
+  SELECT o.*,
+         row_number() OVER (PARTITION BY o.user_id ORDER BY o.created_at DESC, o.id DESC) AS rn
+  FROM orders o
+)
+SELECT user_id, id, status, amount FROM latest WHERE rn = 1 ORDER BY user_id;
+```
+
+`row_number()` 的 `ORDER BY` 沒有唯一鍵時，平手的列誰排第一每次可能不同，「最新一筆」就會飄。加上 `id` 當最後的排序鍵。
+
+:::stop 讀到這裡可以先停：會用 CTE 把查詢拆成步驟，用視窗函數排名並取每組前 N 名。後面的子查詢、遞迴 CTE、LAG 與累計在遇到對應需求時回來查；UPSERT 與 RETURNING，在要匯入去重或寫入後立刻拿到結果時再讀。
+
+## 每組前 N 名的其他寫法
+
+| 寫法 | 特點 |
+|---|---|
+| `row_number()` + 外層 `WHERE rn <= N` | 可攜（多數現代關聯式資料庫都支援）；一次掃完整張表再排名 |
+| `rank()` 代替 `row_number()` | 平手的都留下，結果可能多於 N 筆 |
+| `DISTINCT ON`（只能取 1 筆） | PostgreSQL 專屬、最短，見 [SQL 基礎](#/skill/sql-basics) |
+| `LATERAL (… ORDER BY … LIMIT N)` | 對每個分組跑一次子查詢；有合適的複合索引、而且分組數不多時很快，見 [JOIN](#/skill/sql-joins) |
+
+## 子查詢：非相關與相關
+
+子查詢可以出現在三個位置，各有回傳形狀的限制：
+
+| 位置 | 例子 | 必須回傳 |
+|---|---|---|
+| 運算式（純量子查詢） | `WHERE amount > (SELECT avg(amount) FROM orders)` | 最多一列一欄；0 列時當成 NULL |
+| `IN` / `EXISTS` / `ANY` | `WHERE id IN (SELECT user_id FROM orders)` | 一欄、任意列（EXISTS 不在乎欄位） |
+| `FROM`（衍生資料表） | `FROM (SELECT user_id, sum(amount) … GROUP BY user_id) t` | 任意形狀，像一張暫時的表 |
+
+**非相關子查詢**不引用外層的欄位，邏輯上只算一次，結果代入外層。**相關子查詢**引用外層的欄位（開頭第三次嘗試的 `o.user_id`），邏輯上對外層每一列都要重算。規劃器常常能把 `EXISTS` / `IN` 改寫成 semi-join、anti-join，實際上不見得逐列執行；但 SELECT 清單裡的相關純量子查詢通常就是一個 `SubPlan`，外層每一列跑一次。
+
+```sql run
+-- 非相關：全站平均只算一次，再拿來比較每筆訂單
+SELECT id, user_id, amount
+FROM orders
+WHERE amount > (SELECT avg(amount) FROM orders)
+ORDER BY id;
+
+-- 相關：每筆訂單跟「同一位使用者自己的平均」比較
+SELECT o.id, o.user_id, o.amount
+FROM orders o
+WHERE o.amount > (SELECT avg(o2.amount) FROM orders o2 WHERE o2.user_id = o.user_id)
+ORDER BY o.id;
+
+-- 純量子查詢放在 SELECT 清單：每位使用者跑一次；沒有訂單時回 NULL，用 coalesce 換成 0
+SELECT u.name,
+       coalesce((SELECT sum(o.amount) FROM orders o WHERE o.user_id = u.id), 0) AS total
+FROM users u
+ORDER BY u.id;
+```
+
+純量子查詢回傳超過一列時會在執行時報錯（`more than one row returned by a subquery used as an expression`），而不是在寫查詢時。這種錯常在上線後才出現：開發時每位使用者剛好只有一筆資料，正式資料一多就爆。純量子查詢要用聚合（`max`、`sum`）或 `LIMIT 1` 加 `ORDER BY` 保證只有一列。
+
+## CTE 會不會先算完存起來：MATERIALIZED
+
+跟版本有關：
 
 - PostgreSQL 12 以前，CTE 一律先算完再給後面用（稱為 optimization fence），外層的條件推不進去，有時反而變慢。
 - PostgreSQL 12 起，沒有副作用、不是遞迴、而且**只被引用一次**的 CTE 會被展開到外層查詢裡一起最佳化；被引用兩次以上的仍會先算完。可以用 `WITH x AS MATERIALIZED (…)` 或 `AS NOT MATERIALIZED (…)` 明確指定。
@@ -163,42 +237,7 @@ SELECT string_agg(name, ' > ' ORDER BY hops DESC) AS breadcrumb FROM up;
 - PostgreSQL 14 起可以在 CTE 後面加 `CYCLE id SET is_cycle USING visited`，由資料庫記錄走過的 id，遇到重複時標記並停止那條路。
 - 從源頭避免：寫入時檢查不會形成循環。
 
-## 視窗函數：計算跨列的值，但不縮列
-
-聚合函數加 `GROUP BY` 會把一組縮成一列；**視窗函數**對每一列計算一個跨越「同一個視窗內其他列」的值，列數不變。語法是函數後面接 `OVER (…)`：
-
-```text
-函數() OVER (
-  PARTITION BY 分組欄位     -- 視窗依什麼切開（像 GROUP BY，但不縮列）；省略就是整個結果
-  ORDER BY 排序欄位         -- 視窗內的順序：排名、LAG、累計都靠它
-  ROWS BETWEEN … AND …      -- 視窗框（frame）：累計、移動平均要算哪幾列
-)
-```
-
-視窗函數在 `WHERE`、`GROUP BY`、`HAVING` **之後**才計算（邏輯執行順序見 [SQL 基礎](#/skill/sql-basics)），所以不能在 WHERE 裡用它的結果過濾，要包一層子查詢或 CTE。
-
-### 排名：ROW_NUMBER、RANK、DENSE_RANK
-
-```sql run
--- 加一筆跟 106 金額相同的訂單，製造平手
-INSERT INTO orders (id, user_id, status, amount, created_at)
-VALUES (107, 3, 'paid', 3290, '2026-03-14 10:00+08');
-
-SELECT id, user_id, amount,
-       row_number() OVER (ORDER BY amount DESC) AS row_number,  -- 一律 1, 2, 3…，平手時順序不保證
-       rank()       OVER (ORDER BY amount DESC) AS rank,        -- 平手同名次，之後跳號：1, 2, 3, 3, 5
-       dense_rank() OVER (ORDER BY amount DESC) AS dense_rank   -- 平手同名次，不跳號：1, 2, 3, 3, 4
-FROM orders
-ORDER BY amount DESC, id;
-```
-
-| 函數 | 平手時 | 適合 |
-|---|---|---|
-| `row_number()` | 給不同的號碼（誰先誰後沒有保證，要在 ORDER BY 加上 id 這類唯一欄位） | 每組剛好取 N 筆、分頁、去重 |
-| `rank()` | 同名次，下一名跳號 | 比賽排名：「並列第三，下一位是第五」 |
-| `dense_rank()` | 同名次，不跳號 | 「前三種價位」這類以「不同值」計數的需求 |
-
-### LAG、LEAD、累計與佔比
+## 視窗函數：LAG、LEAD、累計與佔比
 
 ```sql run
 SELECT o.user_id, o.id, o.created_at::date::text AS day, o.amount,
@@ -217,41 +256,6 @@ ORDER BY o.user_id, o.created_at;
 累計那一行明寫了 `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`。只寫 `ORDER BY` 時，預設的視窗框是 `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`：排序值相同的列（例如同一天、同一秒）會被當成同一個位置，一起算進「目前這列」，平手的列會得到相同的累計值。要每一列逐筆累計就寫 `ROWS`。
 
 `lag()` 在每個分區的第一列沒有上一筆，回傳 NULL；可以給第三個參數當預設值（`lag(x, 1, 0)`）。
-
-## 每組前 N 名
-
-「每位使用者金額最高的 2 筆訂單」「每個分類銷量前 3 的商品」是最常見的視窗函數用途：
-
-```sql run
-WITH ranked AS (
-  SELECT o.*,
-         row_number() OVER (PARTITION BY o.user_id ORDER BY o.amount DESC, o.id) AS rn
-  FROM orders o
-)
-SELECT user_id, id, amount, rn
-FROM ranked
-WHERE rn <= 2                      -- 視窗函數的結果要在外層才能過濾
-ORDER BY user_id, rn;
-
--- 每位使用者最新的一筆：開頭那個問題，平手時用 id 決定，保證一人一列
-WITH latest AS (
-  SELECT o.*,
-         row_number() OVER (PARTITION BY o.user_id ORDER BY o.created_at DESC, o.id DESC) AS rn
-  FROM orders o
-)
-SELECT user_id, id, status, amount FROM latest WHERE rn = 1 ORDER BY user_id;
-```
-
-同一個需求的幾種寫法：
-
-| 寫法 | 特點 |
-|---|---|
-| `row_number()` + 外層 `WHERE rn <= N` | 可攜（多數現代關聯式資料庫都支援）；一次掃完整張表再排名 |
-| `rank()` 代替 `row_number()` | 平手的都留下，結果可能多於 N 筆 |
-| `DISTINCT ON`（只能取 1 筆） | PostgreSQL 專屬、最短，見 [SQL 基礎](#/skill/sql-basics) |
-| `LATERAL (… ORDER BY … LIMIT N)` | 對每個分組跑一次子查詢；有合適的複合索引、而且分組數不多時很快，見 [JOIN](#/skill/sql-joins) |
-
-:::stop 讀到這裡可以先停：會用 CTE 把查詢拆成步驟，用視窗函數做排名、累計與每組前 N 名。後面的 UPSERT 與 RETURNING，在要匯入去重或寫入後立刻拿到結果時再回來讀。
 
 ## UPSERT：INSERT … ON CONFLICT
 
@@ -355,7 +359,6 @@ RETURNING id, status, amount;
 
 沒有錯誤訊息、但結果錯的情況：
 
-- **`row_number()` 的 ORDER BY 沒有唯一鍵**：平手時誰是第一名每次可能不同，「最新一筆」就會飄。加上 `id` 當最後的排序鍵。
 - **累計用了預設的 RANGE 框**：同時間的列得到相同的累計值。逐列累計寫 `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`。
 - **遞迴 CTE 遇到循環資料**：查詢不會結束，直到逾時。加深度上限或 `CYCLE`。
 - **在 `SELECT` 清單放相關子查詢處理大表**：每一列跑一次，列數一多就慢。改成先聚合再 JOIN。

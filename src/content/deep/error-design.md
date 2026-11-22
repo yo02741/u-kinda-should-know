@@ -1,4 +1,4 @@
-## 從一個具體問題開始：前端在解析錯誤訊息的字串
+## 具體問題：前端在解析錯誤訊息的字串
 
 註冊 API 遇到重複的 Email 時，伺服器沒有特別處理，例外一路往上冒，最後回給瀏覽器的是：
 
@@ -16,9 +16,7 @@ DETAIL:  Key (email)=(a@example.com) already exists.
 - 監控把它算成 500，半夜告警響了，但那是使用者正常的操作。
 - 某天 DBA 把約束改名成 `uq_users_email`，前端的判斷失效，所有人都只看到「發生錯誤」。
 
-錯誤也是 API 的一部分，需要和成功回應一樣設計：分清楚是哪一種錯誤、用穩定的格式與代碼回應、只說使用者該知道的事、讓維運能從回應追到 log。
-
-## 兩種錯誤：預期內的，與程式錯誤
+## 兩種錯誤：預期內的回 4xx，程式錯誤回 5xx
 
 | | 預期內的錯誤 | 程式錯誤（bug） |
 |---|---|---|
@@ -28,16 +26,14 @@ DETAIL:  Key (email)=(a@example.com) already exists.
 | 回應內容 | 具體說明哪裡不對、怎麼改 | 一句「伺服器錯誤」，加上 request id |
 | 日誌 | info 或 warning，不必附 stack trace | error，完整 stack trace，觸發告警 |
 
-處理方式也不一樣：
-
 - **預期內的錯誤**用明確的例外類別表達（`EmailTaken`、`InsufficientBalance`），在業務邏輯裡丟出，在邊界轉成 HTTP 回應。
 - **程式錯誤不要在中間接住**。`try: ... except Exception: return None` 會把 bug 變成一個靜悄悄的錯誤結果，往後擴散。讓它往上冒到最外層的全域處理器，由它統一回 500、記錄 stack trace。
 
-只在「知道怎麼處理」的地方 `except`，而且只接你預期的那種例外。
+只在知道怎麼處理的地方 `except`，而且只接預期的那種例外。
 
-## 例外階層：讓類別帶著語意
+## 最小程式：例外類別帶著狀態與代碼，在邊界轉成 Problem Details
 
-自訂一個應用程式的基底例外，往下依「HTTP 上的意義」分大類，再依業務細分：
+自訂一個應用程式的基底例外，往下依 HTTP 上的意義分大類，再依業務細分。每個類別帶三樣東西：HTTP 狀態、穩定的錯誤代碼、一句給人看的標題。
 
 ```text
 AppError                      500  internal_error
@@ -49,80 +45,18 @@ AppError                      500  internal_error
 └── ValidationFailed          422  validation_failed
 ```
 
-- 每個類別帶三樣東西：HTTP 狀態、穩定的錯誤代碼、一句給人看的標題。邊界的轉換程式只要讀這三個屬性，新增錯誤種類不必改轉換程式。
-- 細分的類別繼承大類，所以 `except NotFound` 也接得到 `OrderNotFound`；前端如果不認得 `order_not_found`，至少能依 404 處理。
-- **基礎設施的例外在 repository 邊界翻譯**。資料庫丟出的唯一鍵衝突，在 repository 裡接住、改丟 `EmailTaken`，並用 `raise EmailTaken(...) from e` 保留原本的例外（`__cause__`），log 裡還看得到根本原因。service 與 handler 都不需要知道 `psycopg.errors.UniqueViolation` 這個名字。
-- 業務邏輯裡丟的是領域例外，不是 `HTTPException`。這樣同一個 service 被批次工作或 CLI 呼叫時，錯誤依然有意義（見 [專案分層與依賴注入](#/skill/project-layering)）。
+邊界的轉換程式只讀這三個屬性，新增錯誤種類不必改它。回應用 RFC 9457 的 Problem Details 格式：`Content-Type` 是 `application/problem+json`，內容是一個 JSON 物件。
 
-## 在邊界轉成 HTTP 狀態碼
+| 欄位 | 放什麼 |
+|---|---|
+| `type` | 問題類型的 URI |
+| `title` | 問題類型的簡短說明，同一種類型每次都一樣 |
+| `status` | HTTP 狀態碼，和實際回應相同 |
+| `detail` | 這一次發生了什麼、使用者怎麼修正 |
+| `instance` | 識別這一次事件的 URI，常見做法是放請求的路徑 |
+| `code`、`request_id`、`errors` | 擴充欄位：前端判斷用的短代碼、對 log 用的 id、各欄位的錯誤 |
 
-常用的狀態碼與它們的意思：
-
-| 狀態碼 | 意思 | 例子 |
-|---|---|---|
-| `400 Bad Request` | 請求本身壞掉，伺服器無法理解 | JSON 語法錯誤 |
-| `401 Unauthorized` | **沒有通過認證**：沒帶 token、token 過期或無效 | 未登入 |
-| `403 Forbidden` | 認證過了，但**沒有權限** | 一般會員呼叫管理員 API |
-| `404 Not Found` | 資源不存在（或不想讓對方知道它存在） | 查別人的訂單 |
-| `409 Conflict` | 和資源目前的狀態衝突 | Email 已註冊、訂單已出貨不能取消 |
-| `422 Unprocessable Content` | 格式正確，但內容不合規則 | Email 格式錯、數量為負數 |
-| `429 Too Many Requests` | 超過速率限制 | 搭配 `Retry-After` 標頭 |
-| `500 Internal Server Error` | 伺服器的 bug | 任何未預期的例外 |
-| `503 Service Unavailable` | 暫時無法服務 | 維護中、下游掛掉，可搭配 `Retry-After` |
-
-兩個常見的誤用：用 `200` 加上 `{"success": false}` 回錯誤（監控、快取、HTTP client 的重試邏輯全都會誤判成成功）；以及把使用者的輸入錯誤回成 `500`（告警被正常流量淹沒）。
-
-## Problem Details（RFC 9457）
-
-每個 API 自己發明錯誤格式，前端就要為每個服務寫一套解析。**RFC 9457「Problem Details for HTTP APIs」**定義了一個通用的錯誤格式，它在 2023 年取代了 RFC 7807，主要差異包括新增常見問題類型的註冊表、補充一次回報多個問題的寫法；欄位與媒體類型沿用。
-
-回應的 `Content-Type` 是 `application/problem+json`，內容是一個 JSON 物件，標準欄位都是選填：
-
-| 欄位 | 意思 | 規則 |
-|---|---|---|
-| `type` | 問題類型的 URI，類型的**主要識別** | 省略時視為 `about:blank`；用可以打開的網址時，最好指向說明文件 |
-| `title` | 問題類型的簡短說明 | 同一種類型每次都一樣（翻譯除外），不放這一次的細節 |
-| `status` | HTTP 狀態碼 | 只是方便閱讀，必須和實際回應的狀態碼相同 |
-| `detail` | **這一次**發生了什麼、怎麼修正 | 給人看的；客戶端不應該解析它來取得資訊 |
-| `instance` | 識別**這一次**事件的 URI | 常見做法是放請求的路徑 |
-
-需要更多資訊時可以加**擴充欄位**，客戶端遇到不認得的欄位要忽略。RFC 9457 的範例用 `errors` 陣列一次回報多個欄位錯誤，每一筆有 `detail` 與指向欄位位置的 `pointer`（JSON Pointer，例如 `#/email`）：
-
-```http
-HTTP/1.1 422 Unprocessable Content
-Content-Type: application/problem+json
-X-Request-ID: 7f3a9c21
-
-{
-  "type": "https://example.com/problems/validation_failed",
-  "title": "輸入資料不正確",
-  "status": 422,
-  "instance": "/users",
-  "code": "validation_failed",
-  "request_id": "7f3a9c21",
-  "errors": [
-    {"pointer": "#/email", "detail": "格式不正確"},
-    {"pointer": "#/age", "detail": "必須是正整數"}
-  ]
-}
-```
-
-### 穩定的錯誤代碼
-
-前端要依錯誤種類決定行為（顯示哪段文字、要不要導去登入、哪個欄位標紅），判斷的依據必須**穩定**：
-
-- `type` 本身就是規格裡的識別，可以直接用。
-- 很多團隊另外加一個短的 `code` 擴充欄位（`email_taken`），和 `type` 一對一，前端寫 `switch (body.code)` 比較方便。這是常見慣例，不是 RFC 的要求。
-- 代碼一旦公開就當成 API 合約：可以新增，不要改名或改意思。
-- **不要讓前端依 `detail` 或 `title` 的文字判斷**。文字會改、會翻譯。
-
-### 不要把內部資訊回給使用者
-
-`detail` 寫的是使用者能採取的行動（「這個 Email 已經註冊過，可以直接登入或重設密碼」），不是內部原因。下列東西不出現在回應裡：例外的原始訊息、stack trace、SQL 與資料表名稱、檔案路徑、內部主機名稱、框架版本。它們幫不了使用者，卻能幫攻擊者了解系統。框架的除錯模式（會在錯誤頁顯示 stack trace）只能在本機開。
-
-## 實際程式：例外階層與邊界轉換
-
-下面這段把三種情況跑一次：預期內的衝突、輸入驗證失敗、程式 bug。注意 bug 的那一次，log 裡有完整原因，回應裡卻只有通用訊息與 request id。
+下面這段把三種情況跑一次：預期內的衝突、輸入驗證失敗、程式 bug。bug 的那一次，log 裡有完整原因，回應裡只有通用訊息與 request id。
 
 ```python run
 import json
@@ -206,7 +140,89 @@ for path, f in (("/users", register), ("/users", bad_input), ("/plans/premium", 
     print()
 ```
 
-在 FastAPI 裡，同樣的轉換寫成例外處理器（需要 FastAPI，不能在瀏覽器裡跑）：
+## 最常見的兩個錯誤
+
+| 現象 | 原因 | 怎麼修 |
+|---|---|---|
+| 回應內容出現 `Traceback (most recent call last)` 或 SQL 錯誤原文 | 沒有全域例外處理器，或正式環境開著除錯模式 | 註冊 catch-all 處理器回通用 500；確認除錯模式只在本機開 |
+| 前端用 `message.includes(...)` 判斷錯誤種類 | 回應沒有穩定的代碼 | 加 `type` / `code`，前端依代碼判斷 |
+
+:::stop 讀到這裡可以先停：會把錯誤分成預期內與 bug、用例外類別帶狀態與代碼、在邊界轉成 Problem Details。後面是例外階層的細節、狀態碼表、RFC 9457 的欄位規則、FastAPI 的寫法與 request id，在設計錯誤格式或要把使用者的回報對上 log 時再回來讀。
+
+## 例外階層的設計規則
+
+- 細分的類別繼承大類，所以 `except NotFound` 也接得到 `OrderNotFound`；前端如果不認得 `order_not_found`，至少能依 404 處理。
+- **基礎設施的例外在 repository 邊界翻譯**。資料庫丟出的唯一鍵衝突，在 repository 裡接住、改丟 `EmailTaken`，並用 `raise EmailTaken(...) from e` 保留原本的例外（`__cause__`），log 裡還看得到根本原因。service 與 handler 都不需要知道 `psycopg.errors.UniqueViolation` 這個名字。
+- 業務邏輯裡丟的是領域例外，不是 `HTTPException`。這樣同一個 service 被批次工作或 CLI 呼叫時，錯誤依然有意義（見 [專案分層與依賴注入](#/skill/project-layering)）。
+
+## 常用的 HTTP 狀態碼
+
+| 狀態碼 | 意思 | 例子 |
+|---|---|---|
+| `400 Bad Request` | 請求本身壞掉，伺服器無法理解 | JSON 語法錯誤 |
+| `401 Unauthorized` | **沒有通過認證**：沒帶 token、token 過期或無效 | 未登入 |
+| `403 Forbidden` | 認證過了，但**沒有權限** | 一般會員呼叫管理員 API |
+| `404 Not Found` | 資源不存在（或不想讓對方知道它存在） | 查別人的訂單 |
+| `409 Conflict` | 和資源目前的狀態衝突 | Email 已註冊、訂單已出貨不能取消 |
+| `422 Unprocessable Content` | 格式正確，但內容不合規則 | Email 格式錯、數量為負數 |
+| `429 Too Many Requests` | 超過速率限制 | 搭配 `Retry-After` 標頭 |
+| `500 Internal Server Error` | 伺服器的 bug | 任何未預期的例外 |
+| `503 Service Unavailable` | 暫時無法服務 | 維護中、下游掛掉，可搭配 `Retry-After` |
+
+兩個常見的誤用：
+
+- 用 `200` 加上 `{"success": false}` 回錯誤：監控、快取、HTTP client 的重試邏輯全都會誤判成成功。
+- 把使用者的輸入錯誤回成 `500`：告警被正常流量淹沒。
+
+## Problem Details（RFC 9457）的欄位規則
+
+RFC 9457「Problem Details for HTTP APIs」在 2023 年取代了 RFC 7807，主要差異包括新增常見問題類型的註冊表、補充一次回報多個問題的寫法；欄位與媒體類型沿用。標準欄位都是選填：
+
+| 欄位 | 意思 | 規則 |
+|---|---|---|
+| `type` | 問題類型的 URI，類型的**主要識別** | 省略時視為 `about:blank`；用可以打開的網址時，最好指向說明文件 |
+| `title` | 問題類型的簡短說明 | 同一種類型每次都一樣（翻譯除外），不放這一次的細節 |
+| `status` | HTTP 狀態碼 | 只是方便閱讀，必須和實際回應的狀態碼相同 |
+| `detail` | **這一次**發生了什麼、怎麼修正 | 給人看的；客戶端不應該解析它來取得資訊 |
+| `instance` | 識別**這一次**事件的 URI | 常見做法是放請求的路徑 |
+
+需要更多資訊時可以加**擴充欄位**，客戶端遇到不認得的欄位要忽略。RFC 9457 的範例用 `errors` 陣列一次回報多個欄位錯誤，每一筆有 `detail` 與指向欄位位置的 `pointer`（JSON Pointer，例如 `#/email`）：
+
+```http
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+X-Request-ID: 7f3a9c21
+
+{
+  "type": "https://example.com/problems/validation_failed",
+  "title": "輸入資料不正確",
+  "status": 422,
+  "instance": "/users",
+  "code": "validation_failed",
+  "request_id": "7f3a9c21",
+  "errors": [
+    {"pointer": "#/email", "detail": "格式不正確"},
+    {"pointer": "#/age", "detail": "必須是正整數"}
+  ]
+}
+```
+
+### 穩定的錯誤代碼
+
+前端要依錯誤種類決定行為（顯示哪段文字、要不要導去登入、哪個欄位標紅），判斷的依據必須**穩定**：
+
+- `type` 本身就是規格裡的識別，可以直接用。
+- 很多團隊另外加一個短的 `code` 擴充欄位（`email_taken`），和 `type` 一對一，前端寫 `switch (body.code)` 比較方便。這是常見慣例，不是 RFC 的要求。
+- 代碼一旦公開就當成 API 合約：可以新增，不要改名或改意思。
+- **不要讓前端依 `detail` 或 `title` 的文字判斷**。文字會改、會翻譯。
+
+### 不要把內部資訊回給使用者
+
+`detail` 寫使用者能採取的行動（「這個 Email 已經註冊過，可以直接登入或重設密碼」），不寫內部原因。下列東西不出現在回應裡：例外的原始訊息、stack trace、SQL 與資料表名稱、檔案路徑、內部主機名稱、框架版本。它們幫不了使用者，卻能幫攻擊者了解系統。框架的除錯模式（會在錯誤頁顯示 stack trace）只能在本機開。
+
+## 在 FastAPI 裡寫成例外處理器
+
+需要 FastAPI，不能在瀏覽器裡跑：
 
 ```python
 from fastapi import FastAPI, Request
@@ -235,8 +251,6 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 
 `request.state.request_id` 假設有一個 middleware 先產生或沿用 `X-Request-ID`（見 [日誌、錯誤處理與設定](#/skill/logging-config)）。未預期例外的處理器可以註冊在 `Exception` 上；它在 middleware 堆疊的哪一層執行、回應之後例外是否還會往上交給伺服器記錄，依 Starlette 版本而定，上線前實際觸發一次 bug，確認 log 只出現一次、內容完整。
 
-:::stop 讀到這裡可以先停：會設計例外階層、在邊界轉成 Problem Details。後面的 request id 與日誌，在要把使用者的回報對上伺服器紀錄時再回來讀。
-
 ## 錯誤與日誌：用 request id 串起來
 
 使用者看到的只有「伺服器錯誤」，維運要能從這一句找到原因。做法是讓每個請求有一個 **request id**：
@@ -252,12 +266,10 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 - 5xx（bug、下游故障）：error，附 stack trace，觸發告警。
 - 記錄時避開敏感資料：密碼、token、完整的信用卡號、身分證字號都不寫進 log。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤
 
 | 現象 | 原因 | 怎麼修 |
 |---|---|---|
-| 回應內容出現 `Traceback (most recent call last)` 或 SQL 錯誤原文 | 沒有全域例外處理器，或正式環境開著除錯模式 | 註冊 catch-all 處理器回通用 500；確認除錯模式只在本機開 |
-| 前端用 `message.includes(...)` 判斷錯誤種類 | 回應沒有穩定的代碼 | 加 `type` / `code`，前端依代碼判斷 |
 | 監控 500 很多，查下去全是使用者輸入錯誤 | 預期內的錯誤沒被分類，落到預設的 500 | 為它們定義例外類別並對應到 4xx |
 | 錯誤回應是 `200` 加 `{"success": false}` | 用 body 表達失敗 | 用正確的狀態碼；body 用 Problem Details |
 | log 裡的錯誤只有 `KeyError: 'premium'`，不知道是哪個請求 | log 沒有帶 request id | middleware 產生 id，寫進每行 log 與回應標頭 |
@@ -267,7 +279,7 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 
 ## 動手
 
-1. 在 Playground 開啟上面那段，加一個 `OrderNotFound(NotFound)`，丟出它並確認回應是 404、`code` 是 `order_not_found`。
+1. 在 Playground 開啟必讀的那段程式，加一個 `OrderNotFound(NotFound)`，丟出它並確認回應是 404、`code` 是 `order_not_found`。
 2. 把 `buggy` 改成丟 `ZeroDivisionError`，確認回應內容完全沒有 `ZeroDivisionError` 這個字，而 log 裡有。
 3. 想想註冊流程：哪些錯誤該回 409、哪些該回 422？把它們寫成例外類別。
 4. 做本課的程式題：實作 `to_problem`，讓預期內錯誤與 bug 各自轉成正確的 Problem Details。

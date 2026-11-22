@@ -1,4 +1,4 @@
-## 從一個具體問題開始：只有掛號櫃台那台電腦壞掉
+## 具體問題：只有掛號櫃台那台電腦壞掉
 
 門診前端改版後，大部分櫃台都正常，只有一號櫃台打開「今日掛號」就是空白。那台電腦跑 Windows 7，Chrome 停在 109 版（Windows 7 能裝的最後一版）。用遠端桌面打開它的 DevTools，Console 寫著：
 
@@ -9,9 +9,7 @@ Uncaught TypeError: Object.groupBy is not a function
 
 工程師的第一反應是「Vite 不是會轉成舊瀏覽器看得懂的程式嗎？」打開 `vite.config.js`，`build.target` 甚至已經設成 `chrome109`。問題出在 `build.target` 管的範圍：它只轉換語法，不補 API。`Object.groupBy` 是 Chrome 117 才有的函式，產物裡原樣保留，Chrome 109 執行到這一行才發現沒有這個函式。
 
-## 運作原理
-
-### 語法與 API 是兩件事
+## 語法與 API 是兩件事：`build.target` 只管語法
 
 | 類型 | 例子 | 舊瀏覽器遇到時 | 誰能處理 |
 |---|---|---|---|
@@ -37,7 +35,45 @@ var sorted = appts.map((a) => {
 
 Vite 的型別說明直接寫明 `build.target` 「only handles syntax transformation and does not cover polyfills」。
 
-### Vite 的預設目標
+## 最小設定：寫明 target，舊版沒有的 API 改寫
+
+查每個 API 從哪一版開始有：MDN 功能頁頁尾的 Browser compatibility 表。
+
+```js
+// vite.config.js（Vite 8）
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  build: {
+    // 院內櫃台有 Chrome 109；病患手機最舊到 Safari 16.4
+    target: ['chrome109', 'edge109', 'firefox115', 'safari16.4'],
+  },
+})
+```
+
+Chrome 109 沒有的 API 有兩個選擇：改寫，或補 polyfill。數量少時改寫最直接：
+
+```js
+// 不用 Object.groupBy：Chrome 109 沒有
+const byRoom = appts.reduce((acc, a) => {
+  ;(acc[a.room] ??= []).push(a)   // ??= 是語法，target 比 Chrome 85 舊時會被改寫
+  return acc
+}, {})
+
+// 不用 toSorted：Chrome 109 沒有；先複製再排序，不改到原陣列
+const sorted = [...names].sort((a, b) => a.localeCompare(b, 'zh-TW'))
+```
+
+## 最常見的兩個錯誤
+
+- **`TypeError: Object.groupBy is not a function`，只在部分電腦出現**：新 API 不受 `build.target` 影響。改寫或加 polyfill；在 `dist/` 搜尋 `groupBy(`、`toSorted(` 這些函式名稱，找出還有哪些。
+- **`SyntaxError: Unexpected token '?'`，整頁空白**：語法沒有被改寫。target 太新，或那段程式沒有經過 Vite 轉換（例如直接放在 `public/` 的 JS）。調整 `build.target`；`public/` 的檔案不會被處理，要自己確認語法。
+
+:::stop 讀到這裡可以先停：會分辨語法轉換與 polyfill，替專案寫明 `build.target` 並改寫舊版沒有的 API。後面的 Vite 各版預設、polyfill、Baseline、功能偵測與支援範圍的寫法，在要定最低瀏覽器版本或升級 Vite 時再回來讀。
+
+## Vite 各版的預設目標
 
 | 版本 | `build.target` 預設 | 代表的瀏覽器 |
 |---|---|---|
@@ -58,7 +94,7 @@ assets/index-!~{001}~.js:39:12: ERROR: Top-level await is not available in the c
 
 同一段程式用 Vite 8 的預設目標建置可以通過。
 
-### polyfill 與 `@vitejs/plugin-legacy`
+## polyfill 與 `@vitejs/plugin-legacy`
 
 polyfill 是一段先檢查、沒有就補上的程式：
 
@@ -83,7 +119,7 @@ Vite 不會自動加 polyfill。要支援更舊的瀏覽器，官方的做法是
 
 它只自動偵測 JavaScript 語言層的功能；`IntersectionObserver` 這類 DOM API 要用 `additionalLegacyPolyfills` 自己指定。另一個選項 `modernPolyfills` 替現代版也加 polyfill，文件提醒自動偵測時 core-js 會放進很多不需要的東西，最好明確列出要哪幾個。
 
-### Baseline
+## Baseline：三種狀態與日期
 
 Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，把「這個功能能不能放心用」濃縮成三種狀態：
 
@@ -111,51 +147,18 @@ web-features 3.46.0 的資料裡幾個前端常用的功能：
 
 browserslist 4.29 支援用 Baseline 寫查詢：`baseline widely available`、`baseline 2024`、`baseline newly available`、`baseline widely available on 2026-01-01`。不帶日期的查詢跟著執行當天變動，2026-11-19 執行 `npx browserslist "baseline widely available"` 得到 Chrome 125、Firefox 126、Safari 17.5 起；Vite 8 則把日期固定在 2026-01-01，所以是 Chrome 111 起。
 
-### 給 coding agent 的 Modern Web Guidance
+## 給 coding agent 的 Modern Web Guidance
 
 Chrome 團隊在 npm 上發布的 `modern-web-guidance`（1.0.1，2026-11，Apache-2.0）是給 coding agent 用的 skill，收錄兩百多份現代網頁寫法的指南（dialog、`fetchpriority`、`content-visibility`、拆長任務⋯），每份最後都附上那個功能的 Baseline 狀態、支援的瀏覽器版本與退路。它的規則是：Baseline Widely available 的功能直接用，其他的照指南寫的退路做，除非專案自己寫明了支援範圍；它也建議把支援政策寫進 `AGENTS.md` 這類給 AI 的規範檔。
 
 指南推薦的寫法不一定是 Baseline。例如它建議送分析資料用 `fetchLater()`，同一份指南寫明這個 API 是 Limited availability（Chrome、Edge 135 起），要搭配退路。讓 AI 照指南寫之後，用到的每個新功能仍要對照 web-features 或 MDN 的 Baseline 標示，確認落在自己的支援範圍內。
 
-### 讀 Can I use 與 MDN
+## 讀 Can I use 與 MDN
 
 - **MDN**：功能頁上方的 Baseline 標示（例如「Baseline Widely available」或「Limited availability」），頁尾的 Browser compatibility 表列出每個瀏覽器從哪一版開始支援、有哪些注意事項。表的資料來自 @mdn/browser-compat-data。
 - **Can I use**：一個功能一張表，橫軸是瀏覽器、縱向是版本。格子的狀態對應它的資料代碼：支援（y）、不支援（n）、部分支援（a）、要加前綴（x）、預設停用要手動開啟（d）、未知（u）；格子上的編號對到下方的 Notes。部分支援一定要讀 Notes，常見的是「只支援某些值」或「行為有 bug」。上方的使用比例是全球估計值，院內系統要看自己的使用者統計。
 
-:::stop 讀到這裡可以先停：會分辨語法轉換與 polyfill，讀得懂 Baseline 的狀態與日期。後面的 Vite 設定、功能偵測與支援範圍的寫法，在要替專案定最低瀏覽器版本時再回來讀。
-
-## 實際程式
-
-### 依支援範圍設定 Vite
-
-```js
-// vite.config.js（Vite 8）
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-
-export default defineConfig({
-  plugins: [vue()],
-  build: {
-    // 院內櫃台有 Chrome 109；病患手機最舊到 Safari 16.4
-    target: ['chrome109', 'edge109', 'firefox115', 'safari16.4'],
-  },
-})
-```
-
-target 只處理語法。Chrome 109 沒有的 API 有兩個選擇：改寫，或補 polyfill。數量少時改寫最直接：
-
-```js
-// 不用 Object.groupBy：Chrome 109 沒有
-const byRoom = appts.reduce((acc, a) => {
-  ;(acc[a.room] ??= []).push(a)   // ??= 是語法，target 比 Chrome 85 舊時會被改寫
-  return acc
-}, {})
-
-// 不用 toSorted：Chrome 109 沒有；先複製再排序，不改到原陣列
-const sorted = [...names].sort((a, b) => a.localeCompare(b, 'zh-TW'))
-```
-
-### 功能偵測與 CSS 退路
+## 功能偵測與 CSS 退路
 
 ```js
 // Web API：有就用，沒有就退回 setTimeout
@@ -175,7 +178,7 @@ function yieldToMain() {
 }
 ```
 
-### 把支援範圍寫進規格
+## 把支援範圍寫進規格
 
 ```
 支援範圍（2026-11 核對）
@@ -186,12 +189,10 @@ function yieldToMain() {
 - 驗收：每次發版在 Chrome 109 與 iOS 16.4 的實機各走一次掛號流程
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-| `TypeError: Object.groupBy is not a function`（只在部分電腦） | 新 API 不受 `build.target` 影響 | 改寫，或加 polyfill；在 `dist/` 搜尋這些函式名稱 |
-| `SyntaxError: Unexpected token '?'`，整頁空白 | 語法沒有被改寫：target 太新，或某段程式沒有經過 Vite 轉換（例如直接放在 `public/` 的 JS） | 調整 `build.target`；`public/` 的檔案不會被處理，要自己確認語法 |
 | `Top-level await is not available in the configured target environment` | Vite 6 的預設目標不支援 top-level await | 改寫成非同步函式，或提高 target |
 | CSS 在某台電腦上沒效果，Console 沒有錯 | 瀏覽器不認得的屬性或選擇器被忽略；選擇器清單裡有一個不認得，整條規則失效 | Elements 的 Styles 看那條規則是否被劃掉；用 `@supports` 分開寫 |
 | 升級 Vite 後舊裝置開始壞 | Vite 主版本提高了預設 target | 明確寫出 `build.target`，不依賴預設值 |

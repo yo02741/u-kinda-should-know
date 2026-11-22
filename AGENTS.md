@@ -58,7 +58,7 @@ CI 的 `docs-sync` workflow 會補上忘記同步的 commit，部署前也會先
 
 - **進階驗收、停靠點、跨課作業**：課與情境的 `challenge`、深入內容的 `:::stop`、`src/content/assignments.js` 的格式見 `docs/CONTRIBUTING-lessons.md`；情境的 `switchIf`、`alternative` 見 `docs/CONTRIBUTING-scenarios.md`；實驗室的 `src/labs/tasks.js` 與 `Measure` 見 `docs/CONTRIBUTING-labs.md`。改完必跑 `npm run validate`。
 - **選擇題**：每課最多 1 題的正解是唯一最長的選項（`npm run quiz:stats` 看全站，`validate:quizzes` 會擋）；解釋放 `explain`，干擾項寫成同樣具體的錯誤做法。
-- **深入內容的字數**：學習路線上的課，第一個 `:::stop` 之前（必讀）不超過 1,500 字，不含程式碼區塊（`npm run deep:stats` 看全站，`validate:content` 會擋）；超出的細節搬到停靠點之後的選讀章，不刪查證過的內容。
+- **深入內容的字數**：每一課第一個 `:::stop` 之前（必讀）不超過 1,500 字，不含程式碼區塊（`npm run deep:stats` 看全站，`validate:content` 會擋）；超出的細節搬到停靠點之後的選讀章，不刪查證過的內容。
 - **課綱週次**：課頁的「課綱第 W 週」與首頁的「課綱 N 週」讀 `src/content/curriculum-weeks.js`（`docs:sync` 產生，不要手改）；改了課綱的「對應技能」要跑 `npm run docs:sync`。
 - **只存本機的紀錄**放 `src/localStore.js`（`atlas-local-v1`），不要加進 `progress.js` 的形狀（否則要改 `firestore.rules`）；改了同步範圍要同步改複習頁「紀錄存在哪裡」與 Account 的說明。
 - 頁內錨點寫 `href="#id"` 即可，`App.jsx` 的 `useInPageAnchors` 會攔下來捲動，不會被當成路由。

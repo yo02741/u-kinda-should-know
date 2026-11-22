@@ -1,12 +1,20 @@
-## 從一個具體問題開始：後端改了一個型別，App 在正式環境崩潰
+## 具體問題：後端改了一個型別，App 在正式環境崩潰
 
 後端把訂單的 `amount` 從字串 `"1980.00"` 改成整數 `1980`，順便做資料清理。後端測試全過，文件（一份 wiki 頁面）忘了改。上線後，網頁前端顯示 `NaN 元`，iOS App 的 JSON 解碼在 `amount` 遇到型別不符直接拋例外，訂單頁打不開。
 
-事後檢討：後端不知道誰在用這個欄位、怎麼用；前端不知道它改了；wiki 上的文件早就和實際行為不一致。缺的是一份**機器可讀、和程式同步、能自動檢查**的 API 描述。OpenAPI 就是這樣的格式：用 YAML 或 JSON 描述每個 endpoint 的路徑、參數、請求與回應的結構。有了它，文件、前端 client 的型別、請求驗證、相容性檢查都可以從同一份規格產生或比對。
+後端不知道誰在用這個欄位，前端不知道它改了，wiki 上的文件早就和實際行為不一致。OpenAPI 是一份**機器可讀、和程式同步、能自動檢查**的 API 描述：用 YAML 或 JSON 描述每個 endpoint 的路徑、參數、請求與回應的結構。
 
-## 運作原理：一份 OpenAPI 文件的結構
+```
+                  ┌──────────────── 文件（Swagger UI、Redoc）
+                  │
+  openapi.yaml ───┼──────────────── 前端／App 的 client 與型別
+                  │
+                  ├──────────────── 請求驗證（伺服器端或閘道）
+                  │
+                  └──────────────── CI：規格 diff、契約測試、mock server
+```
 
-### 頂層
+## 一份 OpenAPI 文件的結構
 
 | 欄位 | 內容 |
 |---|---|
@@ -17,8 +25,6 @@
 | `components` | 可重用的定義：`schemas`、`parameters`、`responses`、`securitySchemes` |
 | `security` | 預設套用的認證方式 |
 | `tags` | 把 endpoint 分組，給文件顯示用 |
-
-### 一個完整的例子
 
 ```yaml
 openapi: 3.1.0
@@ -105,40 +111,14 @@ security:
   - bearerAuth: []
 ```
 
-讀法：
-
 - **`$ref`** 指向 `components` 裡的定義。`Order` 定義一次，所有回傳訂單的地方都引用它，改一處就全部改到。
-- **`schemas` 用的是 JSON Schema**。OpenAPI 3.1 的 schema 與 JSON Schema 2020-12 對齊；3.0 用的是 JSON Schema 的一個變體，差異最常遇到的是「可為 null」：3.0 寫 `nullable: true`，3.1 寫 `type: [string, "null"]`。兩個版本的工具支援程度不同，選工具時要確認它支援你用的版本。
-- **`required` 列在物件層**，不是寫在每個欄位上。沒列進 `required` 的欄位是選填。
+- **`schemas` 用的是 JSON Schema**（3.1 與 JSON Schema 2020-12 對齊）。
+- **`required` 列在物件層**，不寫在每個欄位上。沒列進 `required` 的欄位是選填。
 - **`operationId`** 要全份文件唯一；產生 client 時會變成函式或方法的名稱，改它就會改到前端程式碼。
-- **狀態碼是字串鍵**（`"200"`），也可以用 `"4XX"` 或 `default` 描述一整類回應。
 
-### 規格與文件、驗證、client 的關係
+## 最小範例：FastAPI 從程式產生規格
 
-```
-                  ┌──────────────── 文件（Swagger UI、Redoc）
-                  │
-  openapi.yaml ───┼──────────────── 前端／App 的 client 與型別
-                  │
-                  ├──────────────── 請求驗證（伺服器端或閘道）
-                  │
-                  └──────────────── CI：規格 diff、契約測試、mock server
-```
-
-同一份規格驅動所有東西，任何一處和規格不一致都能被發現。
-
-## 從程式產生，還是先寫規格
-
-| | code-first（從程式產生） | design-first（先寫規格） |
-|---|---|---|
-| 做法 | 在程式裡宣告型別與路由，框架輸出規格 | 先寫 `openapi.yaml`、評審，再實作 |
-| 代表工具 | FastAPI（pydantic）、NestJS 的 Swagger 模組、Spring 的 springdoc | 編輯器加 linter（例如 Spectral）、mock server（例如 Prism） |
-| 規格和實作一致 | 自動一致（規格就是從程式來的） | 要靠契約測試確保 |
-| 前後端並行開發 | 後端要先寫出骨架 | 規格定好就能並行，前端用 mock server 開發 |
-| 評審 API 設計 | 要看程式或產出的規格 | 直接評審 YAML，改設計的成本最低 |
-| 適合 | 小團隊、後端主導、快速迭代 | 多團隊、對外公開的 API、要先對齊的合作 |
-
-FastAPI 的 code-first 長這樣（需要安裝 FastAPI，不能在瀏覽器裡跑）：
+需要安裝 FastAPI，不能在瀏覽器裡跑：
 
 ```python
 from datetime import datetime
@@ -172,13 +152,34 @@ def get_order(order_id: int) -> Order:
 
 啟動後 `/openapi.json` 是規格、`/docs` 是 Swagger UI、`/redoc` 是 Redoc。請求 body 不符合 `OrderCreate` 時，FastAPI 自動回 422；`response_model` 會過濾回應，只留下 `Order` 有的欄位。`responses={404: ...}` 只是**文件**，框架不會檢查程式是否只回這些狀態碼。
 
-兩種做法都要把規格當成**合約**：規格要進版本控制、改規格要經過評審，code-first 也要在 CI 裡把產出的 `openapi.json` 存下來比對。
+這種做法叫 code-first；另一種是 design-first，先寫 `openapi.yaml`、評審，再實作。兩種都要把規格當成**合約**：規格進版本控制、改規格要經過評審，code-first 也要在 CI 裡把產出的 `openapi.json` 存下來比對。
 
-:::stop 讀到這裡可以先停：會讀懂一份 OpenAPI 文件、分清 code-first 與 schema-first。後面的相容性規則、契約測試與產生 client，在要把規格放進 CI 或替前端產型別時再回來讀。
+## 最常見的兩個錯誤
+
+- **規格只是文件**：手寫在 wiki 或獨立的 YAML，沒人在 CI 驗證它和程式一致，幾個月後就和實際行為脫節。
+- **所有欄位都是選填**：沒寫 `required`，產生的型別全是 `field?: T`，前端到處都要判斷 `undefined`，型別檢查失去意義。
+
+:::stop 讀到這裡可以先停：會讀懂一份 OpenAPI 文件，會用 FastAPI 從程式產生規格。後面是 code-first 與 design-first 的對照、3.0 與 3.1 的差異、相容性規則與 CI 檢查、契約測試與產生 client，在要把規格放進 CI、替前端產型別或決定團隊流程時再回來讀。
+
+## code-first 與 design-first 的對照
+
+| | code-first（從程式產生） | design-first（先寫規格） |
+|---|---|---|
+| 做法 | 在程式裡宣告型別與路由，框架輸出規格 | 先寫 `openapi.yaml`、評審，再實作 |
+| 代表工具 | FastAPI（pydantic）、NestJS 的 Swagger 模組、Spring 的 springdoc | 編輯器加 linter（例如 Spectral）、mock server（例如 Prism） |
+| 規格和實作一致 | 自動一致（規格就是從程式來的） | 要靠契約測試確保 |
+| 前後端並行開發 | 後端要先寫出骨架 | 規格定好就能並行，前端用 mock server 開發 |
+| 評審 API 設計 | 要看程式或產出的規格 | 直接評審 YAML，改設計的成本最低 |
+| 適合 | 小團隊、後端主導、快速迭代 | 多團隊、對外公開的 API、要先對齊的合作 |
+
+## 3.0 與 3.1 的差異，與狀態碼的寫法
+
+- OpenAPI 3.1 的 schema 與 JSON Schema 2020-12 對齊；3.0 用的是 JSON Schema 的一個變體。最常遇到的差異是「可為 null」：3.0 寫 `nullable: true`，3.1 寫 `type: [string, "null"]`。兩個版本的工具支援程度不同，選工具時要確認它支援你用的版本。
+- 狀態碼是字串鍵（`"200"`），也可以用 `"4XX"` 或 `default` 描述一整類回應。
 
 ## 版本與向後相容的規則
 
-規格最直接的用途，是讓「這次改動會不會弄壞客戶端」可以被機器判斷：
+有了規格，「這次改動會不會弄壞客戶端」可以交給機器判斷：
 
 | 變更 | 對回應 | 對請求 |
 |---|---|---|
@@ -194,7 +195,7 @@ def get_order(order_id: int) -> Order:
 | 放寬限制 | 可能破壞（客戶端的欄位放不下） | 相容 |
 | 改 `operationId` | 不影響線上行為 | 產生的 client 函式名稱改變，前端編譯失敗 |
 
-規則是：伺服器送出去的東西（回應）只能變多、變嚴格；伺服器接受的東西（請求）只能變少要求、變寬鬆。反過來就是破壞性變更，要開新版本或走淘汰流程（見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)）。
+規則：伺服器送出去的東西（回應）只能變多、變嚴格；伺服器接受的東西（請求）只能變少要求、變寬鬆。反過來就是破壞性變更，要開新版本或走淘汰流程（見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)）。
 
 改語意（`amount` 從含稅改成未稅）不改 schema，任何工具都抓不到，只能靠評審與 `description` 寫清楚。
 
@@ -208,7 +209,7 @@ git show origin/main:openapi.yaml > /tmp/base.yaml
 oasdiff breaking /tmp/base.yaml openapi.yaml --fail-on ERR
 ```
 
-`oasdiff` 是比對兩份 OpenAPI 文件的開源工具，類似的工具還有幾種。做法是把「比對規格」放進每個 PR 的檢查，破壞性變更必須明確標記、經過同意才能合併。
+`oasdiff` 是比對兩份 OpenAPI 文件的開源工具，類似的工具還有幾種。把「比對規格」放進每個 PR 的檢查，破壞性變更必須明確標記、經過同意才能合併。
 
 ## 實際程式：一個簡化的相容性檢查
 
@@ -294,18 +295,14 @@ npx openapi-typescript https://api.shop.example/v1/openapi.json -o src/api/schem
 npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g typescript-fetch -o src/api/client
 ```
 
-產生的 client 讓前端呼叫變成 `api.getOrder({ orderId: 1043 })`，回傳值有 `Order` 的型別。後端改了 `amount` 的型別，前端重新產生後，所有把 `amount` 當字串用的地方會**編譯失敗**，問題在開發時就出現，而不是在使用者面前。
-
-幾個實務規則：
+產生的 client 讓前端呼叫變成 `api.getOrder({ orderId: 1043 })`，回傳值有 `Order` 的型別。後端改了 `amount` 的型別，前端重新產生後，所有把 `amount` 當字串用的地方會**編譯失敗**，問題在開發時就出現。
 
 - 產生的程式碼不要手改；要客製就包一層。
 - 產生步驟放進前端的建置或 CI，規格更新就重新產生，否則型別會過時。
 - `operationId` 要穩定、有意義：沒寫時工具會從路徑與方法自動組名稱，路徑一改，名稱就變。
 
-## 常見錯誤
+## 其他常見錯誤
 
-- **規格只是文件**：手寫在 wiki 或獨立的 YAML，沒人在 CI 驗證它和程式一致，幾個月後就和實際行為脫節。
-- **所有欄位都是選填**：沒寫 `required`，產生的型別全是 `field?: T`，前端到處都要判斷 `undefined`，型別檢查失去意義。
 - **錯誤回應沒寫進規格**：只描述 200，客戶端不知道 422 的 body 長什麼樣。至少把共用的錯誤格式放進 `components/responses` 並在每個 endpoint 引用。
 - **`nullable` 和 3.1 混用**：在 `openapi: 3.1.0` 的文件裡寫 `nullable: true`，3.1 的工具會忽略它，欄位就變成不可為 null。
 - **同一個 schema 用在請求和回應**：`id`、`created_at` 是伺服器產生的，放進建立請求的 schema 會讓客戶端以為要送。分成 `OrderCreate` 和 `Order`，或用 `readOnly: true` 標記。
@@ -315,6 +312,6 @@ npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g typescript-f
 ## 動手
 
 1. 按 JavaScript 那段的「在 Playground 開啟」，在 `orderV2` 裡把 `id` 改成 `{ type: 'string' }`、刪掉 `status`，看檢查結果；再加一條規則：回應的欄位放寬了 `maxLength` 時提出警告。
-2. 把上面的 YAML 例子貼到任一個 OpenAPI 編輯器（例如 Swagger Editor），看產生的文件；故意把 `required` 裡寫一個不存在的欄位，看編輯器會不會提示。
+2. 把必讀的 YAML 例子貼到任一個 OpenAPI 編輯器（例如 Swagger Editor），看產生的文件；故意把 `required` 裡寫一個不存在的欄位，看編輯器會不會提示。
 3. 為「取消訂單」`POST /orders/{orderId}/cancel` 補上規格：成功回 200 與 `Order`、已出貨回 409、找不到回 404，錯誤都引用共用的 `Problem`。狀態碼怎麼選見 [REST API 設計](#/skill/rest-design)。
-4. 到 [API 改版不弄壞客戶端](#/scenario/versioning)，用上面的相容性表檢查情境裡每一個變更屬於哪一類。
+4. 到 [API 改版不弄壞客戶端](#/scenario/versioning)，用相容性表檢查情境裡每一個變更屬於哪一類。

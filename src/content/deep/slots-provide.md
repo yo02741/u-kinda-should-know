@@ -1,4 +1,4 @@
-## 從一個具體問題開始：表格元件長出第十五個 prop
+## 具體問題：表格元件長出第十五個 prop
 
 門診系統有一個 `AppointmentTable`，一開始只收 `rows`。之後每個頁面都有自己的需求：
 
@@ -11,105 +11,22 @@
 
 同一個專案裡還有另一種痛：院區名稱與時區從 `App.vue` 一路經過 `Layout`、`Page`、`AppointmentTable` 傳到 `TimeCell`，中間三層元件自己用不到，只是轉手。加一個「院區電話」欄位要改五個檔。
 
-前一個問題用 slot 解決：表格只管列與欄，每一格長什麼樣子交給使用它的頁面。後一個問題用 provide／inject：院區設定在最上層提供一次，需要的後代直接拿。
+## slot 留位置給父元件填，provide／inject 跨層傳設定
 
-## 運作原理
+表格只管列與欄，每一格長什麼樣子交給使用它的頁面：
 
-### slot：子元件留位置，父元件填內容
+| 寫法 | 寫在哪 | 意思 |
+|---|---|---|
+| `<slot />` | 子元件 | 預設 slot，父元件沒有包 `<template>` 的內容放這裡 |
+| `<slot name="empty"><p>沒有資料</p></slot>` | 子元件 | 具名 slot；標籤裡是父元件沒給時的備用內容 |
+| `<slot :row="row" :value="row[col.key]">` | 子元件 | 作用域 slot：綁的屬性成為父元件拿到的參數 |
+| `<template #cell-status="{ value }">` | 父元件 | 填內容並接參數；`#` 是 `v-slot:` 的縮寫 |
 
-```vue
-<!-- AppCard.vue -->
-<template>
-  <section class="card">
-    <header><slot name="header">未命名</slot></header>   <!-- 具名 slot，括號裡是備用內容 -->
-    <slot />                                              <!-- 預設 slot -->
-    <footer v-if="$slots.footer"><slot name="footer" /></footer>
-  </section>
-</template>
-```
+編譯後，父元件傳給子元件的是一組函式（每個 slot 一個），子元件渲染到 `<slot>` 的位置時呼叫對應的函式。slot 內容寫在父元件的模板裡，只讀得到父元件的變數；要用子元件的資料，只能從作用域 slot 的參數拿。
 
-```vue
-<!-- 使用的一方 -->
-<AppCard>
-  <template #header>內科 101 診</template>
-  <p>目前看診：12 號</p>                     <!-- 沒有包 template 的內容進預設 slot -->
-  <template #footer><button type="button">叫號</button></template>
-</AppCard>
-```
+院區設定在最上層 `provide(key, value)` 一次，隔了好幾層的後代用 `inject(key)` 直接拿：它往上找最近一個提供這個 key 的祖先，中間的元件不需要知道。provide 的是 ref 本身，提供者改值，後代才跟著更新。
 
-編譯後，父元件傳給 `AppCard` 的是一組函式（每個 slot 一個），`AppCard` 渲染到 `<slot>` 的位置時呼叫對應的函式。這帶來三個結果：
-
-- 沒給內容的 slot，顯示 `<slot>` 標籤裡的備用內容（上例的「未命名」）。
-- `#footer` 是 `v-slot:footer` 的縮寫，`#default` 是預設 slot。`v-slot` 只能寫在 `<template>` 或元件本身上。
-- `$slots.footer`（或 `useSlots().footer`）在父元件沒給時是 `undefined`，可以用來決定要不要畫外框。
-
-### 渲染作用域
-
-slot 內容寫在父元件的模板裡，編譯時屬於父元件，所以只讀得到父元件的變數。在 `AppointmentTable` 的 slot 內容裡直接寫 `{{ row.time }}`，`row` 是表格內部 `v-for` 的變數，父元件沒有它，Console 會出現 `Property "row" was accessed during render but is not defined on instance.`。
-
-### 作用域 slot：子元件把資料交出去
-
-子元件在 `<slot>` 上綁屬性，這些屬性成為 slot 函式的參數：
-
-```vue
-<!-- DataTable.vue（模板節錄） -->
-<tr v-for="row in rows" :key="row.id">
-  <td v-for="col in columns" :key="col.key">
-    <slot :name="'cell-' + col.key" :row="row" :value="row[col.key]">{{ row[col.key] }}</slot>
-  </td>
-</tr>
-```
-
-```vue
-<!-- 預約清單頁：只覆寫狀態欄，其他欄用備用內容 -->
-<DataTable :rows="appointments" :columns="columns">
-  <template #cell-status="{ value }"><StatusBadge :status="value" /></template>
-</DataTable>
-```
-
-分工變成：`DataTable` 決定有哪些列、欄位順序、排序與空狀態；頁面決定某一格怎麼畫。新的頁面需求不用改表格元件。
-
-### 舊語法
-
-Vue 2.6 以前寫 `<span slot="footer">` 與 `slot-scope="{ row }"`。Vue 3 不認得它們，會當成一般的 HTML 屬性：內容跑進預設 slot，頁尾只顯示備用內容，Console 沒有任何警告。AI 產出裡出現這兩個屬性，代表它用了 Vue 2 的寫法。
-
-### provide／inject
-
-```
-App.vue            provide(clinicKey, readonly(clinic))
-└─ Layout
-   └─ AppointmentPage
-      └─ DataTable
-         └─ TimeCell    inject(clinicKey) → { name: '內科總院', timeZone: 'Asia/Taipei' }
-```
-
-- `inject(key)` 往上找最近一個提供這個 key 的祖先，中間的元件不需要知道。
-- 整個 App 都要的值可以在 `main.ts` 用 `app.provide(key, value)`。
-- 找不到提供者時回傳 `undefined` 並警告 `injection "Symbol(clinic)" not found.`；`inject(key, 預設值)` 給第二個參數就不會警告。
-- `provide` 與 `inject` 要在 setup 期間呼叫。放進 click 處理函式或 `setTimeout` 會警告 `inject() can only be used inside setup() or functional components.`。
-
-響應式要靠提供的東西本身：
-
-| 提供什麼 | 後代拿到什麼 |
-|---|---|
-| `provide(key, clinic)`（`clinic` 是 ref） | 同一個 ref，提供者改值，後代跟著更新 |
-| `provide(key, clinic.value)` | 當下的物件；整個換掉 `clinic.value` 後，後代還拿著舊的 |
-| `provide(key, count.value)`（數字） | 一個數字，永遠不會更新 |
-| `provide(key, readonly(clinic))` | 唯讀的 ref；後代指定值時警告 `Set operation on key "value" failed: target is readonly.` |
-
-Vue 官方文件建議把修改留在提供者：一起 provide 一個 `setClinic()` 之類的函式，後代只能呼叫它。
-
-### 該用哪一種
-
-| 需求 | 用 |
-|---|---|
-| 父元件給子元件資料 | props |
-| 子元件通知父元件 | emit、`v-model` |
-| 元件的一塊畫面交給使用的人決定 | slot（要用子元件的資料就用作用域 slot） |
-| 很多層後代都要的設定（院區、主題、表單群組） | provide／inject |
-| 好幾個頁面共用、換頁後還要在的狀態 | [Pinia](#/skill/pinia) |
-
-## 實際程式：表格元件與院區設定
+## 最小範例：表格元件與院區設定
 
 ```ts
 // src/keys.ts：injection key 集中在一個檔，用 Symbol 避免撞名
@@ -179,9 +96,100 @@ const text = computed(() =>
 </DataTable>
 ```
 
+## 最常見的兩個錯誤
+
+- **`Property "row" was accessed during render but is not defined on instance.`**：在 slot 內容裡直接讀子元件 `v-for` 的變數，父元件沒有它。從作用域 slot 的參數取：`#default="{ row }"`。
+- **`[Vue warn]: injection "Symbol(clinic)" not found.`**：祖先沒有 provide、key 不是同一個 Symbol，或元件不在提供者底下。確認 key 從同一個檔匯入；需要時用 `inject(key, 預設值)`。
+
+:::stop 讀到這裡可以先停：會用具名與作用域 slot 讓頁面決定一塊畫面，用 provide／inject 傳跨層的設定。後面的卡片範例、provide 的響應式、選用表與 React 對照，在提供者改了值後代沒更新，或讀 React 的 children 與 Context 時再回來讀。
+
+## 具名 slot、備用內容與 `$slots`：卡片元件
+
+```vue
+<!-- AppCard.vue -->
+<template>
+  <section class="card">
+    <header><slot name="header">未命名</slot></header>   <!-- 具名 slot，括號裡是備用內容 -->
+    <slot />                                              <!-- 預設 slot -->
+    <footer v-if="$slots.footer"><slot name="footer" /></footer>
+  </section>
+</template>
+```
+
+```vue
+<!-- 使用的一方 -->
+<AppCard>
+  <template #header>內科 101 診</template>
+  <p>目前看診：12 號</p>                     <!-- 沒有包 template 的內容進預設 slot -->
+  <template #footer><button type="button">叫號</button></template>
+</AppCard>
+```
+
+- 沒給內容的 slot，顯示 `<slot>` 標籤裡的備用內容（上例的「未命名」）。
+- `#footer` 是 `v-slot:footer` 的縮寫，`#default` 是預設 slot。`v-slot` 只能寫在 `<template>` 或元件本身上。
+- `$slots.footer`（或 `useSlots().footer`）在父元件沒給時是 `undefined`，可以用來決定要不要畫外框。
+
+## 作用域 slot：只覆寫一欄
+
+子元件在 `<slot>` 上綁屬性，這些屬性成為 slot 函式的參數：
+
+```vue
+<!-- DataTable.vue（模板節錄） -->
+<tr v-for="row in rows" :key="row.id">
+  <td v-for="col in columns" :key="col.key">
+    <slot :name="'cell-' + col.key" :row="row" :value="row[col.key]">{{ row[col.key] }}</slot>
+  </td>
+</tr>
+```
+
+```vue
+<!-- 預約清單頁：只覆寫狀態欄，其他欄用備用內容 -->
+<DataTable :rows="appointments" :columns="columns">
+  <template #cell-status="{ value }"><StatusBadge :status="value" /></template>
+</DataTable>
+```
+
+分工變成：`DataTable` 決定有哪些列、欄位順序、排序與空狀態；頁面決定某一格怎麼畫。新的頁面需求不用改表格元件。
+
 `<script setup generic="…">` 是 Vue 3.3 起的泛型元件寫法，讓 `columns` 的 `key` 只能是 `Row` 的欄位名。用 TypeScript 時可以再加 `defineSlots<{ … }>()` 宣告每個 slot 的參數型別。
 
-:::stop 讀到這裡可以先停：會用具名與作用域 slot 讓頁面決定一塊畫面，用 provide／inject 傳跨層的設定。後面的 React 對照與錯誤訊息表，在讀 React 的 children 與 Context 時再回來讀。
+## Vue 2 的舊語法
+
+Vue 2.6 以前寫 `<span slot="footer">` 與 `slot-scope="{ row }"`。Vue 3 不認得它們，會當成一般的 HTML 屬性：內容跑進預設 slot，頁尾只顯示備用內容，Console 沒有任何警告。AI 產出裡出現這兩個屬性，代表它用了 Vue 2 的寫法。
+
+## provide／inject 的規則與響應式
+
+```
+App.vue            provide(clinicKey, readonly(clinic))
+└─ Layout
+   └─ AppointmentPage
+      └─ DataTable
+         └─ TimeCell    inject(clinicKey) → { name: '內科總院', timeZone: 'Asia/Taipei' }
+```
+
+- 整個 App 都要的值可以在 `main.ts` 用 `app.provide(key, value)`。
+- `provide` 與 `inject` 要在 setup 期間呼叫。放進 click 處理函式或 `setTimeout` 會警告 `inject() can only be used inside setup() or functional components.`。
+
+響應式要靠提供的東西本身：
+
+| 提供什麼 | 後代拿到什麼 |
+|---|---|
+| `provide(key, clinic)`（`clinic` 是 ref） | 同一個 ref，提供者改值，後代跟著更新 |
+| `provide(key, clinic.value)` | 當下的物件；整個換掉 `clinic.value` 後，後代還拿著舊的 |
+| `provide(key, count.value)`（數字） | 一個數字，永遠不會更新 |
+| `provide(key, readonly(clinic))` | 唯讀的 ref；後代指定值時警告 `Set operation on key "value" failed: target is readonly.` |
+
+Vue 官方文件建議把修改留在提供者：一起 provide 一個 `setClinic()` 之類的函式，後代只能呼叫它。
+
+## 該用哪一種
+
+| 需求 | 用 |
+|---|---|
+| 父元件給子元件資料 | props |
+| 子元件通知父元件 | emit、`v-model` |
+| 元件的一塊畫面交給使用的人決定 | slot（要用子元件的資料就用作用域 slot） |
+| 很多層後代都要的設定（院區、主題、表單群組） | provide／inject |
+| 好幾個頁面共用、換頁後還要在的狀態 | [Pinia](#/skill/pinia) |
 
 ## React 對照
 
@@ -216,15 +224,13 @@ function TimeCell({ iso }) {
 
 React 的 Context 值一變，所有讀它的元件都重新渲染；Vue 的 inject 拿到 ref，只有讀到 `.value` 的地方跟著更新。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與訊息
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | 給了 `<template #footer>`，畫面上沒有 | 子元件沒有 `<slot name="footer">`，或名字不一致 | 對齊名字；Vue 不會警告多給的 slot |
 | 頁尾顯示備用內容，自訂內容跑到內文 | 用了 Vue 2 的 `slot="footer"` | 改成 `<template #footer>` |
-| `Property "row" was accessed during render but is not defined on instance.` | 在 slot 內容裡直接讀子元件的變數 | 從作用域 slot 參數取：`#default="{ row }"` |
 | `v-slot can only be used on components or <template> tags.` | `v-slot` 寫在一般 HTML 元素上 | 包一層 `<template #name>` |
-| `[Vue warn]: injection "Symbol(clinic)" not found.` | 祖先沒有 provide、key 不是同一個 Symbol、或元件不在提供者底下 | 確認 key 從同一個檔匯入；需要時給預設值 |
 | `inject() can only be used inside setup() or functional components.` | 在事件處理函式或 `setTimeout` 裡呼叫 `inject` | 在 setup 頂層呼叫，把結果存起來 |
 | 提供者改了值，後代沒更新 | provide 的是 `.value` 或普通值 | provide ref 本身 |
 | `Set operation on key "value" failed: target is readonly.` | 後代想改 readonly 的注入值 | 呼叫提供者給的修改函式 |

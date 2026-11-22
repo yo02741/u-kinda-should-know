@@ -1,4 +1,4 @@
-## 從一個具體問題開始：能跑的 Deployment，離上線還差四件事
+## 能跑的 Deployment，離上線還差四件事
 
 [上一課](#/skill/k8s-manifests) 的 `booking-api` 已經接上 Service 與 Ingress。為了連資料庫，容器加了兩個環境變數：
 
@@ -18,14 +18,12 @@
 
 這份設定能跑，但上線後會依序遇到四件事：
 
-1. **密碼在 Git 裡**：manifest 進版本控制，密碼就跟著進去，所有能讀 repo 的人都看得到，而且刪不乾淨（見 [秘密管理](#/skill/secrets)）。
+1. **密碼在 Git 裡**：manifest 進版本控制，能讀 repo 的人都看得到，而且刪不乾淨（見 [秘密管理](#/skill/secrets)）。
 2. **每次更新都有幾秒的錯誤**：沒有 readiness 探針，容器一啟動就被當成 ready，程式還沒連上資料庫，流量就進來了。
 3. **某天半夜被趕走**：沒寫 `resources`，排程器不知道它要多少資源；節點記憶體吃緊時，這種 Pod 最先被驅逐。
-4. **每次更新都斷掉幾個請求**：舊 Pod 被刪除時，程式收到訊號就直接結束，處理到一半的請求沒有做完。
+4. **每次更新都斷掉幾個請求**：舊 Pod 被刪除時，程式收到訊號就結束，處理到一半的請求沒有做完（選讀的「優雅關機」）。
 
-三種探針各自的作用、requests 與 limits 的概念，在 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 與 [硬體資源與容量規劃](#/skill/capacity-planning) 講過。這一課講怎麼寫、每個欄位的實際行為，以及寫錯時會發生什麼。
-
-## 設定：ConfigMap 與 Secret
+## 設定：ConfigMap 與 Secret 怎麼注入 Pod
 
 一般設定放 ConfigMap，機密放 Secret，兩者都是鍵值對：
 
@@ -80,22 +78,10 @@ kubectl create secret generic booking-secrets -n booking --from-env-file=.env.se
 | ② `envFrom` | 同上 | 鍵名本來就是變數名稱 |
 | ③ 掛成檔案 | 檔案內容過一段時間會跟著更新（用 `subPath` 掛載的不會）；程式要自己重新讀檔 | 設定檔、憑證、內容較長的值 |
 
-幾個實際的行為：
+- **改了 ConfigMap 不會觸發滾動更新**。Deployment 的 template 沒變，就沒有新的 ReplicaSet。要讓 Pod 讀到新值，執行 `kubectl rollout restart deployment/booking-api -n booking`。
+- **參照的 ConfigMap 或 Secret 不存在**時，Pod 不會啟動：用 `env` 參照的停在 `CreateContainerConfigError`（Events 有 `secret "booking-secrets" not found`），用 volume 掛載的停在 `ContainerCreating`。
 
-- **改了 ConfigMap 不會觸發滾動更新**。Deployment 的 template 沒變，就沒有新的 ReplicaSet。要讓 Pod 讀到新值，執行 `kubectl rollout restart deployment/booking-api -n booking`，或用 Kustomize 的 `configMapGenerator`（內容變了，名稱後面的雜湊跟著變，template 也就變了）。
-- **參照的 ConfigMap 或 Secret 不存在**時，Pod 不會啟動：用 `env` 參照的停在 `CreateContainerConfigError`，用 volume 掛載的停在 `ContainerCreating`。確實可有可無的設定，在參照上加 `optional: true`。
-- 設定與程式分離的原則見 [環境設定與 12-factor](#/skill/config-12factor)：同一個映像在每個環境都一樣，差別只在注入的 ConfigMap 與 Secret。
-
-### Secret 只是 base64
-
-```bash
-$ kubectl get secret booking-secrets -n booking -o jsonpath='{.data.DB_PASSWORD}' | base64 -d
-S3cret-2024!
-```
-
-base64 是編碼，不是加密，目的只是讓值可以放二進位內容。能讀這個 namespace 的 Secret 的人、能在這個 namespace 建 Pod 的人（把 Secret 掛進去再印出來），都拿得到明文。Secret 和 ConfigMap 在實作上的差別是：可以用 RBAC 分開授權、`kubectl describe` 不會印出值、掛成檔案時放在記憶體檔案系統。要真的保護它，需要 RBAC、etcd 的靜態加密，以及不讓原文進 Git，細節在 [秘密管理](#/skill/secrets)。
-
-## 探針：每個欄位的行為
+## 探針：三種探針與兩個端點
 
 ```yaml
           startupProbe:                 # 啟動期間用；通過之前另外兩個探針不會執行
@@ -114,6 +100,58 @@ base64 是編碼，不是加密，目的只是讓值可以放二進位內容。�
             failureThreshold: 3
 ```
 
+從出問題到探針判定失敗，大約是 `periodSeconds × failureThreshold`：上面的 readiness 約 15 秒，liveness 約 30 秒。調這兩個數字是在「反應快」與「誤判」之間取捨。
+
+兩個端點要分開：
+
+- `/healthz` 只回答「程序還在運作」，**不碰任何外部依賴**。把 liveness 指到會檢查資料庫的 `/ready` 是最常見的探針事故：資料庫抖動一次，所有 Pod 一起被重啟。
+- `/ready` 回答「這個實例現在能處理請求」：啟動完成、沒有在關機、必要的依賴可用。readiness 該不該檢查共用的資料庫是一個取捨，見 [健康檢查、備份與事故處理](#/skill/reliability)。
+
+`/ready` 還不能服務時，Pod 是 `Running` 但 `READY 0/1`，Events 出現：
+
+```text
+Readiness probe failed: HTTP probe failed with statuscode: 503
+```
+
+## 資源：requests 與 limits
+
+```yaml
+          resources:
+            requests:
+              cpu: "250m"             # 0.25 核
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
+```
+
+| | requests | limits |
+|---|---|---|
+| CPU | 排程時保留；節點的 CPU 不夠分時，依 requests 的比例分配 | 超過會被節流（throttle），變慢但不會被殺 |
+| 記憶體 | 排程時保留 | 超過會被 OOMKilled（Exit Code 137），容器重啟 |
+
+排程器只看 requests、不看實際用量；數字怎麼估、CPU 要不要設 limits，見 [硬體資源與容量規劃](#/skill/capacity-planning)。
+
+**單位**：CPU 的 `250m` 是千分之 250 核，`1` 是一核。記憶體用 `Mi`、`Gi`（二進位，1 Mi = 1,048,576 位元組）。`memory: 512m` 是合法的寫法，但意思是 0.512 位元組，小寫 `m` 是「千分之一」。
+
+:::stop 讀到這裡可以先停：會用 ConfigMap 與 Secret 注入設定、替三種探針選端點、寫出 requests 與 limits。後面的 Secret 的保護、探針欄位與模擬、QoS，在調整探針或查資源問題時回來讀；HPA、優雅關機與非 root 執行，在服務要上正式環境、需要自動擴展或更新時不掉請求時再讀。
+
+## Secret 只是 base64，以及設定的其他細節
+
+- 除了 `rollout restart`，也可以用 Kustomize 的 `configMapGenerator` 讓 Pod 讀到新的 ConfigMap：內容變了，名稱後面的雜湊跟著變，template 也就變了。
+- 確實可有可無的設定，在參照上加 `optional: true`，ConfigMap 或 Secret 不存在時 Pod 仍會啟動。
+- 設定與程式分離的原則見 [環境設定與 12-factor](#/skill/config-12factor)：同一個映像在每個環境都一樣，差別只在注入的 ConfigMap 與 Secret。
+
+```bash
+$ kubectl get secret booking-secrets -n booking -o jsonpath='{.data.DB_PASSWORD}' | base64 -d
+S3cret-2024!
+```
+
+base64 是編碼，不是加密，目的只是讓值可以放二進位內容。能讀這個 namespace 的 Secret 的人、能在這個 namespace 建 Pod 的人（把 Secret 掛進去再印出來），都拿得到明文。Secret 和 ConfigMap 在實作上的差別是：可以用 RBAC 分開授權、`kubectl describe` 不會印出值、掛成檔案時放在記憶體檔案系統。要真的保護它，需要 RBAC、etcd 的靜態加密，以及不讓原文進 Git，細節在 [秘密管理](#/skill/secrets)。
+
+## 探針的欄位預設值、探測方式與 startupProbe
+
+三種探針各自的作用在 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 講過。
+
 | 欄位 | 預設值 | 意思 |
 |---|---|---|
 | `initialDelaySeconds` | 0 | 容器啟動後等多久才開始探測 |
@@ -124,18 +162,11 @@ base64 是編碼，不是加密，目的只是讓值可以放二進位內容。�
 
 探測方式有四種：`httpGet`（狀態碼 200–399 算成功）、`tcpSocket`（連得上就算成功）、`exec`（在容器裡執行指令，結束碼 0 算成功）、`grpc`。
 
-從出問題到探針判定失敗，大約是 `periodSeconds × failureThreshold`：上面的 readiness 約 15 秒，liveness 約 30 秒。調這兩個數字是在「反應快」與「誤判」之間取捨。
-
 啟動慢的服務不要靠加大 liveness 的 `initialDelaySeconds` 來撐：那個值設得夠大，等於每次卡死都要多等那麼久才發現。用 `startupProbe` 給啟動階段一個獨立的寬限，啟動完成後 liveness 就能維持短的間隔。
 
-兩個端點要分開：
+## liveness 檢查資料庫：一次抖動變成全面重啟
 
-- `/healthz` 只回答「程序還在運作」，**不碰任何外部依賴**。
-- `/ready` 回答「這個實例現在能處理請求」：啟動完成、沒有在關機、必要的依賴可用。readiness 該不該檢查共用的資料庫是一個取捨，見 [健康檢查、備份與事故處理](#/skill/reliability)。
-
-### liveness 檢查資料庫：一次抖動變成全面重啟
-
-把 liveness 也指到會檢查資料庫的 `/ready`，是最常見的探針事故。下面模擬 4 個 Pod、資料庫中斷 35 秒，印出 Service 後端（endpoints）的變化：
+下面模擬 4 個 Pod、資料庫中斷 35 秒，印出 Service 後端（endpoints）的變化：
 
 ```python run
 # readiness：每 5 秒一次、連續 3 次失敗移出、成功 1 次加回
@@ -177,30 +208,11 @@ simulate("C. 資料庫中斷 35 秒，liveness 也檢查資料庫", True)
 
 A 是 readiness 的正常用途：一個 Pod 出問題，它被移出、恢復後自動加回，其他 Pod 不受影響，沒有任何重啟。B 與 C 的資料庫都在第 45 秒恢復；B 立刻恢復服務，C 的四個 Pod 在第 30 秒一起被重啟，要到第 70 秒才回來。真實情況更糟：四個 Pod 同時啟動、同時重建連線，會再壓一次剛恢復的資料庫。
 
-## 資源：requests 與 limits
+## requests 與 limits 的規則、QoS 類別
 
-```yaml
-          resources:
-            requests:
-              cpu: "250m"             # 0.25 核
-              memory: "256Mi"
-            limits:
-              memory: "512Mi"
-```
-
-| | requests | limits |
-|---|---|---|
-| CPU | 排程時保留；節點的 CPU 不夠分時，依 requests 的比例分配 | 超過會被節流（throttle），變慢但不會被殺 |
-| 記憶體 | 排程時保留 | 超過會被 OOMKilled（Exit Code 137），容器重啟 |
-
-排程器只看 requests、不看實際用量；數字該怎麼估、CPU 要不要設 limits 的取捨，見 [硬體資源與容量規劃](#/skill/capacity-planning)。這裡補充寫法上的細節：
-
-- **單位**：CPU 的 `250m` 是千分之 250 核，`1` 是一核。記憶體用 `Mi`、`Gi`（二進位，1 Mi = 1,048,576 位元組）。`memory: 512m` 是合法的寫法，但意思是 0.512 位元組，小寫 `m` 是「千分之一」。
 - **requests 不能大於 limits**，否則套用時被拒絕。只寫 limits 沒寫 requests 時，requests 會被設成和 limits 相同。
 - **QoS 類別**由這些數字決定，共三種：`Guaranteed`（每個容器的 CPU 與記憶體都有 requests，而且等於 limits）、`Burstable`（有設定但不符合 Guaranteed）、`BestEffort`（完全沒設定）。節點記憶體不足時的驅逐順序見容量規劃那一課。
 - namespace 設了 ResourceQuota 限制 CPU 或記憶體時，沒寫對應 requests、limits 的 Pod 會被拒絕建立；管理者可以用 LimitRange 給預設值。
-
-:::stop 讀到這裡可以先停：會用 ConfigMap 與 Secret 注入設定、替三種探針選端點、寫出 requests 與 limits。後面的 HPA、優雅關機與非 root 執行，在服務要上正式環境、需要自動擴展或更新時不掉請求時再回來讀。
 
 ## HPA：依指標調整副本數
 

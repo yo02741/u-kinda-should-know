@@ -1,4 +1,4 @@
-## 從一個具體問題開始：按上一頁，回到第 1 頁
+## 具體問題：按上一頁，回到第 1 頁
 
 櫃台用後台的「門診管理」查預約：切到「已報到」分頁，翻到第 4 頁，點進一位病患看詳細資料，再按瀏覽器的上一頁。畫面回到「預約」分頁的第 1 頁，捲動位置在最上面。一個早上重複幾十次，櫃台開始改用開新分頁的方式看詳細資料，結果發現詳細資料的連結是 `<div @click>`，按中鍵與右鍵都沒有「在新分頁開啟」。
 
@@ -8,11 +8,12 @@
 - 側欄的目前頁只換了底色，沒有 `aria-current`，螢幕閱讀器不知道現在在哪一頁。
 - 病患清單用無限捲動，頁尾的「聯絡資訊室」連結永遠點不到。
 
-導覽元件要回答兩件事：使用者現在在哪裡、可以去哪裡。答案要同時出現在畫面、網址與輔助科技讀到的資訊裡。
+## 七種導覽元件：換頁用連結，同頁切換用 Tabs
 
-## 運作原理
+判斷只看一件事：按下去網址會不會變、是不是在看另一頁的內容。
 
-### 七種導覽元件
+- 會換網址：連結。外觀做成分頁的樣子也一樣是連結，目前那一個加 `aria-current="page"`。
+- 不換網址、在同一頁切換幾塊內容：Tabs。
 
 | 元件 | 換頁還是同頁切換 | 結構 | 目前位置 |
 |---|---|---|---|
@@ -26,30 +27,7 @@
 
 同一頁有兩個以上的 `<nav>` 時，用 `aria-label` 區分，螢幕閱讀器的地標清單才分得出哪個是哪個。
 
-### 連結、Tabs 與選單
-
-判斷的方式只看一件事：按下去網址會不會變、是不是在看另一頁的內容。
-
-- 會換網址：連結。外觀做成分頁的樣子也一樣是連結，目前那一個加 `aria-current="page"`。
-- 不換網址、在同一頁切換幾塊內容：Tabs。
-- 網站導覽的下拉選單：APG 的 Disclosure Navigation Menu 範例用一顆 disclosure 按鈕（`aria-expanded`）展開一串連結，並特別註明它沒有用 `role="menu"`，因為一般的網站導覽不需要 menu 角色要求的那整套鍵盤操作。`role="menu"` 留給應用程式裡「一串動作」的選單（編輯、複製、刪除）。
-
-### `aria-current` 的值
-
-| 值 | 用在 |
-|---|---|
-| `page` | 導覽、Breadcrumb、Pagination 裡的目前頁 |
-| `step` | Stepper 的目前步驟 |
-| `location` | 流程圖、地圖上的目前位置 |
-| `date` | 日曆裡的今天 |
-| `time` | 時刻表裡的目前時段 |
-| `true` | 以上都不適合時 |
-
-`aria-current` 和 `aria-selected` 不同：`aria-selected` 用在可以選取的元件（Tabs、listbox 的選項、Grid 的格子），`aria-current` 標的是「一組項目裡目前的那一個」。
-
-樣式也掛在這個屬性上（`[aria-current="page"] { … }`），畫面上的「目前」和螢幕閱讀器念出的「目前」來自同一個地方。Vue Router 的 `<RouterLink>` 在連結完全符合目前路由時，自動加上 `aria-current="page"` 與 `router-link-exact-active` 這個 class；部分符合（例如在 `/clinics/101` 時的 `/clinics`）只加 `router-link-active`。
-
-### 導覽狀態與網址
+## 哪些導覽狀態要寫進網址
 
 | 狀態 | 放網址嗎 | 理由 |
 |---|---|---|
@@ -62,42 +40,7 @@
 
 寫進網址時要決定用 `push` 還是 `replace`：換頁碼通常用 `push`，按上一頁回到上一頁碼；Tab 切換如果用方向鍵連續切換，每次都 `push` 會讓上一頁要按很多次，可以用 `replace`。這是設計決定，規格寫清楚即可。
 
-捲動位置：瀏覽器的上一頁會嘗試還原捲動位置，SPA 換頁時由路由器處理。Vue Router 的 `scrollBehavior(to, from, savedPosition)` 在按上一頁時拿得到 `savedPosition`，回傳它就會捲回去；但清單的資料如果是回到頁面後才重新抓，捲動的那一刻頁面還不夠長，捲不到原位。
-
-### Tabs 的鍵盤
-
-APG 的 Tabs 模式：
-
-| 按鍵 | 行為 |
-|---|---|
-| Tab（進入分頁列） | 停在目前的 Tab |
-| Tab（在分頁列裡） | 離開分頁列，進入目前的 tabpanel |
-| → 、← | 移到下一個、上一個 Tab，到頭時繞回另一端；自動切換時也顯示它的內容 |
-| Home、End | （選用）第一個、最後一個 Tab |
-| Space、Enter | 手動切換的版本：顯示目前聚焦的 Tab 的內容 |
-
-只有目前的 Tab 是 `tabindex="0"`，其他是 `tabindex="-1"`，焦點移動時跟著換，這個做法叫 roving tabindex。APG 建議 tabpanel 的內容能立刻顯示時用自動切換（焦點移到哪個 Tab 就顯示哪個）；內容要等 API 才出得來時，自動切換會讓方向鍵每移一格就送一個請求，改用手動切換。
-
-AI 有時會產生 `focusgroup="tablist"` 屬性，由瀏覽器處理方向鍵與 roving tabindex。依 2026-11 的 web-features 資料它只有 Chrome 150、Edge 150 起支援，Firefox 與 Safari 都沒有，用了就要載入 polyfill 或保留自己寫的方向鍵處理，不能當成唯一的寫法。
-
-tabpanel 裡沒有可聚焦的元素時，tabpanel 本身加 `tabindex="0"`，按 Tab 才進得去。
-
-### 分頁、載入更多、無限捲動
-
-| | Pagination | 載入更多 | 無限捲動 |
-|---|---|---|---|
-| 跳到特定位置 | 可以（第 7 頁） | 不行 | 不行 |
-| 頁尾 | 到得了 | 到得了 | 到不了，或很難到 |
-| 回上一頁的位置 | 頁碼在網址裡，好還原 | 要記住載入了幾批 | 要記住載入了幾批與捲動位置 |
-| 適合 | 管理、查詢類清單 | 動態、瀏覽類清單 | 連續瀏覽的內容 |
-
-後端怎麼分頁（offset 或 cursor）會影響前端：cursor 分頁沒有「第 7 頁」，只能上一批、下一批。API 那一側的設計見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
-
-無限捲動要讓輔助科技讀得懂，APG 有 Feed 模式：容器 `role="feed"`，每一筆是 `article`，帶 `aria-posinset` 與 `aria-setsize`（總數不知道時用 `-1`），載入新資料的過程中容器設 `aria-busy="true"`、完成後改回 `false`。
-
-## 實際程式
-
-把目前的 Tab 寫進網址的 Tabs：
+## 最小範例：把目前的 Tab 寫進網址
 
 ```vue
 <script setup>
@@ -147,7 +90,46 @@ function onKeydown(e, i) {
 </template>
 ```
 
-Pagination 用連結，頁碼放在 query：
+只有目前的 Tab 是 `tabindex="0"`，其他是 `-1`，按 Tab 一次就進得了內容。tabpanel 裡沒有可聚焦的元素時，tabpanel 本身加 `tabindex="0"`。
+
+:::stop 讀到這裡可以先停：會分辨連結與 Tabs、用 `aria-current` 標目前位置，並把 Tab 寫進網址。後面的 `aria-current` 取值、Tabs 鍵盤表、Pagination、無限捲動與捲動還原，在做到那個元件或清單回來時停在頂端時再回來讀。
+
+## `aria-current` 的值與 RouterLink
+
+| 值 | 用在 |
+|---|---|
+| `page` | 導覽、Breadcrumb、Pagination 裡的目前頁 |
+| `step` | Stepper 的目前步驟 |
+| `location` | 流程圖、地圖上的目前位置 |
+| `date` | 日曆裡的今天 |
+| `time` | 時刻表裡的目前時段 |
+| `true` | 以上都不適合時 |
+
+`aria-current` 和 `aria-selected` 不同：`aria-selected` 用在可以選取的元件（Tabs、listbox 的選項、Grid 的格子），`aria-current` 標的是「一組項目裡目前的那一個」。
+
+樣式也掛在這個屬性上（`[aria-current="page"] { … }`），畫面上的「目前」和螢幕閱讀器念出的「目前」來自同一個地方。Vue Router 的 `<RouterLink>` 在連結完全符合目前路由時，自動加上 `aria-current="page"` 與 `router-link-exact-active` 這個 class；部分符合（例如在 `/clinics/101` 時的 `/clinics`）只加 `router-link-active`。
+
+## 網站導覽的下拉選單不用 `role="menu"`
+
+APG 的 Disclosure Navigation Menu 範例用一顆 disclosure 按鈕（`aria-expanded`）展開一串連結，並特別註明它沒有用 `role="menu"`，因為一般的網站導覽不需要 menu 角色要求的那整套鍵盤操作。`role="menu"` 留給應用程式裡「一串動作」的選單（編輯、複製、刪除）。
+
+## Tabs 的鍵盤與切換方式
+
+APG 的 Tabs 模式：
+
+| 按鍵 | 行為 |
+|---|---|
+| Tab（進入分頁列） | 停在目前的 Tab |
+| Tab（在分頁列裡） | 離開分頁列，進入目前的 tabpanel |
+| → 、← | 移到下一個、上一個 Tab，到頭時繞回另一端；自動切換時也顯示它的內容 |
+| Home、End | （選用）第一個、最後一個 Tab |
+| Space、Enter | 手動切換的版本：顯示目前聚焦的 Tab 的內容 |
+
+焦點移動時 `tabindex="0"` 跟著換到目前的 Tab，這個做法叫 roving tabindex。APG 建議 tabpanel 的內容能立刻顯示時用自動切換（焦點移到哪個 Tab 就顯示哪個）；內容要等 API 才出得來時，自動切換會讓方向鍵每移一格就送一個請求，改用手動切換。
+
+AI 有時會產生 `focusgroup="tablist"` 屬性，由瀏覽器處理方向鍵與 roving tabindex。依 2026-11 的 web-features 資料它只有 Chrome 150、Edge 150 起支援，Firefox 與 Safari 都沒有，用了就要載入 polyfill 或保留自己寫的方向鍵處理，不能當成唯一的寫法。
+
+## Pagination：頁碼放在 query
 
 ```vue
 <script setup>
@@ -179,9 +161,24 @@ const to = (p) => ({ query: { ...route.query, page: p === 1 ? undefined : p } })
 
 `<RouterLink>` 判斷「完全符合」時比的是路由與 params，query 不列入（Vue Router 5.5 的原始碼）；同一個路由、不同 `?page=` 的連結會全部被當成目前頁，全都帶 `aria-current="page"` 與 `router-link-exact-active`。所以分頁自己決定 `aria-current`，樣式也掛在 `[aria-current="page"]` 上，不用那個 class。頁數很多時只顯示目前頁前後幾頁加第一頁、最後一頁，中間用「…」。
 
-:::stop 讀到這裡可以先停：會分辨連結與 Tabs、用 `aria-current` 標目前位置，並把 Tab 與頁碼寫進網址。後面的捲動還原在清單回來時停在頂端才需要，到時再回來讀。
+## 分頁、載入更多、無限捲動怎麼選
 
-按上一頁時捲回原位，資料要先載完：
+| | Pagination | 載入更多 | 無限捲動 |
+|---|---|---|---|
+| 跳到特定位置 | 可以（第 7 頁） | 不行 | 不行 |
+| 頁尾 | 到得了 | 到得了 | 到不了，或很難到 |
+| 回上一頁的位置 | 頁碼在網址裡，好還原 | 要記住載入了幾批 | 要記住載入了幾批與捲動位置 |
+| 適合 | 管理、查詢類清單 | 動態、瀏覽類清單 | 連續瀏覽的內容 |
+
+後端怎麼分頁（offset 或 cursor）會影響前端：cursor 分頁沒有「第 7 頁」，只能上一批、下一批。API 那一側的設計見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
+
+無限捲動要讓輔助科技讀得懂，APG 有 Feed 模式：容器 `role="feed"`，每一筆是 `article`，帶 `aria-posinset` 與 `aria-setsize`（總數不知道時用 `-1`），載入新資料的過程中容器設 `aria-busy="true"`、完成後改回 `false`。
+
+## 按上一頁時還原捲動位置
+
+捲動位置：瀏覽器的上一頁會嘗試還原捲動位置，SPA 換頁時由路由器處理。Vue Router 的 `scrollBehavior(to, from, savedPosition)` 在按上一頁時拿得到 `savedPosition`，回傳它就會捲回去；但清單的資料如果是回到頁面後才重新抓，捲動的那一刻頁面還不夠長，捲不到原位。
+
+等資料載完再捲：
 
 ```js
 const router = createRouter({

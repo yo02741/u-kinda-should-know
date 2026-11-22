@@ -1,4 +1,4 @@
-## 從一個具體問題開始：curl 打得通，瀏覽器說被擋
+## 具體問題：curl 打得通，瀏覽器說被擋
 
 前端跑在 `https://app.shop.example`，API 在 `https://api.shop.example`。用 curl 打 `POST /orders` 一切正常，回 201。同樣的請求從前端的 `fetch` 送出，Chrome 的 console 出現：
 
@@ -8,15 +8,11 @@ has been blocked by CORS policy: Response to preflight request doesn't pass acce
 check: No 'Access-Control-Allow-Origin' header is present on the requested resource.
 ```
 
-後端看 log，發現根本沒有收到 `POST`，只收到一個 `OPTIONS /orders`，而且回了 405。
+後端看 log，發現根本沒有收到 `POST`，只收到一個 `OPTIONS /orders`，而且回了 405。修好之後，使用者登入後呼叫 API 又一直回 401：登入時種下的 session cookie 沒有被帶上。
 
-修好 CORS 之後，下一個問題接著來：使用者登入後，前端呼叫 API 一直回 401，因為登入時種下的 session cookie 沒有被帶上。
+同源政策、CORS、cookie 的屬性都只存在於瀏覽器裡，所以 curl 不受影響。
 
-這兩個問題都來自瀏覽器的同一套規則：同源政策決定一個網頁能不能讀取另一個來源的回應，CORS 是伺服器放寬這個限制的方式，cookie 的屬性決定瀏覽器什麼時候自動帶上 cookie。三者都只存在於瀏覽器裡，所以 curl 完全不受影響。
-
-## 同源政策
-
-**origin（來源）** 是 scheme、主機、port 三者的組合。三者全部相同才是同源：
+## 同源政策：scheme、主機、port 全部相同才同源
 
 | 比較對象（相對於 `https://app.shop.example`） | 同源嗎 | 原因 |
 |---|---|---|
@@ -26,36 +22,11 @@ check: No 'Access-Control-Allow-Origin' header is present on the requested resou
 | `https://api.shop.example` | 否 | 主機不同，即使是同一個網域的子網域 |
 | `http://localhost:5173` 對 `http://localhost:8000` | 否 | port 不同：本機開發最常遇到 |
 
-瀏覽器預設允許網頁送出跨來源的請求（表單、圖片、script 本來就可以），但不讓 JavaScript 讀取跨來源的回應。否則，任何網站都能在背景用你的登入狀態呼叫你的網銀 API，讀出餘額。
+瀏覽器預設允許網頁送出跨來源的請求（表單、圖片、script 本來就可以），但不讓 JavaScript 讀取跨來源的回應。CORS 是伺服器用回應標頭放寬這個限制的方式。
 
-由此推得：**CORS 擋的是讀取，不一定擋得住送出**。一個「簡單請求」（下面會定義）會送到伺服器並被執行，瀏覽器只是不把回應交給 JavaScript。所以 CORS 不是防止跨站請求偽造（CSRF）的機制；防 CSRF 靠的是伺服器的授權檢查、cookie 的 `SameSite`、CSRF token。
+## CORS：預檢請求，與帶 cookie 的最小設定
 
-## CORS 怎麼運作
-
-### 簡單請求：直接送，看回應決定給不給讀
-
-符合以下全部條件的請求是「簡單請求」，瀏覽器直接送出，不先詢問：
-
-- 方法是 `GET`、`HEAD`、`POST` 之一
-- 只帶瀏覽器允許的標頭（例如 `Accept`、`Accept-Language`、`Content-Language`、`Content-Type`）
-- `Content-Type` 只能是 `application/x-www-form-urlencoded`、`multipart/form-data`、`text/plain`
-
-```http
-GET /products HTTP/1.1
-Host: api.shop.example
-Origin: https://app.shop.example
-
-HTTP/1.1 200 OK
-Access-Control-Allow-Origin: https://app.shop.example
-Vary: Origin
-Content-Type: application/json
-```
-
-瀏覽器自動加上 `Origin` 標頭。收到回應後檢查 `Access-Control-Allow-Origin`：等於自己的 origin（或是 `*`），就把回應交給 JavaScript；否則丟棄並在 console 報錯。
-
-### 預檢請求（preflight）：先問能不能送
-
-`Content-Type: application/json`、帶 `Authorization` 標頭、用 `PUT`／`PATCH`／`DELETE`，都不符合簡單請求的條件。這時瀏覽器先送一個 `OPTIONS` 詢問：
+`Content-Type: application/json`、帶 `Authorization` 標頭、用 `PUT`／`PATCH`／`DELETE` 的請求，瀏覽器會先送一個 `OPTIONS` 詢問（預檢，preflight），通過才送出原本的請求：
 
 ```http
 OPTIONS /orders HTTP/1.1
@@ -76,53 +47,6 @@ Access-Control-Max-Age: 600
 Vary: Origin
 ```
 
-通過之後瀏覽器才送出真正的 `POST`，而真正的回應也要再帶一次 `Access-Control-Allow-Origin`。
-
-```
-瀏覽器                                      api.shop.example
-  |--- OPTIONS /orders --------------------->|  只有 Origin 與 Access-Control-Request-*，不帶 body
-  |<-- 204 + Access-Control-Allow-* ---------|  逐項檢查：origin、方法、每個標頭
-  |--- POST /orders（帶 body、Authorization）->|  通過才送
-  |<-- 201 + Access-Control-Allow-Origin ----|  沒帶這個標頭，回應一樣讀不到
-```
-
-各標頭的作用：
-
-| 標頭 | 出現在 | 作用 |
-|---|---|---|
-| `Origin` | 請求 | 瀏覽器自動帶，網頁改不了 |
-| `Access-Control-Request-Method`、`-Headers` | 預檢請求 | 真正的請求要用什麼方法、帶哪些標頭 |
-| `Access-Control-Allow-Origin` | 回應 | 允許的來源：單一 origin 或 `*`，**不能列多個** |
-| `Access-Control-Allow-Methods`、`-Headers` | 預檢回應 | 允許的方法、標頭 |
-| `Access-Control-Allow-Credentials` | 回應 | `true` 才允許帶 cookie 的請求讀取回應 |
-| `Access-Control-Max-Age` | 預檢回應 | 預檢結果快取幾秒；瀏覽器各有上限（Chrome 為 2 小時，Firefox 為 24 小時） |
-| `Access-Control-Expose-Headers` | 回應 | 讓 JavaScript 讀得到額外的回應標頭，例如 `Location`、`X-Request-Id` |
-
-`Allow-Origin` 只能放一個值，要允許多個來源時，伺服器要讀請求的 `Origin`，比對白名單，**命中才原樣回傳那個 origin**，並加上 `Vary: Origin`。少了 `Vary`，CDN 或快取可能把給 A 來源的回應拿去給 B 來源用，B 就會看到「origin 不符」的錯誤。
-
-### 帶憑證的請求
-
-`fetch` 預設只在同源時帶 cookie。跨來源要帶 cookie，前端要明確開啟：
-
-```js
-// fetch
-fetch('https://api.shop.example/me', { credentials: 'include' })
-// axios
-axios.get('https://api.shop.example/me', { withCredentials: true })
-```
-
-這時伺服器的規則更嚴格：
-
-- 回應要有 `Access-Control-Allow-Credentials: true`
-- `Access-Control-Allow-Origin` **不能是 `*`**，必須是確切的 origin
-- `Allow-Headers`、`Allow-Methods`、`Expose-Headers` 的 `*` 在帶憑證時不再代表「全部」，要明列
-
-規則這麼嚴，是因為「任何網站都能讀取帶著使用者 cookie 的回應」就等於沒有同源政策。
-
-用 `Authorization: Bearer` 標頭帶 token 不算瀏覽器意義上的「憑證模式」，不需要 `Allow-Credentials`，但 `Authorization` 會觸發預檢，要列在 `Allow-Headers` 裡。
-
-### 伺服器端的設定
-
 以 FastAPI（Starlette 的 `CORSMiddleware`）為例：
 
 ```python
@@ -141,9 +65,84 @@ app.add_middleware(
 )
 ```
 
-middleware 會處理 `OPTIONS` 預檢、比對 origin、加上 `Vary: Origin`。如果 CORS 是在 nginx 或 API 閘道設定，就不要在應用程式再設一次：兩層都加 `Access-Control-Allow-Origin`，回應會出現兩個值，瀏覽器一樣會拒絕。
+`fetch` 預設只在同源時帶 cookie，跨來源要帶，前端要寫 `credentials: 'include'`。帶憑證時伺服器的規則更嚴格：
 
-另一種做法是**不要跨來源**：讓前端與 API 走同一個 origin（例如 `https://shop.example/` 給前端、`https://shop.example/api/` 由反向代理轉到後端）。同源就沒有 CORS，也沒有預檢的額外來回。本機開發時，Vite 等開發伺服器的 proxy 功能用的是這個做法。
+- 回應要有 `Access-Control-Allow-Credentials: true`
+- `Access-Control-Allow-Origin` **不能是 `*`**，必須是確切的 origin
+
+## 最常見的兩個錯誤
+
+CORS 失敗時，`fetch` 只丟出 `TypeError: Failed to fetch`（Chrome），程式拿不到狀態碼，**原因只寫在 console**。看訊息裡 `blocked by CORS policy:` 之後的部分：
+
+| 訊息後半段 | 意思 | 怎麼修 |
+|---|---|---|
+| `No 'Access-Control-Allow-Origin' header is present on the requested resource.` | 回應沒有 `Allow-Origin` | 伺服器加 CORS 設定。也要檢查：**錯誤回應**（500、404、proxy 回的 502）是不是沒經過 CORS middleware |
+| `Response to preflight request doesn't pass access control check: It does not have HTTP ok status.` | `OPTIONS` 回了非 2xx（常見 401、404、405） | 讓 `OPTIONS` 不經過認證、有對應的處理；預檢請求不會帶 `Authorization` |
+
+:::stop 讀到這裡可以先停：會判斷兩個網址是不是同源，知道預檢請求在問什麼，會設定帶 cookie 的 CORS。後面是簡單請求的條件、各 CORS 標頭的作用、多個來源與 `Vary`、cookie 的屬性與 `SameSite`、第三方 cookie、可執行的 CORS 判斷模擬與完整的錯誤訊息表，在 cookie 沒被帶上、要選 cookie 屬性或 console 出現其他 CORS 訊息時再回來讀。
+
+## CORS 擋的是讀取，不擋送出
+
+少了同源政策，任何網站都能在背景用你的登入狀態呼叫你的網銀 API，讀出餘額。但**簡單請求會送到伺服器並被執行**，瀏覽器只是不把回應交給 JavaScript。所以 CORS 防不了跨站請求偽造（CSRF）；防 CSRF 靠伺服器的授權檢查、cookie 的 `SameSite`、CSRF token（見 [XSS 與 CSRF 實驗室](#/lab/XssCsrfLab)）。
+
+符合以下全部條件的請求是「簡單請求」，瀏覽器直接送出，不先詢問：
+
+- 方法是 `GET`、`HEAD`、`POST` 之一
+- 只帶瀏覽器允許的標頭（例如 `Accept`、`Accept-Language`、`Content-Language`、`Content-Type`）
+- `Content-Type` 只能是 `application/x-www-form-urlencoded`、`multipart/form-data`、`text/plain`
+
+```http
+GET /products HTTP/1.1
+Host: api.shop.example
+Origin: https://app.shop.example
+
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://app.shop.example
+Vary: Origin
+Content-Type: application/json
+```
+
+瀏覽器自動加上 `Origin` 標頭。收到回應後檢查 `Access-Control-Allow-Origin`：等於自己的 origin（或是 `*`），就把回應交給 JavaScript；否則丟棄並在 console 報錯。預檢通過後送出的請求也一樣，回應要再帶一次 `Access-Control-Allow-Origin`：
+
+```
+瀏覽器                                      api.shop.example
+  |--- OPTIONS /orders --------------------->|  只有 Origin 與 Access-Control-Request-*，不帶 body
+  |<-- 204 + Access-Control-Allow-* ---------|  逐項檢查：origin、方法、每個標頭
+  |--- POST /orders（帶 body、Authorization）->|  通過才送
+  |<-- 201 + Access-Control-Allow-Origin ----|  沒帶這個標頭，回應一樣讀不到
+```
+
+## 各個 CORS 標頭的作用
+
+| 標頭 | 出現在 | 作用 |
+|---|---|---|
+| `Origin` | 請求 | 瀏覽器自動帶，網頁改不了 |
+| `Access-Control-Request-Method`、`-Headers` | 預檢請求 | 之後的請求要用什麼方法、帶哪些標頭 |
+| `Access-Control-Allow-Origin` | 回應 | 允許的來源：單一 origin 或 `*`，**不能列多個** |
+| `Access-Control-Allow-Methods`、`-Headers` | 預檢回應 | 允許的方法、標頭 |
+| `Access-Control-Allow-Credentials` | 回應 | `true` 才允許帶 cookie 的請求讀取回應 |
+| `Access-Control-Max-Age` | 預檢回應 | 預檢結果快取幾秒；瀏覽器各有上限（Chrome 為 2 小時，Firefox 為 24 小時） |
+| `Access-Control-Expose-Headers` | 回應 | 讓 JavaScript 讀得到額外的回應標頭，例如 `Location`、`X-Request-Id` |
+
+`Allow-Origin` 只能放一個值。要允許多個來源時，伺服器讀請求的 `Origin`，比對白名單，**命中才原樣回傳那個 origin**，並加上 `Vary: Origin`。少了 `Vary`，CDN 或快取可能把給 A 來源的回應拿去給 B 來源用，B 就會看到「origin 不符」的錯誤。
+
+## 帶憑證、兩層設定與同源的做法
+
+前端開啟帶 cookie 的寫法：
+
+```js
+// fetch
+fetch('https://api.shop.example/me', { credentials: 'include' })
+// axios
+axios.get('https://api.shop.example/me', { withCredentials: true })
+```
+
+- **萬用字元在帶憑證時失效**：`Allow-Headers`、`Allow-Methods`、`Expose-Headers` 的 `*` 不再代表「全部」，要明列。
+- **帶憑證的規則為什麼嚴**：任何網站都能讀取帶著使用者 cookie 的回應，就等於沒有同源政策。
+- **`Authorization: Bearer` 不算憑證模式**：不需要 `Allow-Credentials`，但 `Authorization` 會觸發預檢，要列在 `Allow-Headers` 裡。
+- **middleware 做的事**：處理 `OPTIONS` 預檢、比對 origin、加上 `Vary: Origin`。
+- **CORS 只設一層**：在 nginx 或 API 閘道設了，就不要在應用程式再設一次。兩層都加 `Access-Control-Allow-Origin`，回應會出現兩個值，瀏覽器一樣拒絕。
+- **不要跨來源**：讓前端與 API 走同一個 origin（例如 `https://shop.example/` 給前端、`https://shop.example/api/` 由反向代理轉到後端）。同源就沒有 CORS，也沒有預檢的額外來回。本機開發時，Vite 等開發伺服器的 proxy 功能用的是這個做法。
 
 ## Cookie 的屬性
 
@@ -163,11 +162,16 @@ Set-Cookie: __Host-sid=k8Jf2...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age
 | `Max-Age`／`Expires` | 有效期限 | 不設：瀏覽器關閉時刪除（session cookie；但瀏覽器的「還原分頁」功能可能讓它留著） |
 | `Partitioned` | 第三方情境下，依頂層網站分開儲存（CHIPS） | 見下方第三方 cookie |
 
-名稱前綴是瀏覽器強制的規則：`__Host-` 開頭的 cookie 必須 `Secure`、`Path=/`、不能設 `Domain`；`__Secure-` 開頭的必須 `Secure`。用 `__Host-` 可以防止子網域種下同名的 cookie 來覆蓋 session。
+名稱前綴是瀏覽器強制的規則：
 
-### SameSite 與「site」
+| 前綴 | 規則 |
+|---|---|
+| `__Host-` | 必須 `Secure`、`Path=/`、不能設 `Domain`。可以防止子網域種下同名的 cookie 來覆蓋 session |
+| `__Secure-` | 必須 `Secure` |
 
-`SameSite` 比較的是 **site**，不是 origin。site 大致是 scheme 加上「可註冊網域」（例如 `shop.example`）。所以：
+## SameSite 與「site」
+
+`SameSite` 比較的是 **site**，不是 origin。site 大致是 scheme 加上「可註冊網域」（例如 `shop.example`）：
 
 | 從 → 到 | 同源？ | 同站？ |
 |---|---|---|
@@ -185,13 +189,17 @@ Set-Cookie: __Host-sid=k8Jf2...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age
 
 沒有設 `SameSite` 時，Chrome 當作 `Lax` 處理；其他瀏覽器的預設不完全相同，所以要明確寫出來。
 
-:::stop 讀到這裡可以先停：會判斷請求要不要 preflight、設定帶憑證的 CORS，選對 cookie 的屬性。後面的第三方 cookie 與 CORS 判斷模擬，在做嵌入式元件或排查瀏覽器擋請求時再回來讀。
+## 第三方 cookie
 
-### 第三方 cookie
+「第三方」是指 cookie 所屬的站和網址列上的頂層網站不同，例如 `shop.example` 的頁面裡嵌了 `widget.other.example` 的 iframe。各瀏覽器正在限制這類 cookie：
 
-「第三方」是指 cookie 所屬的站和網址列上的頂層網站不同，例如 `shop.example` 的頁面裡嵌了 `widget.other.example` 的 iframe。這類 cookie 正在被各瀏覽器限制：Safari 預設封鎖、Firefox 預設依頂層網站分區儲存；Chrome 的計畫幾經調整，以 Chrome 官方公告為準。
+| 瀏覽器 | 現況 |
+|---|---|
+| Safari | 預設封鎖 |
+| Firefox | 預設依頂層網站分區儲存 |
+| Chrome | 計畫幾經調整，以 Chrome 官方公告為準 |
 
-設計上的結論是：**不要依賴第三方 cookie**。前端與 API 放在同一個站（不同子網域即可）或同一個 origin；嵌入式元件需要獨立狀態時，評估 `Partitioned`（CHIPS）。
+**不要依賴第三方 cookie**。前端與 API 放在同一個站（不同子網域即可）或同一個 origin；嵌入式元件需要獨立狀態時，評估 `Partitioned`（CHIPS）。
 
 ## 實際程式：模擬瀏覽器的 CORS 判斷
 
@@ -272,14 +280,12 @@ console.log('需要預檢嗎？', needsPreflight(req))
 for (const [name, cfg] of cases) console.log(`\n[${name}]\n` + browserFetch(req, makeServer(cfg)))
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他 CORS 錯誤訊息
 
-CORS 失敗時，`fetch` 只會丟出很籠統的錯誤（Chrome 是 `TypeError: Failed to fetch`，Firefox 是 `TypeError: NetworkError when attempting to fetch resource.`），程式拿不到狀態碼，**原因只寫在 console**。Chrome 的訊息都以 `Access to fetch at '…' from origin '…' has been blocked by CORS policy:` 開頭，後半段才是重點：
+Chrome 的訊息都以 `Access to fetch at '…' from origin '…' has been blocked by CORS policy:` 開頭，後半段才是原因：
 
 | 訊息後半段 | 意思 | 怎麼修 |
 |---|---|---|
-| `No 'Access-Control-Allow-Origin' header is present on the requested resource.` | 回應沒有 `Allow-Origin` | 伺服器加 CORS 設定。也要檢查：**錯誤回應**（500、404、proxy 回的 502）是不是沒經過 CORS middleware |
-| `Response to preflight request doesn't pass access control check: It does not have HTTP ok status.` | `OPTIONS` 回了非 2xx（常見 401、404、405） | 讓 `OPTIONS` 不經過認證、有對應的處理；預檢請求不會帶 `Authorization` |
 | `Method PATCH is not allowed by Access-Control-Allow-Methods in preflight response.` | `Allow-Methods` 沒列這個方法 | 補上 |
 | `Request header field authorization is not allowed by Access-Control-Allow-Headers in preflight response.` | 自訂標頭沒列進 `Allow-Headers` | 補上；常漏的是 `Authorization`、`Idempotency-Key`、`X-Request-Id` |
 | `The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.` | 帶 cookie 卻回 `*` | 改成比對白名單後回確切的 origin，加 `Vary: Origin` |
@@ -287,17 +293,19 @@ CORS 失敗時，`fetch` 只會丟出很籠統的錯誤（Chrome 是 `TypeError:
 | `The 'Access-Control-Allow-Origin' header has a value '…' that is not equal to the supplied origin.` | 回的 origin 和請求的不同 | 常見原因：寫死了正式環境的 origin、快取少了 `Vary: Origin`、`http`／`https` 或 port 不同 |
 | `… contains multiple values '…, …', but only one is allowed.` | 回應有兩個 `Allow-Origin` | nginx 與應用程式都加了 CORS 標頭，只留一層 |
 
-Firefox 的訊息格式不同，例如 `Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at … (Reason: CORS header 'Access-Control-Allow-Origin' missing).`，括號裡的 Reason 對應上表的原因。
+Firefox 的 `fetch` 丟的是 `TypeError: NetworkError when attempting to fetch resource.`，console 訊息格式也不同，例如 `Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at … (Reason: CORS header 'Access-Control-Allow-Origin' missing).`，括號裡的 Reason 對應上表的原因。
 
-cookie 相關的問題不會出現在 CORS 錯誤裡，要到開發者工具的 Application（或 Storage）分頁看 cookie 有沒有被存下來，以及 Network 分頁裡請求的 Cookie 標頭。Chrome 會在被拒絕的 `Set-Cookie` 旁顯示警告圖示，滑過去可以看到原因，例如 `SameSite=None` 卻沒有 `Secure`。
+## cookie 與設計上的常見錯誤
 
-其他常見錯誤：
+cookie 相關的問題不會出現在 CORS 錯誤裡。到開發者工具的 Application（或 Storage）分頁看 cookie 有沒有被存下來，以及 Network 分頁裡請求的 Cookie 標頭。Chrome 會在被拒絕的 `Set-Cookie` 旁顯示警告圖示，滑過去可以看到原因，例如 `SameSite=None` 卻沒有 `Secure`。
 
-- **用 `mode: 'no-cors'` 消除錯誤**：請求會送出，但回應變成 opaque，JavaScript 讀不到任何內容，`response.ok` 是 `false`、狀態是 0。這只是把錯誤藏起來。
-- **把 CORS 當成授權**：只允許自己的前端 origin，就以為別人呼叫不了 API。curl、腳本、伺服器都不受 CORS 限制，授權還是要靠 token 或 session 檢查。
-- **反射任意 origin 又允許憑證**：把請求的 `Origin` 不經比對就回傳，等於允許所有網站帶著使用者的 cookie 讀取回應。
-- **登入後 cookie 沒被帶上**：前端忘了 `credentials: 'include'`；或 cookie 設了 `Domain=api.shop.example` 卻期待在 `app.shop.example` 收到；或本機用 `http://localhost` 卻設了 `Secure`（多數瀏覽器把 `localhost` 視為安全環境而允許，但不要假設所有環境都一樣，要實際確認）。
-- **CSRF 只靠 CORS**：跨站表單 POST 是簡單請求，不需要預檢就會送到伺服器並執行。改變狀態的 API 要用 `SameSite=Lax`（或 `Strict`）的 cookie，加上 CSRF token 或只接受 JSON（觸發預檢）。
+| 錯誤 | 後果或原因 |
+|---|---|
+| 用 `mode: 'no-cors'` 消除錯誤 | 請求會送出，但回應變成 opaque，JavaScript 讀不到任何內容，`response.ok` 是 `false`、狀態是 0。錯誤只是被藏起來 |
+| 把 CORS 當成授權 | 只允許自己的前端 origin，就以為別人呼叫不了 API。curl、腳本、伺服器都不受 CORS 限制，授權還是要靠 token 或 session 檢查 |
+| 反射任意 origin 又允許憑證 | 把請求的 `Origin` 不經比對就回傳，等於允許所有網站帶著使用者的 cookie 讀取回應 |
+| 登入後 cookie 沒被帶上 | 前端忘了 `credentials: 'include'`；或 cookie 設了 `Domain=api.shop.example` 卻期待在 `app.shop.example` 收到；或本機用 `http://localhost` 卻設了 `Secure`（多數瀏覽器把 `localhost` 視為安全環境而允許，但不要假設所有環境都一樣，要實際確認） |
+| CSRF 只靠 CORS | 跨站表單 POST 是簡單請求，不需要預檢就會送到伺服器並執行。改變狀態的 API 要用 `SameSite=Lax`（或 `Strict`）的 cookie，加上 CSRF token 或只接受 JSON（觸發預檢） |
 
 ## 動手
 

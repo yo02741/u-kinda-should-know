@@ -1,4 +1,4 @@
-## 從一個具體問題開始：本機好好的，上線就壞
+## 具體問題：本機好好的，上線就壞
 
 用 AI 產生的門診前端，API 的位址寫在一個常數裡：
 
@@ -15,18 +15,16 @@ Access to fetch at 'http://localhost:8000/api/appointments?date=2026-11-20' from
 header is present on the requested resource.
 ```
 
-接下來的幾個「修法」各自引出新的問題：
+接下來的「修法」各自引出新的問題：
 
 1. 加上 `mode: 'no-cors'`：錯誤訊息不見了，但 `res.status` 是 `0`，`await res.json()` 丟出 `SyntaxError: Unexpected end of JSON input`。
-2. 請後端把 CORS 設成允許所有來源 `*`：清單出來了。登入之後，需要 session cookie 的 API 一直回 401。
-3. 前端補上 `credentials: 'include'`：Console 換成另一個錯誤，`… must not be the wildcard '*' when the request's credentials mode is 'include'.`
-4. 部署到 `https://clinic.example` 之後全部失敗：程式還寫著 `http://localhost:8000`，每位使用者的瀏覽器都去連自己電腦上的 8000 port。
+2. 請後端允許所有來源 `*`：清單出來了，但需要 session cookie 的 API 一直回 401。
+3. 前端補上 `credentials: 'include'`：Console 換成 `… must not be the wildcard '*' when the request's credentials mode is 'include'.`
+4. 部署到 `https://clinic.example` 後全部失敗：程式還寫著 `http://localhost:8000`，使用者的瀏覽器去連自己電腦的 8000 port。
 
-前端與 API 不同源，才有這一連串的 CORS 與 cookie 問題。開發時讓 Vite 代為轉送 `/api`、正式環境讓前端與 `/api` 在同一個網域，程式一律寫相對路徑，這四件事都不會發生。
+前端與 API 同源時，這些都不會發生。
 
-## 運作原理
-
-### origin 怎麼比
+## origin 怎麼比，跨來源請求怎麼走
 
 origin 是 scheme、主機、port 三者的組合，路徑不算在內。三者都相同才是同源：
 
@@ -38,10 +36,6 @@ origin 是 scheme、主機、port 三者的組合，路徑不算在內。三者�
 | `https://clinic.example` | `https://clinic.example:443` | 是 | https 的預設 port 是 443 |
 | `https://clinic.example` | `https://api.clinic.example` | 否 | 子網域也是不同的主機 |
 | `http://clinic.example` | `https://clinic.example` | 否 | scheme |
-
-在 Console 執行 `location.origin` 看目前頁面的 origin；`new URL(網址).origin` 看任意網址的 origin。
-
-### 從瀏覽器這一側看一個跨來源請求
 
 ```
 fetch('http://localhost:8000/api/appointments', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
@@ -58,14 +52,47 @@ fetch('http://localhost:8000/api/appointments', { method: 'POST', headers: { 'Co
                                                  └─► 丟掉回應，TypeError
 ```
 
-兩個從前端看容易誤會的地方：
+- **擋的是讀取**：不需要 preflight、或 preflight 通過的請求照樣送到伺服器並執行，只是前端讀不到回應。
+- **程式拿不到原因**：CORS 失敗時 `fetch` 丟出一般的網路錯誤（Chrome 是 `TypeError: Failed to fetch`），和斷線時一樣。原因只寫在開發者工具的 Console。
 
-- **擋的是讀取**：不需要 preflight、或 preflight 通過的請求，會照樣送到伺服器並執行。一個 `POST` 被 CORS 擋下，掛號可能已經建立了，只是前端讀不到回應。
-- **程式拿不到原因**：CORS 失敗時 `fetch` 丟出的是一般的網路錯誤，Chrome 是 `TypeError: Failed to fetch`、Firefox 是 `TypeError: NetworkError when attempting to fetch resource.`、Safari 是 `TypeError: Load failed`，和伺服器沒開、斷線時一模一樣。原因只寫在開發者工具裡。
+## 最小範例：Vite proxy 加相對路徑
 
-伺服器要回哪些標頭、preflight 的完整規則，見後端的 [CORS、Cookie 與同源](#/skill/cors-cookies)。
+開發時讓 Vite 代為轉送 `/api`。瀏覽器只看到 `localhost:5173`，請求是同源的：沒有 CORS、沒有 preflight，cookie 照常帶上。
 
-### 幾種失敗在開發者工具裡長得不一樣
+```js
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    proxy: {
+      // /api 開頭的請求轉給本機的後端；瀏覽器只看到 localhost:5173
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        // 後端的路由沒有 /api 前綴時才需要：
+        // rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      // 叫號看板的即時更新
+      '/ws': { target: 'ws://localhost:8000', ws: true },
+    },
+  },
+})
+```
+
+程式一律寫相對路徑 `fetch('/api/appointments?date=2026-11-20')`。正式環境由反向代理把同網域的 `/api/` 轉給後端。
+
+## 最常見的兩個錯誤
+
+- **`No 'Access-Control-Allow-Origin' header is present on the requested resource.`**：跨來源的回應沒有 CORS 標頭。改走 proxy 與相對路徑。
+- **`SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON`**：proxy 沒設定、路徑少了 `/api` 或開頭的 `/`，SPA fallback 回了 `index.html`。檢查 Network 的 Request URL 與 proxy 規則。
+
+:::stop 讀到這裡可以先停：會判斷兩個網址同不同源，用 Vite proxy 與相對路徑讓前端和 API 同源，看懂最常見的兩個錯誤。後面的失敗對照表、cookie、回應標頭與 proxy 選項，在登入後 API 回 401 或必須跨來源部署時再回來讀。
+
+## 幾種失敗在開發者工具裡長得不一樣
+
+一個 `POST` 被 CORS 擋下，掛號可能已經建立了，只是前端讀不到回應。
 
 | 情況 | Network 分頁的狀態欄 | Console | 程式拿到 |
 |---|---|---|---|
@@ -75,11 +102,9 @@ fetch('http://localhost:8000/api/appointments', { method: 'POST', headers: { 'Co
 | 同源請求回 4xx、5xx | `404`、`500` | 列出這筆請求與它的狀態碼，沒有 CORS 字樣 | `Response`，`res.ok` 是 `false` |
 | Vite proxy 連不上後端 | `502`（Vite 8；Vite 7 以前是 `500`） | 同上 | `Response`，`res.ok` 是 `false`；原因在執行 `vite` 的終端機 |
 
-程式裡只能分出「拿到回應」與「沒拿到回應」兩類；沒拿到回應時是 CORS 還是斷線，要打開 Network 與 Console 才分得出來。回報給後端時附上 Console 那一行的全文與 Network 分頁的 `Copy as cURL`。
+CORS 失敗時 Firefox 丟 `TypeError: NetworkError when attempting to fetch resource.`、Safari 丟 `TypeError: Load failed`。程式裡只能分出「拿到回應」與「沒拿到回應」兩類。回報給後端時附上 Console 那一行的全文與 Network 分頁的 `Copy as cURL`。
 
-:::stop 讀到這裡可以先停：會判斷兩個網址同不同源，從 Network 與 Console 分出 CORS、preflight 與連線失敗。後面的 cookie、回應標頭與 Vite proxy，在登入後 API 回 401 或要設定開發環境時再回來讀。
-
-### `credentials`：帶不帶 cookie
+## `credentials`：帶不帶 cookie
 
 | `credentials` | 同源請求 | 跨來源請求 | 跨來源時伺服器要回 |
 |---|---|---|---|
@@ -89,13 +114,11 @@ fetch('http://localhost:8000/api/appointments', { method: 'POST', headers: { 'Co
 
 axios 對應的設定是 `withCredentials: true`。即使三方面都設好，cookie 本身的 `SameSite`、`Secure`、`Domain` 不允許時，瀏覽器照樣不帶；被擋下的 cookie 在 Network 分頁點開請求的 Cookies 分頁，勾 `Show filtered-out request cookies` 可以看到原因。
 
-同源的請求不必寫 `credentials`，預設就會帶 cookie。這也是讓前端與 API 同源的另一個好處。
-
-### 讀得到哪些回應標頭
+## 跨來源時讀得到哪些回應標頭
 
 跨來源時，JavaScript 只讀得到幾個基本的回應標頭：`Cache-Control`、`Content-Language`、`Content-Length`、`Content-Type`、`Expires`、`Last-Modified`、`Pragma`。分頁 API 回的 `X-Total-Count`、建立資源後的 `Location`，Network 分頁看得到，`res.headers.get()` 卻是 `null`，要後端列進 `Access-Control-Expose-Headers`。同源時沒有這個限制。
 
-### 開發：Vite 的 `server.proxy`
+## Vite `server.proxy` 的選項
 
 ```
 瀏覽器                       Vite dev server（localhost:5173）           後端（localhost:8000）
@@ -105,7 +128,7 @@ axios 對應的設定是 `withCredentials: true`。即使三方面都設好，co
   │◄──────────── 回應 ──────────────│◄──────────────── 回應 ────────────────────│
 ```
 
-瀏覽器只看到 `localhost:5173`，請求是同源的：沒有 CORS、沒有 preflight，同源的 cookie 也照常帶上。Vite 把符合規則的請求轉給後端，這段是伺服器對伺服器，不受同源政策限制。常用的選項：
+Vite 把符合規則的請求轉給後端，這段是伺服器對伺服器，不受同源政策限制。
 
 | 選項 | 作用 |
 |---|---|
@@ -117,13 +140,17 @@ axios 對應的設定是 `withCredentials: true`。即使三方面都設好，co
 
 `server.proxy` 只在 `vite`（開發）與 `vite preview` 有作用（後者沒設 `preview.proxy` 時沿用同一份），`vite build` 產出的靜態檔不包含任何轉送設定，正式環境要由前面的伺服器處理。
 
-### 正式環境：同網域的 `/api`
+## 正式環境：同網域的 `/api`，或跨來源
 
 把前端與 API 放在同一個網域，由反向代理依路徑分流：`https://clinic.example/` 給前端的靜態檔，`https://clinic.example/api/` 轉給後端。前端程式和開發時一樣寫 `/api/...`，同一份建置結果不用改。nginx 的寫法與 Kubernetes 上的做法見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
 
 API 一定要放在另一個網域（例如 `https://api.clinic.example` 同時服務手機 App）時，就得跨來源：後端設定 CORS 白名單，要帶 cookie 時前端加 `credentials: 'include'`，API 的網址用建置時的環境變數傳入，不寫死在程式裡。
 
+伺服器要回哪些標頭、preflight 的完整規則，見後端的 [CORS、Cookie 與同源](#/skill/cors-cookies)。
+
 ## 一段可以跑的判斷
+
+在 Console 執行 `location.origin` 看目前頁面的 origin；`new URL(網址).origin` 看任意網址的 origin。
 
 下面用 `URL` 物件照上面的規則判斷：網址解析成什麼、和頁面同不同源、`fetch` 預設會不會帶 cookie、需不需要 preflight（簡單請求的規則有簡化，完整條件見後端的課）：
 
@@ -175,33 +202,7 @@ console.log(analyze('https://clinic.example/appointments/42', { url: 'api/appoin
 
 最後一行是相對路徑少了開頭的 `/`：在 `/appointments/42` 這一頁送出 `fetch('api/appointments')`，網址會解析成 `/appointments/api/appointments`。
 
-## 實際程式碼
-
-### `vite.config.js`
-
-```js
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-
-export default defineConfig({
-  plugins: [vue()],
-  server: {
-    proxy: {
-      // /api 開頭的請求轉給本機的後端；瀏覽器只看到 localhost:5173
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        // 後端的路由沒有 /api 前綴時才需要：
-        // rewrite: (path) => path.replace(/^\/api/, ''),
-      },
-      // 叫號看板的即時更新
-      '/ws': { target: 'ws://localhost:8000', ws: true },
-    },
-  },
-})
-```
-
-### 共用的 API 函式
+## 共用的 API 函式
 
 ```js
 // src/api/client.js：所有請求都經過這裡
@@ -240,8 +241,7 @@ export async function api(path, { body, ...init } = {}) {
 // 使用：await api('/appointments?date=2026-11-20')
 ```
 
-
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 Console 的 CORS 訊息都以 `Access to fetch at '…' from origin '…' has been blocked by CORS policy:` 開頭，看後半段：
 
@@ -253,11 +253,9 @@ Console 的 CORS 訊息都以 `Access to fetch at '…' from origin '…' has be
 | `The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.` | 前端 `credentials: 'include'`，後端回 `*` | 後端改成比對白名單、回確切的 origin |
 | `res.headers.get('X-Total-Count')` 是 `null`，Network 卻看得到這個標頭 | 跨來源，後端沒有 `Access-Control-Expose-Headers` | 後端加上；或改成同源 |
 | `res.status` 是 `0`，`res.json()` 丟出 `SyntaxError: Unexpected end of JSON input` | 用了 `mode: 'no-cors'`，回應變成讀不到內容的 opaque response | 拿掉 `mode: 'no-cors'`，回到上面幾列處理 |
-| `SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON` | 請求打到前端的 `index.html`：proxy 沒設定、路徑少了 `/api` 或開頭的 `/`，SPA fallback 回了 HTML | 檢查 Network 裡的 Request URL 與 proxy 規則 |
 | 終端機出現 `http proxy error: /api/appointments` 與 `Error: connect ECONNREFUSED 127.0.0.1:8000` | 後端沒啟動，或 port 不對 | 啟動後端、核對 `target`；錯誤裡的位址是 `::1` 時，代表 `localhost` 解析成 IPv6、後端只聽 IPv4，`target` 改成 `http://127.0.0.1:8000` |
 | 後端回 404，log 裡的路徑少了 `/api` | `rewrite` 拿掉了前綴，後端的路由卻有 `/api` | 拿掉 `rewrite` |
 | 登入成功，之後的 API 都回 401 | 跨來源請求沒帶 cookie | 改成同源；或前端 `include`、後端允許憑證、cookie 的 `SameSite` 與 `Secure` 正確 |
-
 
 ## 動手
 

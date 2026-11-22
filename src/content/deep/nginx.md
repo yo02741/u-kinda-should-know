@@ -1,10 +1,10 @@
-## 從一個具體問題開始：加了 nginx 之後的三個錯
+## 加了 nginx 的第一天：404、413、502
 
-一個前後端分離的服務，前端是 SPA 的靜態檔，後端 API 用 uvicorn 跑在 8000 埠。上線前在最前面放了一台 nginx，設定寫好、`nginx -t` 通過、重新載入。第一天就收到三種回報：
+前端是 SPA 的靜態檔，後端 API 用 uvicorn 跑在 8000 埠，最前面放一台 nginx。設定寫好、`nginx -t` 通過、重新載入，第一天收到三種回報：
 
 **第一個：API 全部 404。** 後端的路由是 `/users`、`/orders`，nginx 設定是 `location /api/ { proxy_pass http://127.0.0.1:8000; }`。後端的 access log 裡收到的請求是 `GET /api/users`，多了一個 `/api`。
 
-**第二個：上傳大頭貼失敗。** 瀏覽器看到 `413 Request Entity Too Large`，後端完全沒有收到請求。nginx 的 error log：
+**第二個：上傳大頭貼失敗。** 瀏覽器看到 `413 Request Entity Too Large`，後端沒有收到請求。nginx 的 error log：
 
 ```text
 2026/10/20 10:02:17 [error] 1290#1290: *5521 client intended to send too large body: 3481925 bytes, client: 203.0.113.7, server: shop.example.com, request: "POST /api/avatar HTTP/1.1", host: "shop.example.com"
@@ -16,32 +16,17 @@
 2026/10/20 11:30:02 [error] 1290#1290: *6012 connect() failed (111: Connection refused) while connecting to upstream, client: 203.0.113.7, server: shop.example.com, request: "GET /api/orders HTTP/1.1", upstream: "http://127.0.0.1:8000/api/orders", host: "shop.example.com"
 ```
 
-三個問題分別來自 `proxy_pass` 結尾的斜線、`client_max_body_size` 的預設值（1 MB），以及只有一個後端、部署時它不在。這一課先講 nginx 怎麼處理一個請求，再逐一講 `location` 比對、`proxy_pass`、轉送標頭、upstream、逾時、靜態檔、TLS，最後整理 502 / 504 的 log。
-
-## 反向代理在做什麼
+## 反向代理：兩條連線，先選 server 再選 location
 
 ```text
 瀏覽器 ──HTTPS──▶ nginx :443 ──HTTP──▶ uvicorn :8000
          連線 1                 連線 2
 ```
 
-客戶端只和 nginx 建立連線；nginx 讀完請求，**自己另外開一條連線**（或重用一條）送給後端，拿到回應再轉回去。這兩條連線各自獨立，帶來幾個結果：
+客戶端只和 nginx 建立連線；nginx 讀完請求，**另外開一條連線**（或重用一條）送給後端，拿到回應再轉回去。兩條連線各自獨立：
 
-- 後端看到的連線來源是 nginx，不是客戶端；客戶端的 IP、原本的網域、是不是 HTTPS，都要靠 nginx 用標頭轉告（後面的 `proxy_set_header`）。
-- 每一條連線都有自己的逾時；任何一段逾時，客戶端就會看到錯誤。
-- nginx 預設會**緩衝**請求本體與回應：上傳慢的客戶端由 nginx 慢慢收完再一次送給後端，後端的 worker 不會被慢速客戶端拖住。
-
-nginx 由一個 master 行程與數個 worker 行程組成。`nginx -s reload`（或 `systemctl reload nginx`）讓 master 讀新設定、啟動新的 worker，舊的 worker 把手上的連線處理完才結束，所以重新載入不會中斷進行中的請求。設定寫錯時，master 會拒絕新設定、繼續用舊的跑，所以**永遠先 `nginx -t` 再 reload**：
-
-```bash
-$ sudo nginx -t
-nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
-nginx: configuration file /etc/nginx/nginx.conf test is successful
-$ sudo systemctl reload nginx
-```
-
-## 設定檔的結構
-
+- 後端看到的連線來源是 nginx；客戶端的 IP、原本的網域、是不是 HTTPS，都要靠 nginx 用 `proxy_set_header` 轉告。
+- 每條連線有自己的逾時；任何一段逾時，客戶端就看到錯誤。
 ```nginx
 http {                                  # HTTP 相關的全域設定
     server {                            # 一個虛擬主機：依 listen 的埠與 server_name 選
@@ -55,7 +40,70 @@ http {                                  # HTTP 相關的全域設定
 }
 ```
 
-一個請求進來，nginx 先依**埠**與 `Host` 標頭選 `server`（都對不上時用那個埠的 `default_server`，沒有標示就用第一個），再依**路徑**選 `location`。多數發行版把站台設定放在 `/etc/nginx/conf.d/*.conf` 或 `sites-enabled/`，由主設定檔 `include` 進來。
+請求進來，nginx 先依**埠**與 `Host` 標頭選 `server`，再依**路徑**選 `location`：前綴取最長的，regex 可能蓋過前綴（完整規則見選讀，或在 [NginxLab](#/lab/NginxLab) 切換路徑看結果）。
+
+## `proxy_pass` 結尾的斜線決定後端收到的路徑
+
+開頭的 404 出在這裡：
+
+- `proxy_pass` 的位址**沒有 URI 部分**（`http://127.0.0.1:8000`），請求的路徑**原封不動**送給後端。
+- `proxy_pass` 的位址**有 URI 部分**（哪怕只是一個 `/`，例如 `http://127.0.0.1:8000/`），請求路徑中**符合 location 的那一段，會被換成這個 URI**。
+
+| location | proxy_pass | 請求 `/api/users?id=7` 送給後端的是 |
+|---|---|---|
+| `/api/` | `http://app:8000` | `/api/users?id=7`（原樣） |
+| `/api/` | `http://app:8000/` | `/users?id=7`（`/api/` 換成 `/`） |
+| `/api/` | `http://app:8000/v1/` | `/v1/users?id=7` |
+| `/api` | `http://app:8000/` | `//users?id=7`（`/api` 換成 `/`，多出一個斜線） |
+
+後端路由本身有 `/api` 前綴，用第一種；沒有，用第二種。location 與 proxy_pass 的結尾斜線要成對出現，第四列是常見的「少一個斜線」錯誤；`location /api` 也會比對到 `/apiary` 這種路徑。
+
+```python run
+# 模擬 proxy_pass 怎麼改寫請求路徑
+def upstream_uri(location, proxy_pass, request):
+    path, _, query = request.partition("?")
+    rest = proxy_pass.split("://", 1)[1]
+    uri_part = rest[rest.find("/"):] if "/" in rest else None   # host:port 之後的部分
+    if uri_part is None:
+        new_path = path                                # 沒有 URI：原樣轉送
+    else:
+        new_path = uri_part + path[len(location):]     # 有 URI：location 比對到的那段被取代
+    return new_path + ("?" + query if query else "")
+
+cases = [
+    ("/api/", "http://app:8000"),
+    ("/api/", "http://app:8000/"),
+    ("/api/", "http://app:8000/v1/"),
+    ("/api",  "http://app:8000/"),
+]
+for loc, target in cases:
+    print(f"location {loc:<6} proxy_pass {target:<22} -> {upstream_uri(loc, target, '/api/users?id=7')}")
+```
+
+## 最小的 location 設定與兩個常見錯誤
+
+不設定時，nginx 送給後端的 `Host` 是 `proxy_pass` 裡的名字（`$proxy_host`，例如 `127.0.0.1:8000`），而且用 HTTP/1.0、`Connection: close`。一般這樣設：
+
+```nginx
+location /api/ {
+    proxy_pass http://api_backend;
+    proxy_http_version 1.1;                    # 對後端用 HTTP/1.1（keepalive、串流需要）
+    proxy_set_header Connection "";            # 清掉 Connection，讓 upstream keepalive 生效
+    proxy_set_header Host              $host;                       # 原本的網域
+    proxy_set_header X-Real-IP         $remote_addr;                # 連到 nginx 的 IP
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;  # 原有的 XFF 再加上 $remote_addr
+    proxy_set_header X-Forwarded-Proto $scheme;                     # http 或 https
+}
+```
+
+改完**先 `nginx -t` 再 reload**；設定寫錯時 nginx 拒絕新設定、繼續用舊的跑。開頭另外兩個錯誤：
+
+| error log 片段 | 狀態碼 | 原因 | 修法 |
+|---|---|---|---|
+| `client intended to send too large body` | 413 | 請求本體超過 `client_max_body_size`（預設 1m） | 在上傳的 `location` 放大，例如 `client_max_body_size 20m;` |
+| `connect() failed (111: Connection refused) while connecting to upstream` | 502 | 後端沒在聽：只有一個後端，部署時它不在 | 多個後端逐一更新（選讀的 upstream） |
+
+:::stop 讀到這裡可以先停：看得懂設定檔的結構，判斷得出 `proxy_pass` 轉成什麼路徑，寫得出把原始 Host 與 IP 轉給後端的 location。後面的 `location` 比對規則、轉送標頭的細節、upstream、逾時、靜態檔、TLS 與 502／504，在路徑被別的 location 接走、要加第二台後端、開 HTTPS 或查錯誤時再回來讀。
 
 ## `location` 的比對規則
 
@@ -113,63 +161,7 @@ for uri in ["/health", "/healthz", "/static/app.css", "/img/logo.PNG", "/api/use
 
 注意 `/api/avatar.png`：它被圖片的 regex 接走，不會送到後端。這種情況把 API 改成 `location ^~ /api/` 就能避免。
 
-## `proxy_pass` 結尾的斜線
-
-開頭的第一個問題就在這裡。規則只有一條：
-
-- `proxy_pass` 的位址**沒有 URI 部分**（`http://127.0.0.1:8000`），請求的路徑**原封不動**送給後端。
-- `proxy_pass` 的位址**有 URI 部分**（哪怕只是一個 `/`，例如 `http://127.0.0.1:8000/`），請求路徑中**符合 location 的那一段，會被換成這個 URI**。
-
-| location | proxy_pass | 請求 `/api/users?id=7` 送給後端的是 |
-|---|---|---|
-| `/api/` | `http://app:8000` | `/api/users?id=7`（原樣） |
-| `/api/` | `http://app:8000/` | `/users?id=7`（`/api/` 換成 `/`） |
-| `/api/` | `http://app:8000/v1/` | `/v1/users?id=7` |
-| `/api` | `http://app:8000/` | `//users?id=7`（`/api` 換成 `/`，多出一個斜線） |
-
-選哪一種取決於後端的路由：後端路由本身就有 `/api` 前綴，用第一種；沒有，用第二種。location 與 proxy_pass 的結尾斜線要成對出現，第四列是常見的「少一個斜線」錯誤；而且 `location /api` 也會比對到 `/apiary` 這種路徑。
-
-可以用下面這段驗證：
-
-```python run
-# 模擬 proxy_pass 怎麼改寫請求路徑
-def upstream_uri(location, proxy_pass, request):
-    path, _, query = request.partition("?")
-    rest = proxy_pass.split("://", 1)[1]
-    uri_part = rest[rest.find("/"):] if "/" in rest else None   # host:port 之後的部分
-    if uri_part is None:
-        new_path = path                                # 沒有 URI：原樣轉送
-    else:
-        new_path = uri_part + path[len(location):]     # 有 URI：location 比對到的那段被取代
-    return new_path + ("?" + query if query else "")
-
-cases = [
-    ("/api/", "http://app:8000"),
-    ("/api/", "http://app:8000/"),
-    ("/api/", "http://app:8000/v1/"),
-    ("/api",  "http://app:8000/"),
-]
-for loc, target in cases:
-    print(f"location {loc:<6} proxy_pass {target:<22} -> {upstream_uri(loc, target, '/api/users?id=7')}")
-```
-
-regex location 裡的 `proxy_pass` 不能帶 URI 部分，`nginx -t` 會報 `"proxy_pass" cannot have URI part in location given by regular expression, or inside named location, …`；這種情況要改寫路徑時用 `rewrite`。
-
-## `proxy_set_header`：把原始資訊轉給後端
-
-不設定時，nginx 送給後端的 `Host` 是 `proxy_pass` 裡的名字（`$proxy_host`，例如 `127.0.0.1:8000`），而且用 HTTP/1.0、`Connection: close`。一般會設定：
-
-```nginx
-location /api/ {
-    proxy_pass http://api_backend;
-    proxy_http_version 1.1;                    # 對後端用 HTTP/1.1（keepalive、串流需要）
-    proxy_set_header Connection "";            # 清掉 Connection，讓 upstream keepalive 生效
-    proxy_set_header Host              $host;                       # 原本的網域
-    proxy_set_header X-Real-IP         $remote_addr;                # 連到 nginx 的 IP
-    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;  # 原有的 XFF 再加上 $remote_addr
-    proxy_set_header X-Forwarded-Proto $scheme;                     # http 或 https
-}
-```
+## 轉送標頭的細節：信任、繼承與 WebSocket
 
 | 後端少了它會怎樣 | 標頭 |
 |---|---|
@@ -200,7 +192,22 @@ location /ws/ {
 }
 ```
 
-:::stop 讀到這裡可以先停：看得懂設定檔的結構，判斷得出請求走哪個 `location`、`proxy_pass` 轉成什麼路徑，讓後端拿到原始的 Host 與 IP。後面的 upstream、逾時、靜態檔、TLS 與 502／504，在要加第二台後端、開 HTTPS 或查錯誤時再回來讀。
+## 緩衝、reload 與 regex location 的 `proxy_pass`
+
+選 `server` 時埠與 `Host` 都對不上，用那個埠的 `default_server`，沒有標示就用第一個。多數發行版把站台設定放在 `/etc/nginx/conf.d/*.conf` 或 `sites-enabled/`，由主設定檔 `include` 進來。
+
+nginx 預設會**緩衝**請求本體與回應：上傳慢的客戶端由 nginx 慢慢收完再一次送給後端，後端的 worker 不會被慢速客戶端拖住。
+
+nginx 由一個 master 行程與數個 worker 行程組成。`nginx -s reload`（或 `systemctl reload nginx`）讓 master 讀新設定、啟動新的 worker，舊的 worker 把手上的連線處理完才結束，所以重新載入不會中斷進行中的請求。設定寫錯時，master 會拒絕新設定、繼續用舊的跑，所以**永遠先 `nginx -t` 再 reload**：
+
+```bash
+$ sudo nginx -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+$ sudo systemctl reload nginx
+```
+
+regex location 裡的 `proxy_pass` 不能帶 URI 部分，`nginx -t` 會報 `"proxy_pass" cannot have URI part in location given by regular expression, or inside named location, …`；這種情況要改寫路徑時用 `rewrite`。
 
 ## upstream 與負載平衡
 

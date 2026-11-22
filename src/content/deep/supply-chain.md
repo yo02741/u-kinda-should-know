@@ -1,16 +1,10 @@
-## 從一個具體問題開始：沒有人改過程式碼，CI 卻送出了環境變數
+## 沒有人改過程式碼，CI 卻送出了環境變數
 
-週一早上的 CI 和上週五跑的是同一個 commit，沒有人改過任何一行程式碼。但這次的建置多了一個對外連線：某個間接依賴（依賴的依賴）在週末發布了新的 patch 版本，安裝腳本會讀取環境變數並送到外部伺服器。專案的依賴宣告寫的是 `^2.1.0`，沒有 lock 檔，CI 每次都重新解析版本，於是自動裝到了新版。CI 的環境變數裡有部署用的雲端金鑰。
+週一早上的 CI 和上週五跑的是同一個 commit。這次的建置多了一個對外連線：某個間接依賴（依賴的依賴）在週末發布了新的 patch 版本，安裝腳本會讀取環境變數並送到外部伺服器。專案的依賴宣告寫的是 `^2.1.0`，沒有 lock 檔，CI 每次重新解析版本，自動裝到了新版。CI 的環境變數裡有部署用的雲端金鑰。
 
-這不是假設情境的極端版本。公開紀錄過的事件包括：
+專案自己寫的程式碼通常只佔最終執行內容的一小部分，其餘來自套件、base image、CI 的第三方 action、建置工具，權限和你的程式一樣。
 
-- **event-stream（2018）**：熱門 npm 套件的維護權被轉交給陌生人，新維護者加入一個惡意的依賴，目標是特定的加密貨幣錢包應用程式。
-- **ua-parser-js（2021）**：維護者的 npm 帳號被盜，攻擊者發布了夾帶挖礦程式與竊密程式的版本。
-- **xz-utils（2024，CVE-2024-3094）**：攻擊者花了很長時間成為共同維護者，在發布的原始碼壓縮檔裡植入後門，被一位工程師因為 SSH 登入變慢而發現。
-
-專案自己寫的程式碼通常只佔最終執行內容的一小部分，其餘來自套件、base image、CI 的第三方 action、建置工具。它們都在你的信任範圍內執行，擁有和你的程式一樣的權限。
-
-## 運作原理：風險從哪裡來
+## 風險從哪裡來，各用什麼對策
 
 | 風險 | 怎麼發生 | 主要對策 |
 |---|---|---|
@@ -24,22 +18,58 @@
 | 建置過程被竄改 | CI 環境、建置工具被入侵，產物和原始碼不一致 | 可重現建置、來源證明（provenance）、簽章 |
 | base image 與 CI action | image 裡的系統套件有漏洞；第三方 action 的 tag 被移到惡意 commit | image 掃描與定期重建；action 釘 commit SHA |
 
-可以把它分成兩個問題：**我裝的是不是我以為的東西**（完整性、來源）與**我以為的東西本身有沒有問題**（漏洞、惡意）。lock 檔與簽章回答前者，掃描與審查回答後者。
+分成兩個問題：**我裝的是不是我以為的東西**（完整性、來源），lock 檔與簽章回答；**我以為的東西本身有沒有問題**（漏洞、惡意），掃描與審查回答。每種風險被哪道防線擋下，可以在實驗室 [一個相依套件出問題時](#/lab/SupplyChainLab) 操作。
 
-### lock 檔與雜湊驗證
+## 最小的設定：lock 檔加 CI 嚴格安裝
 
-依賴宣告（`pyproject.toml`、`package.json`）寫的是**範圍**：`requests>=2.31`、`^2.1.0`。每次解析都可能得到不同的版本。lock 檔記錄的是解析結果：每個套件（包含間接依賴）的**確切版本**與**檔案雜湊**。
+依賴宣告（`pyproject.toml`、`package.json`）寫的是**範圍**：`requests>=2.31`、`^2.1.0`，每次解析可能得到不同的版本。lock 檔記錄解析結果：每個套件（包含間接依賴）的**確切版本**與**檔案雜湊**。
 
 | 生態 | lock 檔 | CI 用的安裝方式 |
 |---|---|---|
 | uv | `uv.lock` | `uv sync --locked`：lock 檔和 `pyproject.toml` 不一致就失敗 |
-| pip | `requirements.txt`（含 `--hash=sha256:…`，可用 `pip-compile --generate-hashes` 或 `uv pip compile --generate-hashes` 產生） | `pip install --require-hashes -r requirements.txt` |
 | npm | `package-lock.json` | `npm ci`：照 lock 檔安裝，和 `package.json` 不一致就失敗 |
-| pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
 
-雜湊驗證的意思：安裝工具下載檔案後算 SHA-256，和 lock 檔記錄的值比對，不符就拒絕安裝。套件庫上同一個版本的檔案若被替換，或下載過程被竄改，都會被擋下。lock 檔本身要進版控，它的變更要在 PR 裡被審查（工具產生的大量 diff 很容易被略過）。
+pip 與 pnpm 的對應寫法見選讀。雜湊驗證：安裝工具下載檔案後算 SHA-256，和 lock 檔記錄的值比對，不符就拒絕安裝。套件庫上同一個版本的檔案被替換，或下載過程被竄改，都會被擋下。lock 檔要進版控，變更要在 PR 裡審查。
 
 lock 檔防的是「之後裝到不一樣的東西」，**不防第一次就鎖進惡意版本**。新增或升級依賴的那一刻是審查點。
+
+CI 的步驟（指令以各工具文件為準）：
+
+```yaml
+# GitHub Actions 片段：lock 檔安裝、漏洞掃描、image 掃描
+permissions:
+  contents: read
+steps:
+  - uses: actions/checkout@<commit-sha>
+  - run: uv sync --locked                 # lock 檔與 pyproject 不一致就失敗
+  - run: uvx pip-audit                    # 掃描已安裝的 Python 依賴
+  - run: docker build -t app:${{ github.sha }} .
+  # image 掃描（Trivy、Grype 等）與 SBOM 產生，有高風險漏洞時讓建置失敗
+```
+
+常見的兩個錯誤：
+
+| 現象或訊息 | 原因 | 修正 |
+|---|---|---|
+| `npm ci` 失敗，說 `package.json` 和 lock 檔不同步 | 有人改了依賴宣告但沒更新並提交 lock 檔 | 本機 `npm install` 更新 lock 檔後提交；CI 維持 `npm ci` |
+| `uv sync --locked` 失敗，說 lock 檔需要更新 | `pyproject.toml` 改了但 `uv.lock` 沒跟著改 | 本機執行 `uv lock` 後提交 |
+
+:::stop 讀到這裡可以先停：知道風險從哪裡來，會用 lock 檔固定版本與雜湊，並在 CI 用嚴格模式安裝、跑漏洞掃描。後面的公開事件、掃描工具、SBOM、簽章、映像與 CI action、更新策略，在要回答「我們哪裡用了這個套件」或整理 CI 的權限時再回來讀。
+
+## 公開紀錄過的事件
+
+- **event-stream（2018）**：熱門 npm 套件的維護權被轉交給陌生人，新維護者加入一個惡意的依賴，目標是特定的加密貨幣錢包應用程式。
+- **ua-parser-js（2021）**：維護者的 npm 帳號被盜，攻擊者發布了夾帶挖礦程式與竊密程式的版本。
+- **xz-utils（2024，CVE-2024-3094）**：攻擊者花了很長時間成為共同維護者，在發布的原始碼壓縮檔裡植入後門，被一位工程師因為 SSH 登入變慢而發現。
+
+## pip 與 pnpm 的 lock 檔
+
+| 生態 | lock 檔 | CI 用的安裝方式 |
+|---|---|---|
+| pip | `requirements.txt`（含 `--hash=sha256:…`，可用 `pip-compile --generate-hashes` 或 `uv pip compile --generate-hashes` 產生） | `pip install --require-hashes -r requirements.txt` |
+| pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
+
+## 漏洞掃描、SBOM、簽章
 
 ### 漏洞掃描
 
@@ -51,8 +81,6 @@ lock 檔防的是「之後裝到不一樣的東西」，**不防第一次就鎖�
 - **Trivy、Grype**：掃容器映像，包含系統套件與語言套件。
 
 掃描結果要判斷，不是看到就全部升級：漏洞所在的函式有沒有被用到、是否只影響開發依賴、修正版本有沒有破壞性變更。CI 的做法通常是「高風險且有修正版本」時讓建置失敗，其他的產生報告定期處理。
-
-:::stop 讀到這裡可以先停：知道風險從哪裡來，會用 lock 檔固定版本並在 CI 跑漏洞掃描。後面的 SBOM、簽章、映像與 CI action、更新策略，在要回答「我們哪裡用了這個套件」或整理 CI 的權限時再回來讀。
 
 ### SBOM
 
@@ -74,6 +102,8 @@ lock 檔的雜湊證明「這個檔案和當初鎖定的一樣」，不能證明
 - **SLSA**（Supply-chain Levels for Software Artifacts）：一個分級框架，描述建置流程要做到什麼程度（例如有來源證明、在受保護的建置平台上執行、建置過程難以被竄改），讓「供應鏈安全做到哪裡」有共同的語言。
 
 部署端的對應動作是**驗證**：只部署有合法簽章、來源證明指向自己 repo 的 image。Kubernetes 可以用 admission controller 落實這條規則。
+
+## 容器映像、CI action、更新策略、新增依賴的審查
 
 ### 容器映像與 CI action
 
@@ -100,7 +130,7 @@ lock 檔的雜湊證明「這個檔案和當初鎖定的一樣」，不能證明
 - 安裝時會執行什麼：有沒有 `postinstall`、是否只有 sdist 沒有 wheel。
 - 權限需求：一個字串處理套件為什麼需要網路與檔案系統？
 
-## 實際程式：比對 lock 檔、漏洞與相似名稱
+## 可以執行的程式：比對 lock 檔、漏洞與相似名稱
 
 下面用標準函式庫模擬 CI 裡的三個檢查：雜湊驗證、已知漏洞比對、typosquatting 偵測。漏洞資料是虛構的，格式參考 OSV 的版本範圍概念（`introduced` 與 `fixed`）。
 
@@ -161,26 +191,10 @@ for new in ["reqeusts", "pydantic", "python-dateutils", "fastapi-users", "nunpy"
 
 `fastapi-users` 是一個真實存在的獨立套件，和 `fastapi` 的編輯距離很大，所以沒被標記；名稱相似度只是第一道篩子，最後仍要人看。
 
-CI 裡的實際步驟大致是這樣（指令以各工具文件為準）：
-
-```yaml
-# GitHub Actions 片段：lock 檔安裝、漏洞掃描、image 掃描
-permissions:
-  contents: read
-steps:
-  - uses: actions/checkout@<commit-sha>
-  - run: uv sync --locked                 # lock 檔與 pyproject 不一致就失敗
-  - run: uvx pip-audit                    # 掃描已安裝的 Python 依賴
-  - run: docker build -t app:${{ github.sha }} .
-  # image 掃描（Trivy、Grype 等）與 SBOM 產生，有高風險漏洞時讓建置失敗
-```
-
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 現象或訊息 | 原因 | 修正 |
 |---|---|---|
-| `npm ci` 失敗，說 `package.json` 和 lock 檔不同步 | 有人改了依賴宣告但沒更新並提交 lock 檔 | 本機 `npm install` 更新 lock 檔後提交；CI 維持 `npm ci` |
-| `uv sync --locked` 失敗，說 lock 檔需要更新 | `pyproject.toml` 改了但 `uv.lock` 沒跟著改 | 本機執行 `uv lock` 後提交 |
 | pip 在 `--require-hashes` 模式下報 hash 不符 | 檔案被替換、下載到不同平台的 wheel，或 requirements 檔只記了部分平台的雜湊 | 先確認來源；重新產生含所有平台雜湊的檔案，不要直接拿掉 `--require-hashes` |
 | 漏洞掃描每次都有幾十項，大家開始忽略 | 沒有分級、沒有處理流程 | 只讓「高風險且有修正版」擋建置；其他定期排程處理，確認不受影響的寫下理由並標記 |
 | CI 有 lock 檔，Docker build 裡卻用 `pip install -r requirements.in` | image 裡裝的不是 lock 檔的版本 | Dockerfile 也用 lock 檔安裝（`uv sync --locked`、`npm ci`） |

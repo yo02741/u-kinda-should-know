@@ -1,6 +1,6 @@
-## 從一個具體問題開始：同一個早上的三件事
+## 同一個早上的三件事：拉不到、磁碟滿、離職同事還能推
 
-週一早上，`clinic-api` 的 pipeline 一直失敗。資訊室的 Dockerfile 從院內 Harbor 的 `base` 專案 `FROM` 一個含 Informix 用戶端的 Python 3.12 slim 基底映像，再從 ghcr.io 複製 uv 的執行檔（`COPY --from=ghcr.io/astral-sh/uv:0.11.32`）。兩個 job 的錯誤節錄如下（確切文字依版本而異）：
+週一早上，`clinic-api` 的 pipeline 一直失敗。資訊室的 Dockerfile 從院內 Harbor 的 `base` 專案 `FROM` 一個含 Informix 用戶端的 Python 3.12 slim 基底映像，再從 ghcr.io 複製 uv 的執行檔（`COPY --from=ghcr.io/astral-sh/uv:0.11.32`）。兩個 job 的錯誤（確切文字依版本而異）：
 
 ```text
 # build-base：每月重建基底映像，FROM python:3.12-slim
@@ -11,24 +11,20 @@ toomanyrequests: You have reached your unauthenticated pull rate limit. ...
 failed to resolve source metadata for ghcr.io/astral-sh/uv:0.11.32: ... dial tcp ...:443: i/o timeout
 ```
 
-第一個 job 拉 Docker Hub：全院經由同一個對外 IP 出去，未登入的拉取次數依來源 IP 計算，早上幾十條 pipeline 就用完了。第二個拉 ghcr.io，網路組上週收緊對外規則，它不在白名單裡。兩個 job 的 `image: docker:27` 與 `services: docker:27-dind` 也來自 Docker Hub，只是 Runner 上剛好有快取。
+第一個 job 拉 Docker Hub：全院經由同一個對外 IP 出去，未登入的拉取次數依來源 IP 計算，早上幾十條 pipeline 就用完。第二個拉 ghcr.io，網路組上週收緊對外規則，它不在白名單裡。
 
-有人想把 `python:3.12-slim` 手動推進 Harbor 救急，登入後又看到兩件事：
+有人登入 Harbor 想手動推 `python:3.12-slim` 救急，又看到兩件事：
 
 - 儲存空間用了 92%。`clinic/api` 有一萬一千多個 tag，三年來每次合併推一個，從沒刪過。
 - `clinic` 專案的成員裡有一位去年離職的同事，角色是 Developer，可以推送；CI 變數 `HARBOR_PASSWORD` 也是他的密碼。Harbor 用內建的資料庫帳號、沒接 AD，停用他的 AD 帳號影響不到這裡。
 
-| 現象 | 原因 | 本課的段落 |
-|---|---|---|
-| 建置拉不到外部映像 | `FROM`、`COPY --from`、CI 的 `image:` 直接指向外部 registry | 外部映像 |
-| 磁碟快滿 | 沒有保留規則；刪掉 tag 也不會馬上釋放空間 | 清理 |
-| 離職同事還能推送，CI 用他的密碼 | 本機帳號不隨 AD 停用；CI 用個人帳號 | Harbor 的模型、CI 推送 |
+| 現象 | 原因 |
+|---|---|
+| 建置拉不到外部映像 | `FROM`、`COPY --from`、CI 的 `image:` 直接指向外部 registry |
+| 磁碟快滿 | 沒有保留規則；刪掉 tag 也不會馬上釋放空間 |
+| 離職同事還能推送，CI 用他的密碼 | 本機帳號不隨 AD 停用；CI 用個人帳號 |
 
-明後年的 Kubernetes 叢集若是斷網或受限網路，三件事都會放大：節點拉不到外部映像，拉取用的憑證失效時，節點故障後重排的 Pod 起不來。
-
-image、tag、digest 與多架構映像在 [Docker：image、container、layer](#/skill/docker-basics)；映像掃描在 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)；SBOM 與簽章在 [依賴與供應鏈安全](#/skill/supply-chain)；弱點的優先序在 [資安維運](#/skill/security-operations)。這一課講 registry 本身怎麼設、怎麼管。
-
-## registry 存的是什麼
+## registry 存的是 manifest 與 layer，tag 只是名字
 
 ```text
 clinic/api:c2f81b6a ────┐
@@ -40,7 +36,7 @@ clinic/api:release-1.4.0 ┴─→ manifest sha256:c2f8…
                                  └─→ layer  sha256:0a9b…（程式碼）
 ```
 
-- registry 存的是 **manifest**（一份 JSON，列出設定檔與每一層的 digest）、config 與 layer。config 與 layer 統稱 blob，以內容的 SHA-256 為名存放。多架構映像多一層索引（image index，舊稱 manifest list），再指向每個架構的 manifest。
+- registry 存的是 **manifest**（一份 JSON，列出設定檔與每一層的 digest）、config 與 layer。config 與 layer 統稱 blob，以內容的 SHA-256 為名存放。
 - tag 是指向某個 manifest 或索引的名字，好幾個 tag 可以指向同一個 digest。
 - 拉取時，client 先向 `/v2/<repository>/manifests/<tag>` 要 manifest，再下載本機沒有的 blob。
 - 同一個 blob 在儲存空間裡只放一份，不管多少映像用到它。
@@ -48,14 +44,42 @@ clinic/api:release-1.4.0 ┴─→ manifest sha256:c2f8…
 由此推得三件事：
 
 1. 刪掉 tag 只拿掉名字。沒有 tag 的 manifest 成為 untagged artifact，blob 照樣在磁碟上，要等垃圾回收（garbage collection，GC）把沒有任何 manifest 參照的 blob 刪掉。
-2. 共用的 layer 不會因為刪掉一個映像而釋放。`clinic/api` 每個版本都帶著 130 MB 左右的基底層，磁碟上只有一份；刪掉一百個舊版本，釋放的多半只有程式碼層與換過版本的依賴層。
+2. 共用的 layer 不會因為刪掉一個映像而釋放。
 3. 介面上把每個映像的大小加起來，會遠大於實際占用的空間。
 
-院內有自己的 registry，外部故障、限流或防火牆改規則時，已經在院內的映像照樣拉得到；拉取走院內網路；誰推了什麼、誰拉過都有紀錄；斷網的叢集也只能靠它。
+## 最小的設定：專案、機器人帳號、登入與推送
 
-## Harbor 的模型：專案、成員與機器人帳號
+Harbor 是 CNCF 的開源 registry。三個設定就能推第一個映像：
 
-Harbor 是 CNCF 的開源 registry，在儲存映像之外加上權限、弱點掃描、保留規則、複製與代理快取。下面講設定的意義，以 Harbor 2.x 為準；選單位置與欄位名稱隨版本調整，以官方文件為準。
+1. **專案**：映像一定放在某個專案（project）底下，位址是 `harbor.example.org/<專案>/<repository>:<tag>`。私有專案只有成員能拉。
+2. **角色**：成員的角色從 Guest 起能拉取，Developer 起能推送。人員通常只需要 Guest。
+3. **機器人帳號**：推送交給機器人帳號（robot account）。它不能登入網頁介面，名稱是 `robot$<專案>+<名稱>`，建立時選權限與到期日，secret 只顯示一次。
+
+```bash
+# 單引號：帳號裡的 $ 不讓 shell 展開；密碼從 stdin 讀，不出現在指令列
+echo "$HARBOR_ROBOT_SECRET" | docker login -u 'robot$clinic-ci' --password-stdin harbor.example.org
+docker build --pull -t harbor.example.org/clinic/api:3f9c2a1b .
+docker push harbor.example.org/clinic/api:3f9c2a1b      # tag 用 commit SHA，不推 latest
+```
+
+最常見的兩個錯誤：
+
+| 訊息或現象 | 原因 | 怎麼修 |
+|---|---|---|
+| `unauthorized to access repository: clinic/api, action: push` | 沒有推送權限、機器人帳號過期或停用 | 看機器人帳號的權限與到期日 |
+| CI 的 `docker login` 失敗，同一組帳密在自己電腦上登得進去 | GitLab 把 `robot$clinic-ci` 裡的 `$clinic` 當成變數展開 | 取消勾選「Expand variable reference」，或寫成 `$$` |
+
+:::stop 讀到這裡可以先停：知道 registry 存的是 manifest 與 layer，會建專案與機器人帳號並推送映像。後面的 Harbor 權限模型、掃描與不可變 tag、清理、外部映像、CI 推送、叢集拉取與斷網搬運，在要分權限、磁碟快滿、Docker Hub 限流或準備斷網叢集時再回來讀。
+
+## Harbor 的權限模型：專案、成員與機器人帳號
+
+Harbor 在儲存映像之外加上權限、弱點掃描、保留規則、複製與代理快取。院內有自己的 registry，外部故障、限流或防火牆改規則時，已經在院內的映像照樣拉得到；拉取走院內網路；誰推了什麼、誰拉過都有紀錄；斷網的叢集也只能靠它。
+
+明後年的 Kubernetes 叢集若是斷網或受限網路，三件事都會放大：節點拉不到外部映像，拉取用的憑證失效時，節點故障後重排的 Pod 起不來。
+
+相關的課：image、tag、digest 與多架構映像在 [Docker：image、container、layer](#/skill/docker-basics)；映像掃描在 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)；SBOM 與簽章在 [依賴與供應鏈安全](#/skill/supply-chain)；弱點的優先序在 [資安維運](#/skill/security-operations)。
+
+下面講設定的意義，以 Harbor 2.x 為準；選單位置與欄位名稱隨版本調整，以官方文件為準。
 
 ### 專案與角色
 
@@ -120,8 +144,6 @@ Failed to process request due to 'clinic/api:release-1.4.0' configured as immuta
 ```
 
 `release-*` 適合設成不可變。每個 commit 的 SHA tag 不要設：不可變的 artifact 刪不掉，保留規則也清不掉，磁碟會一直長。
-
-:::stop 讀到這裡可以先停：知道 registry 存的是 manifest 與 layer，會用 Harbor 的專案、角色與機器人帳號分權限，設好推送後掃描。後面的清理、外部映像、CI 推送、叢集拉取與斷網搬運，在磁碟快滿、Docker Hub 限流或要準備斷網叢集時再回來讀。
 
 ## 清理：保留規則、垃圾回收與配額
 
@@ -261,7 +283,18 @@ print(f"這個 repository 自己的層總共 {total:.1f} MB（不含 base 專案
 
 ### 垃圾回收
 
-依 Harbor 的文件：垃圾回收刪掉不再被任何 manifest 參照的 blob，可以勾選先刪除 untagged artifact；dry run 列出可刪的 blob 並估算能釋放的空間；最近 2 小時內上傳的 blob 不會被刪，避免刪到正在推送的映像；執行期間照樣可以推送與拉取（很舊的版本要先切唯讀）。開頭那一萬一千個 tag，第一次清理依序做保留規則 dry run、執行、垃圾回收 dry run、執行；之後排成每週固定時段，保留規則先、垃圾回收後。
+依 Harbor 的文件，垃圾回收的行為：
+
+| 項目 | 行為 |
+|---|---|
+| 刪什麼 | 不再被任何 manifest 參照的 blob；可以勾選先刪除 untagged artifact |
+| dry run | 列出可刪的 blob 並估算能釋放的空間 |
+| 保護期 | 最近 2 小時內上傳的 blob 不會被刪，避免刪到正在推送的映像 |
+| 執行期間 | 照樣可以推送與拉取（很舊的版本要先切唯讀） |
+
+開頭那一萬一千個 tag，第一次清理依序做保留規則 dry run、執行、垃圾回收 dry run、執行；之後排成每週固定時段，保留規則先、垃圾回收後。
+
+`clinic/api` 每個版本都帶著 130 MB 左右的基底層，磁碟上只有一份；刪掉一百個舊版本，釋放的多半只有程式碼層與換過版本的依賴層。
 
 ### 配額
 
@@ -274,6 +307,8 @@ adding 85.3 MiB of storage resource, which when updated to current usage of 49.9
 配額依專案計算，同一個 blob 被兩個專案用到時各算一次，加總可能大於實際磁碟用量。整座 Harbor 的磁碟用量與成長速度仍要另外監控，見 [硬體資源與容量規劃](#/skill/capacity-planning)。
 
 ## 外部映像：拉取次數、代理快取與同步
+
+開頭兩個 job 的 `image: docker:27` 與 `services: docker:27-dind` 也來自 Docker Hub，只是 Runner 上剛好有快取。
 
 ### Docker Hub 與其他公開 registry
 
@@ -546,6 +581,8 @@ print(f"\n要同步進院內的外部映像：{len(to_sync)} 個；用 latest �
 
 ### 複製：保留 digest 與多架構
 
+多架構映像多一層索引（image index，舊稱 manifest list），再指向每個架構的 manifest。
+
 skopeo 與 crane 都不需要 Docker daemon，直接在 registry 之間搬 manifest 與 blob。指令只示意，旗標以各工具的文件為準：
 
 ```bash
@@ -599,8 +636,6 @@ Kubernetes 升級前，新版本的控制平面映像、相容版本的 CNI、CS
 | 訊息或現象 | 原因 | 怎麼修 |
 |---|---|---|
 | `toomanyrequests: You have reached your … pull rate limit` | Docker Hub 的拉取次數用完 | 改走代理快取，endpoint 用 Docker Hub 帳號 |
-| `unauthorized to access repository: clinic/api, action: push` | 沒有推送權限、機器人帳號過期或停用 | 看機器人帳號的權限與到期日 |
-| CI 的 `docker login` 失敗，同一組帳密在自己電腦上登得進去 | GitLab 把 `robot$clinic-ci` 裡的 `$clinic` 當成變數展開 | 取消勾選「Expand variable reference」，或寫成 `$$` |
 | `… configured as immutable.` | 不可變的 tag 不能重推 | 用新的版本號 |
 | `… cannot be pulled due to configured policy in 'Prevent images with vulnerability severity of "High" or higher from running.'` | 有該等級以上的弱點；或還沒掃、掃描失敗 | 重建以拉到修補過的基底；不受影響的加進 allowlist |
 | 用 digest 釘版本的映像拉取時 `manifest unknown` | 複製時沒有帶多架構索引 | `skopeo copy --all --preserve-digests` 或 `crane copy` 重新複製，比對 digest |

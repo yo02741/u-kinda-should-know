@@ -1,4 +1,4 @@
-## 從一個具體問題開始：`npm run build` 過了，病患姓名一片空白
+## 具體問題：`npm run build` 過了，病患姓名一片空白
 
 「今日門診」頁的預約卡片是 AI 產生的。`npm run dev` 正常、`npm run build` 成功、Console 沒有紅字，上線後卻有三個問題：
 
@@ -42,11 +42,9 @@ src/AppointmentCard.vue(17,14): error TS2367: This comparison appears to be unin
 
 `npx eslint .` 抓到第 3 個問題的原因，子元件直接改了父元件傳進來的物件：`Unexpected mutation of "appt" prop  vue/no-mutating-props`。emit 的參數傳成了號碼（number），父元件拿號碼去呼叫取消的 API，也會失敗。
 
-專案有型別檢查，CI 裡跑的是 `tsc --noEmit`：`tsc` 不處理 `.vue` 檔，整個元件不在檢查範圍裡，所以永遠是綠的。專案也有 ESLint，但設定還是舊範本留下的 `.eslintrc.cjs`，升到 ESLint 10 之後一執行就停在 `ESLint couldn't find an eslint.config.* file.`，有人把那一步從 CI 拿掉了。
+CI 裡跑的型別檢查是 `tsc --noEmit`，`tsc` 不處理 `.vue` 檔，所以永遠是綠的。ESLint 的設定還是舊範本留下的 `.eslintrc.cjs`，升到 ESLint 10 之後一執行就報錯，有人把那一步從 CI 拿掉了。
 
-## 運作原理
-
-### 三個工具各管一件事
+## 三個工具各管一件事：格式、寫法、型別
 
 | 工具 | 管什麼 | 例子 | 指令 |
 |---|---|---|---|
@@ -54,82 +52,11 @@ src/AppointmentCard.vue(17,14): error TS2367: This comparison appears to be unin
 | ESLint（加 eslint-plugin-vue、typescript-eslint） | 寫法 | 改 props、`v-for` 沒 `key`、`v-if` 與 `v-for` 混用、`any`、沒用到的變數 | `eslint .` |
 | `vue-tsc` | 型別 | 拼錯的欄位、傳錯型別的 prop 與 emit、比較永遠不成立 | `vue-tsc --build` 或 `vue-tsc --noEmit` |
 
-Vite 在開發與建置時只把 TypeScript 轉成 JavaScript，不檢查型別，所以 `npm run dev` 與 `vite build` 都不會因為型別錯誤停下來。型別檢查要另外跑；create-vue 3.24 產生的 `build` 指令是 `run-p type-check "build-only {@}" --`，把 `vue-tsc --build` 與 `vite build` 並行執行。
+Vite 在開發與建置時只把 TypeScript 轉成 JavaScript，不檢查型別，所以 `npm run dev` 與 `vite build` 都不會因為型別錯誤停下來。型別檢查要另外跑。
 
-### ESLint 10 的 flat config
+## 最小設定：`eslint.config.js`
 
-ESLint 9 把預設的設定檔換成 `eslint.config.js`（flat config），ESLint 10 完全移除舊的 `.eslintrc.*`：即使設了 `ESLINT_USE_FLAT_CONFIG=false`，ESLint 10.15 仍然只找 `eslint.config.*`。
-
-flat config 是一個陣列，每個元素是一組設定，ESLint 對每個檔案由前往後套用符合的設定，後面的覆蓋前面的：
-
-```text
-export default defineConfig([
-  { files: ['**/*.{vue,js}'] },        ← 要檢查哪些檔
-  globalIgnores(['**/dist/**']),       ← 全部略過的路徑
-  js.configs.recommended,              ← JavaScript 的基本規則
-  ...pluginVue.configs['flat/essential'],   ← Vue 的規則（本身是好幾組設定，所以要展開）
-  { rules: { 'vue/no-v-html': 'error' } },  ← 自己的調整，放在後面才蓋得過前面
-  skipFormatting,                      ← 最後：關掉所有和 Prettier 衝突的格式規則
-])
-```
-
-每條規則的嚴重度是 `off`、`warn`、`error`。`error` 讓 `eslint` 以非 0 的代碼結束，CI 就會失敗；`warn` 只印出來。要讓警告也擋下 CI，加 `--max-warnings 0`。想知道某個檔案最後套用了哪些規則：`npx eslint --print-config src/App.vue`。
-
-### eslint-plugin-vue 的三個組合
-
-eslint-plugin-vue 10.12.1 的 Vue 3 組合，數字是實際數過的規則數：
-
-| 組合 | 規則數 | 內容 | 例子 |
-|---|---|---|---|
-| `flat/essential` | 85 | 會造成錯誤或非預期行為的寫法 | `vue/no-mutating-props`、`vue/require-v-for-key`、`vue/no-use-v-if-with-v-for`、`vue/no-side-effects-in-computed-properties`、`vue/no-ref-as-operand`、`vue/no-deprecated-destroyed-lifecycle`、`vue/multi-word-component-names` |
-| `flat/strongly-recommended` | 再加 25 | 可讀性，大多是模板的格式 | `vue/html-indent`、`vue/html-quotes`、`vue/max-attributes-per-line`、`vue/attribute-hyphenation` |
-| `flat/recommended` | 再加 8 | 一致性與少用的寫法 | `vue/attributes-order`、`vue/block-order`、`vue/no-v-html`、`vue/this-in-template` |
-
-`flat/essential` 是底線，AI 產出的元件最常踩的幾種錯（改 props、`v-for` 沒 `key`、Vue 2 的生命週期名稱）都在裡面，完整清單見 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes)。`strongly-recommended` 多出來的規則大部分是格式，和 Prettier 重疊；用了 Prettier 時，把 `eslint-config-prettier/flat` 放在設定陣列的最後，這些規則就會被關掉。`vue/no-v-html` 在 `recommended` 才有，專案有用到 `v-html` 時值得單獨打開：`v-html` 插入的字串不會被跳脫，是 XSS 的常見來源。
-
-### TypeScript：`.vue` 要交給 vue-tsc
-
-`tsc` 只認得 `.ts`、`.tsx`、`.js` 這類副檔名，`.vue` 不在它的範圍裡。`vue-tsc` 用 Vue 的語言工具把 SFC 轉成 TypeScript 看得懂的形式，`<script setup lang="ts">` 與模板裡的運算式一起檢查：`{{ appt.patientNmae }}` 會被當成「存取 `Appointment` 型別上不存在的屬性」。實測同一個專案，`tsc --noEmit` 沒有任何輸出，`vue-tsc --build` 列出上面四個錯並以代碼 1 結束。
-
-兩種常見的執行方式：
-
-| 指令 | 用在哪裡 |
-|---|---|
-| `vue-tsc --build` | create-vue 的範本：根目錄的 `tsconfig.json` 用 `references` 指向 `tsconfig.app.json`、`tsconfig.node.json`，`--build` 逐一檢查 |
-| `vue-tsc --noEmit` | 單一 `tsconfig.json` 的專案 |
-
-TypeScript 的版本要注意：vue-tsc 3.3 用的是 TypeScript 的 JavaScript API，TypeScript 7.0 的 `typescript` 套件已經不提供這套 API。實測 vue-tsc 3.3.14 搭配 typescript 7.0.2，一啟動就丟出 `Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './lib/tsc' is not defined by "exports"`。create-vue 3.24 的範本把 `typescript` 鎖在 `~6.0.0`。TypeScript 6 與 7 的差別見 [TypeScript 基礎](#/skill/ts-basics)。
-
-ESLint 要讀懂 `.vue` 裡的 TypeScript，用 `@vue/eslint-config-typescript`：`defineConfigWithVueTs()` 取代 `defineConfig()`，`vueTsConfigs.recommended` 帶進 typescript-eslint 的建議規則，例如 `@typescript-eslint/no-explicit-any`（`Unexpected any. Specify a different type`）與 `@typescript-eslint/ban-ts-comment`。
-
-:::stop 讀到這裡可以先停：會分辨 ESLint、Prettier、vue-tsc 各抓什麼，排對 flat config 的順序。後面的 oxlint、執行時機與完整設定，在要調整 pre-commit 或 CI 的檢查時再回來讀。
-
-### oxlint
-
-create-vue 3.24 也可以選擇加入 oxlint：一個用 Rust 寫的 linter，規則與 ESLint 的常用規則相容、速度快很多。範本的做法是 `lint` 先跑 `oxlint . --fix`，再跑 `eslint . --fix`，並用 `eslint-plugin-oxlint` 在 ESLint 裡關掉 oxlint 已經檢查過的規則。eslint-plugin-vue 的模板規則仍然由 ESLint 負責。
-
-### 什麼時候跑
-
-| 時機 | 跑什麼 | 範圍 | 要多快 |
-|---|---|---|---|
-| 編輯器 | ESLint 擴充、Vue 官方擴充（Volar）的型別提示、存檔時 Prettier | 開著的檔案 | 即時 |
-| pre-commit | `eslint --fix`、`prettier --write` | 這次暫存的檔案 | 幾秒內 |
-| CI（pull request） | `eslint .`、`vue-tsc --build`、測試、`vite build` | 整個專案 | 幾分鐘內 |
-
-pre-commit 用 husky 掛 git hook、lint-staged 挑出暫存的檔案：`npx husky init` 會在 `package.json` 加上 `"prepare": "husky"`，並建立 `.husky/pre-commit`（內容預設是 `npm test`，改成 `npx lint-staged`）。lint-staged 會把暫存的檔名接在指令後面，例如 `eslint --fix src/AppointmentCard.vue src/List.vue`。
-
-型別檢查不能這樣跑。檔名一出現在指令列，TypeScript 就不讀 `tsconfig.json`：
-
-- TypeScript 6.0 直接報錯：`error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.`
-- TypeScript 5.9 不報錯，默默用預設值檢查：實測一個 `strict: true` 才會報錯的檔案，`tsc --noEmit a.ts` 以代碼 0 結束，`tsc --noEmit -p .` 才報出 `TS7006`。
-
-型別錯誤也常發生在沒改到的檔案（改了 `types.ts`，壞的是用到它的元件）。型別檢查放在 CI 跑整個專案；一定要放進 pre-commit 時，用 lint-staged 的函式寫法回傳不帶檔名的指令。
-
-pre-commit 可以用 `git commit --no-verify` 跳過，只是加快回饋；合併前的關卡在 CI。
-
-## 實際程式碼
-
-### `eslint.config.js`（Vue + TypeScript + Prettier）
+flat config 是一個陣列，ESLint 對每個檔案由前往後套用符合的設定，後面的覆蓋前面的。所以自己的規則放在預設組合後面，關掉格式規則的 `skipFormatting` 放最後。
 
 ```js
 // eslint.config.js：ESLint 10、eslint-plugin-vue 10、@vue/eslint-config-typescript 14
@@ -157,9 +84,89 @@ export default defineConfigWithVueTs(
 )
 ```
 
+每條規則的嚴重度是 `off`、`warn`、`error`。`error` 讓 `eslint` 以非 0 的代碼結束，CI 就會失敗；`warn` 只印出來。要讓警告也擋下 CI，加 `--max-warnings 0`。想知道某個檔案最後套用了哪些規則：`npx eslint --print-config src/App.vue`。
+
+指令是 `eslint . --max-warnings 0` 與 `vue-tsc --build`，兩個都要是 CI 的一步（`package.json` 與 workflow 的寫法在選讀）。
+
+## 最常見的兩個錯誤
+
+- **`ESLint couldn't find an eslint.config.* file.`**，並提到 `From ESLint v9.0.0, the default configuration file is now eslint.config.*.`：專案只有舊的 `.eslintrc.*`。照 ESLint 的 migration guide 改寫成 `eslint.config.js`；ESLint 10 沒有退回舊格式的開關。
+- **`tsc --noEmit` 永遠沒有錯誤**：`tsc` 只認得 `.ts`、`.tsx`、`.js` 這類副檔名，`.vue` 不在它的範圍裡。改用 `vue-tsc`，它把 `<script setup lang="ts">` 與模板裡的運算式一起檢查。
+
+:::stop 讀到這裡可以先停：會分辨 Prettier、ESLint、vue-tsc 各抓什麼，寫出順序正確的 flat config，把 lint 與型別檢查放進 CI。後面的規則組合、vue-tsc 的版本限制、oxlint、pre-commit 與例外寫法，在要調整規則或 pre-commit 時再回來讀。
+
+## ESLint 10 的 flat config：陣列怎麼套用
+
+ESLint 9 把預設的設定檔換成 `eslint.config.js`（flat config），ESLint 10 完全移除舊的 `.eslintrc.*`：即使設了 `ESLINT_USE_FLAT_CONFIG=false`，ESLint 10.15 仍然只找 `eslint.config.*`。
+
+陣列的每個元素是一組設定，套用的順序：
+
+```text
+export default defineConfig([
+  { files: ['**/*.{vue,js}'] },        ← 要檢查哪些檔
+  globalIgnores(['**/dist/**']),       ← 全部略過的路徑
+  js.configs.recommended,              ← JavaScript 的基本規則
+  ...pluginVue.configs['flat/essential'],   ← Vue 的規則（本身是好幾組設定，所以要展開）
+  { rules: { 'vue/no-v-html': 'error' } },  ← 自己的調整，放在後面才蓋得過前面
+  skipFormatting,                      ← 最後：關掉所有和 Prettier 衝突的格式規則
+])
+```
+
 設定檔是 TypeScript（`eslint.config.ts`）時，要另外安裝 `jiti` 讓 ESLint 載入，create-vue 的 TypeScript 範本就是這樣做的。
 
-### `package.json`
+## eslint-plugin-vue 的三個組合
+
+eslint-plugin-vue 10.12.1 的 Vue 3 組合，數字是實際數過的規則數：
+
+| 組合 | 規則數 | 內容 | 例子 |
+|---|---|---|---|
+| `flat/essential` | 85 | 會造成錯誤或非預期行為的寫法 | `vue/no-mutating-props`、`vue/require-v-for-key`、`vue/no-use-v-if-with-v-for`、`vue/no-side-effects-in-computed-properties`、`vue/no-ref-as-operand`、`vue/no-deprecated-destroyed-lifecycle`、`vue/multi-word-component-names` |
+| `flat/strongly-recommended` | 再加 25 | 可讀性，大多是模板的格式 | `vue/html-indent`、`vue/html-quotes`、`vue/max-attributes-per-line`、`vue/attribute-hyphenation` |
+| `flat/recommended` | 再加 8 | 一致性與少用的寫法 | `vue/attributes-order`、`vue/block-order`、`vue/no-v-html`、`vue/this-in-template` |
+
+`flat/essential` 是底線，AI 產出的元件最常踩的幾種錯（改 props、`v-for` 沒 `key`、Vue 2 的生命週期名稱）都在裡面，完整清單見 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes)。`strongly-recommended` 多出來的規則大部分是格式，和 Prettier 重疊；用了 Prettier 時，把 `eslint-config-prettier/flat` 放在設定陣列的最後，這些規則就會被關掉。`vue/no-v-html` 在 `recommended` 才有，專案有用到 `v-html` 時值得單獨打開：`v-html` 插入的字串不會被跳脫，是 XSS 的常見來源。
+
+## vue-tsc：執行方式與 TypeScript 版本
+
+`tsc` 只認得 `.ts`、`.tsx`、`.js` 這類副檔名，`.vue` 不在它的範圍裡。`vue-tsc` 用 Vue 的語言工具把 SFC 轉成 TypeScript 看得懂的形式，`<script setup lang="ts">` 與模板裡的運算式一起檢查：`{{ appt.patientNmae }}` 會被當成「存取 `Appointment` 型別上不存在的屬性」。實測同一個專案，`tsc --noEmit` 沒有任何輸出，`vue-tsc --build` 列出上面四個錯並以代碼 1 結束。
+
+兩種常見的執行方式：
+
+| 指令 | 用在哪裡 |
+|---|---|
+| `vue-tsc --build` | create-vue 的範本：根目錄的 `tsconfig.json` 用 `references` 指向 `tsconfig.app.json`、`tsconfig.node.json`，`--build` 逐一檢查 |
+| `vue-tsc --noEmit` | 單一 `tsconfig.json` 的專案 |
+
+TypeScript 的版本要注意：vue-tsc 3.3 用的是 TypeScript 的 JavaScript API，TypeScript 7.0 的 `typescript` 套件已經不提供這套 API。實測 vue-tsc 3.3.14 搭配 typescript 7.0.2，一啟動就丟出 `Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './lib/tsc' is not defined by "exports"`。create-vue 3.24 的範本把 `typescript` 鎖在 `~6.0.0`。TypeScript 6 與 7 的差別見 [TypeScript 基礎](#/skill/ts-basics)。
+
+ESLint 要讀懂 `.vue` 裡的 TypeScript，用 `@vue/eslint-config-typescript`：`defineConfigWithVueTs()` 取代 `defineConfig()`，`vueTsConfigs.recommended` 帶進 typescript-eslint 的建議規則，例如 `@typescript-eslint/no-explicit-any`（`Unexpected any. Specify a different type`）與 `@typescript-eslint/ban-ts-comment`。
+
+create-vue 3.24 產生的 `build` 指令是 `run-p type-check "build-only {@}" --`，把 `vue-tsc --build` 與 `vite build` 並行執行。
+
+## oxlint
+
+create-vue 3.24 也可以選擇加入 oxlint：一個用 Rust 寫的 linter，規則與 ESLint 的常用規則相容、速度快很多。範本的做法是 `lint` 先跑 `oxlint . --fix`，再跑 `eslint . --fix`，並用 `eslint-plugin-oxlint` 在 ESLint 裡關掉 oxlint 已經檢查過的規則。eslint-plugin-vue 的模板規則仍然由 ESLint 負責。
+
+## 什麼時候跑：編輯器、pre-commit、CI
+
+| 時機 | 跑什麼 | 範圍 | 要多快 |
+|---|---|---|---|
+| 編輯器 | ESLint 擴充、Vue 官方擴充（Volar）的型別提示、存檔時 Prettier | 開著的檔案 | 即時 |
+| pre-commit | `eslint --fix`、`prettier --write` | 這次暫存的檔案 | 幾秒內 |
+| CI（pull request） | `eslint .`、`vue-tsc --build`、測試、`vite build` | 整個專案 | 幾分鐘內 |
+
+pre-commit 用 husky 掛 git hook、lint-staged 挑出暫存的檔案：`npx husky init` 會在 `package.json` 加上 `"prepare": "husky"`，並建立 `.husky/pre-commit`（內容預設是 `npm test`，改成 `npx lint-staged`）。lint-staged 會把暫存的檔名接在指令後面，例如 `eslint --fix src/AppointmentCard.vue src/List.vue`。
+
+型別檢查不能這樣跑。檔名一出現在指令列，TypeScript 就不讀 `tsconfig.json`：
+
+- TypeScript 6.0 直接報錯：`error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.`
+- TypeScript 5.9 不報錯，默默用預設值檢查：實測一個 `strict: true` 才會報錯的檔案，`tsc --noEmit a.ts` 以代碼 0 結束，`tsc --noEmit -p .` 才報出 `TS7006`。
+
+型別錯誤也常發生在沒改到的檔案（改了 `types.ts`，壞的是用到它的元件）。型別檢查放在 CI 跑整個專案；一定要放進 pre-commit 時，用 lint-staged 的函式寫法回傳不帶檔名的指令。
+
+pre-commit 可以用 `git commit --no-verify` 跳過，只是加快回饋；合併前的關卡在 CI。
+
+## `package.json`、lint-staged 與 pre-commit 的型別檢查
 
 ```json
 {
@@ -206,7 +213,7 @@ export default {
 
 專案大的時候 `vue-tsc --build` 要跑十幾秒以上，每次 commit 都等會讓人想用 `--no-verify`；多數團隊只在 CI 跑型別檢查。
 
-### CI 的步驟
+## CI 的步驟
 
 ```yaml
 # .github/workflows/ci.yml 的 steps（節錄）
@@ -217,9 +224,9 @@ export default {
 - run: npm run build
 ```
 
-每一步都以非 0 結束就讓 job 失敗。完整的前端 CI 寫法（快取、預覽部署、E2E）另有一課；通用的管線見後端路線的 [CI 管線](#/skill/ci-pipeline)。
+任何一步以非 0 結束，job 就失敗。完整的前端 CI 寫法（快取、預覽部署、E2E）見 [前端的 CI](#/skill/frontend-ci)；通用的管線見後端路線的 [CI 管線](#/skill/ci-pipeline)。
 
-### 允許例外的寫法
+## 允許例外的寫法
 
 ```ts
 // eslint-disable-next-line vue/no-v-html -- 內容是後端用 DOMPurify 清過的院內公告
@@ -228,11 +235,10 @@ export default {
 
 `--` 後面是原因，ESLint 會略過這段說明。`@ts-expect-error` 在下一行沒有錯誤時會反過來報錯，套件修好之後這行註解就會被發現；`@ts-ignore` 不會，typescript-eslint 的 `ban-ts-comment` 會擋下它：`Use "@ts-expect-error" instead of "@ts-ignore", as "@ts-ignore" will do nothing if the following line is error-free`。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
 | 訊息 | 原因 | 修法 |
 |---|---|---|
-| `ESLint couldn't find an eslint.config.* file.`，並提到 `From ESLint v9.0.0, the default configuration file is now eslint.config.*.` | 只有舊的 `.eslintrc.*` | 照 ESLint 的 migration guide 改寫成 `eslint.config.js`；ESLint 10 沒有退回舊格式的開關 |
 | `Unexpected mutation of "appt" prop  vue/no-mutating-props` | 子元件直接改 props | emit 事件讓父元件改，或用 `defineModel` |
 | `Elements in iteration expect to have 'v-bind:key' directives  vue/require-v-for-key` | `v-for` 沒有 `key` | 加上穩定的 id 當 `key` |
 | `The 'slots' variable inside 'v-for' directive should be replaced with a computed property that returns filtered array instead. You should not mix 'v-for' with 'v-if'  vue/no-use-v-if-with-v-for` | 同一個元素上同時有 `v-for` 與 `v-if` | 用 computed 先篩選 |
@@ -242,7 +248,6 @@ export default {
 | `error TS2367: This comparison appears to be unintentional because the types … have no overlap.` | 和型別裡不存在的字串比較（`'canceled'` 與 `'cancelled'`） | 改成型別裡的值 |
 | `error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline.` | lint-staged 把檔名傳給了 `tsc` 或 `vue-tsc` | 用函式回傳不帶檔名的指令，或把型別檢查移到 CI |
 | `Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './lib/tsc' is not defined by "exports"` | vue-tsc 3.3 搭配了 TypeScript 7 | `typescript` 鎖在 `~6.0.0` |
-| `tsc --noEmit` 永遠沒有錯誤 | `.vue` 不在 `tsc` 的範圍裡 | 改用 `vue-tsc` |
 | 存檔時 Prettier 改一次、`eslint --fix` 又改回去 | 少了 `eslint-config-prettier`，或沒放在設定陣列的最後 | 把 `skipFormatting` 放到最後 |
 
 另外兩種不會有訊息的狀況：CI 裡沒有 lint 或型別檢查那一步（打開 workflow 檔確認），以及用 `// eslint-disable` 不帶規則名稱、關掉整個檔案的所有規則。`grep -rnE "eslint-disable|@ts-ignore|as any" src/` 定期看一次。

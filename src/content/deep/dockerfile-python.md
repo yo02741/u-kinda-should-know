@@ -1,6 +1,6 @@
-## 從一個具體問題開始：一份「能動」的 Dockerfile
+## 一份「能動」的 Dockerfile，上線一個月出六個問題
 
-一個 FastAPI 專案的第一版 Dockerfile 長這樣，它確實能跑：
+一個 FastAPI 專案的第一版 Dockerfile，能跑：
 
 ```dockerfile
 FROM python:latest
@@ -10,7 +10,7 @@ RUN pip install uv && uv sync
 CMD uv run uvicorn app.main:app --host 0.0.0.0
 ```
 
-上線一個月後，陸續發生這些事：
+上線一個月後：
 
 | 現象 | 原因 |
 |---|---|
@@ -21,7 +21,123 @@ CMD uv run uvicorn app.main:app --host 0.0.0.0
 | `docker stop` 每次都等滿 10 秒 | shell form 的 `CMD` 讓 `/bin/sh` 當 PID 1，uvicorn 收不到 SIGTERM |
 | 容器裡的程式以 root 執行 | 沒有設定 `USER` |
 
-每一列都對應這一課的一段。最後會組成一份完整的 Dockerfile，並附上 `.dockerignore`。
+## 完整的 Dockerfile：六個問題各改一處
+
+| 開頭的問題 | 改法 |
+|---|---|
+| image 超過 1 GB | `python:3.12-slim`；多階段建置，uv 與快取留在 builder；`--no-dev` |
+| 改一行程式碼重裝全部依賴 | 先複製 `pyproject.toml`、`uv.lock` 裝依賴，最後才複製 `app/` |
+| 重建後啟動失敗 | 釘 `python:3.12-slim`，不用 `latest`；`uv sync --locked` |
+| `.env` 進了 image | `.dockerignore` 排除，並用明確的 `COPY app/ ./app/` |
+| `docker stop` 等滿 10 秒 | `CMD` 用 exec form（JSON 陣列），uvicorn 是 PID 1 |
+| 以 root 執行 | 固定 UID 的非 root 使用者，`USER app` |
+
+假設專案結構是 `pyproject.toml`、`uv.lock`、程式碼在 `app/`，以 `uvicorn app.main:app` 啟動：
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+############################
+# 建置階段：裝依賴
+############################
+FROM python:3.12-slim AS builder
+
+# 從 uv 官方映像複製執行檔。標籤釘在你驗證過的版本（這裡的 0.13 只是示範；2026 年 11 月的最新版是 0.13.9）
+COPY --from=ghcr.io/astral-sh/uv:0.13 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+# UV_COMPILE_BYTECODE：安裝時先編好 .pyc，縮短啟動時間
+# UV_LINK_MODE=copy：搭配 cache mount 時用複製而不是硬連結（兩者不在同一個檔案系統）
+# UV_PYTHON_DOWNLOADS=0：用映像裡的 Python，不要另外下載
+
+WORKDIR /app
+
+# 依賴層：只在 pyproject.toml / uv.lock 改變時重建
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
+
+# 程式碼層
+COPY app/ ./app/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
+############################
+# 執行階段：只放執行需要的東西
+############################
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+# 固定 UID / GID 的非 root 使用者
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+
+WORKDIR /app
+
+# 從 builder 只拿裝好的虛擬環境與程式碼；擁有者是 root，app 只能讀
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/app /app/app
+
+USER app
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+
+# exec form：uvicorn 是 PID 1，直接收到 SIGTERM
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+建置與執行：
+
+```bash
+docker build -t shop/api:$(git rev-parse --short HEAD) .
+docker run --rm -p 8000:8000 --env-file .env.local shop/api:$(git rev-parse --short HEAD)
+docker inspect --format '{{.Config.User}}' shop/api:$(git rev-parse --short HEAD)   # 應該印出 app
+docker ps   # STATUS 欄會在 start-period 後顯示 (healthy)
+```
+
+## `.dockerignore` 與最常見的兩個錯誤
+
+`docker build .` 會把整個目錄（建置情境，build context）送給建置器。同一個目錄放 `.dockerignore`，決定哪些東西不送：
+
+```text
+# 版本控制與本機環境
+.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 秘密與本機設定：絕對不能進 image
+.env
+.env.*
+!.env.example
+
+# 其他用不到的
+node_modules/
+*.log
+docs/
+```
+
+它解決三件事：image 變小、`COPY` 不會因為無關檔案（`.git` 每次 commit 都變）讓快取失效、秘密不會被複製進去。
+
+最常見的兩個錯誤：
+
+| 訊息 | 原因 | 怎麼修 |
+|---|---|---|
+| `failed to compute cache key: failed to calculate checksum of ref …: "/uv.lock": not found` | 要 `COPY` 的檔案不在建置情境裡：不存在、路徑錯，或被 `.dockerignore` 排除 | 確認檔案在 `docker build` 指定的目錄底下、沒被忽略 |
+| `/bin/sh: 1: uvicorn: not found` | shell form 執行，`PATH` 裡找不到 uvicorn（虛擬環境不在 PATH） | 設 `ENV PATH="/app/.venv/bin:$PATH"`，CMD 改 exec form |
+
+:::stop 讀到這裡可以先停：寫得出多階段、非 root、exec 形式、有健康檢查的 Python Dockerfile 與 `.dockerignore`。後面逐段說明每個決定的理由（基底映像、層的順序、ENTRYPOINT 與 CMD、健康檢查），還有建置秘密與漏洞掃描，在 Dockerfile 要改或建置出錯時再回來讀。
 
 ## 基底映像：slim、alpine 與其他
 
@@ -106,33 +222,6 @@ USER app
 - 需要寫入的目錄（例如暫存）明確建立並交給 app；更好的做法是根檔案系統唯讀、需要寫的地方掛 tmpfs 或 volume。
 - 非 root 預設不能聽 1024 以下的埠。容器裡聽 8000，對外的 80 / 443 交給前面的 nginx 或負載平衡器。
 
-## `.dockerignore`
-
-`docker build .` 會把整個目錄（建置情境，build context）送給建置器。`.dockerignore` 決定哪些東西不送：
-
-```text
-# 版本控制與本機環境
-.git
-.venv
-__pycache__/
-*.pyc
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# 秘密與本機設定：絕對不能進 image
-.env
-.env.*
-!.env.example
-
-# 其他用不到的
-node_modules/
-*.log
-docs/
-```
-
-它同時解決三件事：image 變小、`COPY` 不會因為無關檔案（`.git` 每次 commit 都變）而讓快取失效、秘密不會被複製進去。即使有 `.dockerignore`，也建議用明確的 `COPY app/ ./app/` 取代 `COPY . .`，多一層保險。
-
 ## `ENTRYPOINT`、`CMD`，以及 exec form
 
 兩者都描述「容器啟動時要跑什麼」，差別在於能不能被 `docker run` 後面的參數覆寫：
@@ -210,82 +299,9 @@ slim 映像通常沒有 `curl`，用 Python 標準函式庫就好：`urlopen` �
 
 只有 Docker 與 Compose 會讀 `HEALTHCHECK`（compose 的 `condition: service_healthy` 用的就是它，見 [docker-compose 開發環境](#/skill/compose)）。Kubernetes 會忽略它，改用 Pod 設定裡的 probe，見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。`/health` 與 `/ready` 該檢查什麼，見 [應用伺服器與程序管理](#/skill/process-servers)。
 
-## 完整的 Dockerfile
-
-假設專案結構是 `pyproject.toml`、`uv.lock`、程式碼在 `app/`，以 `uvicorn app.main:app` 啟動：
-
-```dockerfile
-# syntax=docker/dockerfile:1
-
-############################
-# 建置階段：裝依賴
-############################
-FROM python:3.12-slim AS builder
-
-# 從 uv 官方映像複製執行檔。標籤釘在你驗證過的版本（這裡的 0.13 只是示範；2026 年 11 月的最新版是 0.13.9）
-COPY --from=ghcr.io/astral-sh/uv:0.13 /uv /uvx /bin/
-
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=0
-# UV_COMPILE_BYTECODE：安裝時先編好 .pyc，縮短啟動時間
-# UV_LINK_MODE=copy：搭配 cache mount 時用複製而不是硬連結（兩者不在同一個檔案系統）
-# UV_PYTHON_DOWNLOADS=0：用映像裡的 Python，不要另外下載
-
-WORKDIR /app
-
-# 依賴層：只在 pyproject.toml / uv.lock 改變時重建
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
-
-# 程式碼層
-COPY app/ ./app/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
-
-############################
-# 執行階段：只放執行需要的東西
-############################
-FROM python:3.12-slim AS runtime
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
-
-# 固定 UID / GID 的非 root 使用者
-RUN groupadd --system --gid 10001 app \
- && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
-
-WORKDIR /app
-
-# 從 builder 只拿裝好的虛擬環境與程式碼；擁有者是 root，app 只能讀
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/app /app/app
-
-USER app
-
-EXPOSE 8000
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
-
-# exec form：uvicorn 是 PID 1，直接收到 SIGTERM
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-建置與執行：
-
-```bash
-docker build -t shop/api:$(git rev-parse --short HEAD) .
-docker run --rm -p 8000:8000 --env-file .env.local shop/api:$(git rev-parse --short HEAD)
-docker inspect --format '{{.Config.User}}' shop/api:$(git rev-parse --short HEAD)   # 應該印出 app
-docker ps   # STATUS 欄會在 start-period 後顯示 (healthy)
-```
+## 需要編譯的依賴與建置時的秘密
 
 如果依賴需要編譯（沒有對應的 wheel），在 **builder** 階段 `apt-get install` 編譯工具，runtime 只裝執行時需要的共享函式庫。編譯工具不會進最終 image。
-
-:::stop 讀到這裡可以先停：寫得出多階段、非 root、exec 形式、有健康檢查的 Python Dockerfile。後面的建置秘密、映像大小與漏洞掃描，在要裝私有套件或映像被掃出弱點時再回來讀。
 
 ### 建置時需要秘密
 
@@ -328,13 +344,11 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shop/api:8d1
 - 基底越小，要評估的項目越少，這也是 slim 與 distroless 的好處之一。
 - 掃描只看得到「已知漏洞」，看不到你自己程式的漏洞與設定錯誤。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| `failed to compute cache key: failed to calculate checksum of ref …: "/uv.lock": not found` | 要 `COPY` 的檔案不在建置情境裡：不存在、路徑錯，或被 `.dockerignore` 排除 | 確認檔案在 `docker build` 指定的目錄底下、沒被忽略 |
 | uv 回報 lockfile 需要更新、但指定了 `--locked` | `pyproject.toml` 改了，`uv.lock` 沒跟著更新 | 本機 `uv lock` 後一起 commit |
-| `/bin/sh: 1: uvicorn: not found` | shell form 執行，`PATH` 裡找不到 uvicorn（虛擬環境不在 PATH） | 設 `ENV PATH="/app/.venv/bin:$PATH"`，CMD 改 exec form |
 | `ModuleNotFoundError: No module named 'fastapi'` | 執行的是系統的 Python，不是 `.venv` 裡的 | 同上；在容器裡 `which python` 確認 |
 | `exec /app/.venv/bin/uvicorn: no such file or directory`（檔案明明在） | 這個腳本第一行指定的直譯器不存在：builder 與 runtime 的 Python 路徑或版本不同 | 兩個階段用同一個 Python 基底 |
 | `PermissionError: [Errno 13] Permission denied: '/app/…'` | 非 root 使用者要寫入 root 擁有的目錄 | 不要寫程式碼目錄；需要寫的目錄明確建立並 `chown`，或掛 volume / tmpfs |

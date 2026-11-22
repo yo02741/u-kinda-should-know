@@ -1,4 +1,4 @@
-## 從一個具體問題開始：午休回來，清單是空的
+## 具體問題：午休回來，清單是空的
 
 門診系統的 token 有效 8 小時。早上 8 點登入的櫃台人員，下午 4 點後畫面陸續出現奇怪的狀況：
 
@@ -8,34 +8,7 @@
 
 三件事都是同一個問題：前端沒有把「沒登入」「沒權限」「已登出」分開處理。
 
-## 運作原理
-
-### 兩種登入方式，從前端看
-
-伺服器那一側怎麼記住登入狀態，見 [驗證基礎：Session vs Token](#/skill/authn-basics)。前端看到的差別是：
-
-| | cookie session | Bearer token |
-|---|---|---|
-| 登入後拿到什麼 | 伺服器回 `Set-Cookie`，前端程式拿不到內容（`HttpOnly`） | 回應 body 裡的 `access_token` |
-| 之後的請求怎麼帶 | 瀏覽器自動帶 `Cookie` | 程式自己加 `Authorization: Bearer …` |
-| 前端怎麼知道自己是誰 | 呼叫 `GET /api/me` 這類 API | token 本身（JWT 的 payload 可以解開看）或同樣呼叫 API |
-| 跨網域時 | fetch 要 `credentials: 'include'`，伺服器的 CORS 要回明確的 origin 與 `Access-Control-Allow-Credentials: true` | 只要 CORS 允許 `Authorization` 標頭 |
-| 要防的攻擊 | CSRF：別的網站讓瀏覽器帶著 cookie 送請求 | XSS：頁面上的惡意 script 讀走 token |
-
-本站的後端參考專案用 Bearer token：`POST /api/auth/login` 回 `{ access_token, token_type: "Bearer", expires_in }`，沒帶或過期時回 `401` 並附 `WWW-Authenticate: Bearer`。
-
-### token 放哪裡
-
-| 位置 | 重新整理後 | 其他分頁 | 頁面上的 script 讀得到 |
-|---|---|---|---|
-| 記憶體（store 裡的 ref） | 消失 | 各自一份 | 讀得到，但只有在頁面開著的當下 |
-| sessionStorage | 還在 | 不共享，每個分頁各自一份 | 讀得到 |
-| localStorage | 還在 | 共享 | 讀得到，XSS 可以把它帶走，之後在別處繼續用到過期 |
-| `HttpOnly` cookie | 還在 | 共享 | 讀不到 |
-
-沒有哪一種同時滿足「重新整理還在」與「XSS 讀不走」。常見的組合是 access token 放記憶體、壽命短，refresh token 放 `HttpOnly` cookie，重新整理時用 cookie 換一個新的 access token。只有 access token 的系統（例如本站的參考專案），放記憶體就代表重新整理要重新登入；要不要接受這個代價，寫在需求裡。XSS 本身怎麼防，見 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)。
-
-### 401、403 與畫面
+## 401、403 與路由守衛各管什麼
 
 ```
 API 回應
@@ -48,17 +21,135 @@ API 回應
 
 401 的意思是「我不知道你是誰」，重新登入可以解決；403 的意思是「我知道你是誰，你不能做這件事」，重新登入結果一樣。把 403 也導去登入，就是開頭第 2 個問題的迴圈。
 
-### 路由守衛只管畫面
-
-`router.beforeEach` 在每次換頁前執行。回傳 `false` 取消這次導航、回傳一個路由位置就改去那裡、不回傳（`undefined`）或回傳 `true` 照常進入。Vue Router 5.5 的型別把第三個參數 `next` 標為 deprecated，新寫法一律用回傳值。
+`router.beforeEach` 在每次換頁前執行。回傳 `false` 取消這次導航、回傳一個路由位置就改去那裡、不回傳（`undefined`）或回傳 `true` 照常進入。
 
 守衛讀的是前端的登入狀態，它能做的是「沒登入就不顯示這個畫面」。使用者打開 DevTools 改掉 store 的值、或直接用 `curl` 打 API，守衛都擋不住；資料能不能拿，由後端對每個請求檢查。所以守衛與 API 的 401 處理兩者都要有：守衛讓沒登入的人一開始就看到登入頁，401 處理則接住「進了頁面之後才過期」的情況。
 
-### redirect 與開放轉址
+## token 放哪裡
+
+| 位置 | 重新整理後 | 其他分頁 | 頁面上的 script 讀得到 |
+|---|---|---|---|
+| 記憶體（store 裡的 ref） | 消失 | 各自一份 | 讀得到，但只有在頁面開著的當下 |
+| sessionStorage | 還在 | 不共享，每個分頁各自一份 | 讀得到 |
+| localStorage | 還在 | 共享 | 讀得到，XSS 可以把它帶走，之後在別處繼續用到過期 |
+| `HttpOnly` cookie | 還在 | 共享 | 讀不到 |
+
+沒有哪一種同時滿足「重新整理還在」與「XSS 讀不走」。常見的組合是 access token 放記憶體、壽命短，refresh token 放 `HttpOnly` cookie，重新整理時用 cookie 換一個新的 access token。只有 access token 的系統放記憶體，就代表重新整理要重新登入；要不要接受這個代價，寫在需求裡。
+
+## 最小範例：auth store、apiFetch 與守衛
+
+本站的後端參考專案用 Bearer token：`POST /api/auth/login` 回 `{ access_token, token_type: "Bearer", expires_in }`，沒帶或過期時回 `401` 並附 `WWW-Authenticate: Bearer`。
+
+```js
+// stores/auth.js：setup store，自己寫 $reset
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+export const useAuthStore = defineStore('auth', () => {
+  const token = ref(null)                  // 只放記憶體
+  const role = ref(null)                   // 登入後由 GET /api/me 取得（假設後端提供）
+  const isLoggedIn = computed(() => token.value !== null)
+
+  async function login(username, password) {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!res.ok) throw Object.assign(new Error('登入失敗'), { status: res.status })
+    token.value = (await res.json()).access_token
+  }
+  function $reset() { token.value = null; role.value = null }
+  return { token, role, isLoggedIn, login, $reset }
+})
+```
+
+```js
+// api.js：所有 API 都經過這裡
+import { useAuthStore } from '@/stores/auth'
+import { router } from '@/router'
+
+export class ApiError extends Error {
+  constructor(status, problem) { super(problem?.title ?? `HTTP ${status}`); this.status = status; this.problem = problem }
+}
+
+export async function apiFetch(path, options = {}) {
+  const auth = useAuthStore()
+  const headers = new Headers(options.headers)
+  if (auth.token) headers.set('Authorization', `Bearer ${auth.token}`)   // 注意 "Bearer " 後面的空白
+  const res = await fetch(`/api${path}`, { ...options, headers })
+  if (res.status === 401) {
+    auth.$reset()
+    const here = router.currentRoute.value
+    if (here.name !== 'login') router.push({ name: 'login', query: { redirect: here.fullPath } })
+    throw new ApiError(401)
+  }
+  if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => null))   // 403 由畫面顯示「沒有權限」
+  return res.status === 204 ? null : res.json()
+}
+```
+
+路由守衛：
+
+```js
+// router.js
+const routes = [
+  { path: '/login', name: 'login', component: () => import('./views/LoginView.vue') },
+  { path: '/forbidden', name: 'forbidden', component: () => import('./views/ForbiddenView.vue') },
+  { path: '/appointments', name: 'appointments', component: () => import('./views/AppointmentsView.vue'), meta: { requiresAuth: true } },
+  { path: '/admin', name: 'admin', component: () => import('./views/AdminView.vue'), meta: { requiresAuth: true, roles: ['admin'] } },
+]
+
+router.beforeEach((to) => {
+  const auth = useAuthStore()
+  if (to.meta.requiresAuth && !auth.isLoggedIn) {
+    return { name: 'login', query: { redirect: to.fullPath } }       // 沒登入：去登入，記下原本要去哪
+  }
+  if (to.meta.roles && !to.meta.roles.includes(auth.role)) {
+    return { name: 'forbidden' }                                       // 登入了但角色不符：不是去登入
+  }
+})
+```
+
+:::stop 讀到這裡可以先停：會分開處理 401 與 403、決定 token 放哪裡，並用 `apiFetch` 與路由守衛接住沒登入的情況。後面的 cookie session 對照、`redirect` 檢查、token 更新、登出與跨分頁同步，在接 refresh token、做登出或共用電腦的情境時再回來讀。
+
+## cookie session 與 Bearer token，從前端看
+
+伺服器那一側怎麼記住登入狀態，見 [驗證基礎：Session vs Token](#/skill/authn-basics)。前端看到的差別是：
+
+| | cookie session | Bearer token |
+|---|---|---|
+| 登入後拿到什麼 | 伺服器回 `Set-Cookie`，前端程式拿不到內容（`HttpOnly`） | 回應 body 裡的 `access_token` |
+| 之後的請求怎麼帶 | 瀏覽器自動帶 `Cookie` | 程式自己加 `Authorization: Bearer …` |
+| 前端怎麼知道自己是誰 | 呼叫 `GET /api/me` 這類 API | token 本身（JWT 的 payload 可以解開看）或同樣呼叫 API |
+| 跨網域時 | fetch 要 `credentials: 'include'`，伺服器的 CORS 要回明確的 origin 與 `Access-Control-Allow-Credentials: true` | 只要 CORS 允許 `Authorization` 標頭 |
+| 要防的攻擊 | CSRF：別的網站讓瀏覽器帶著 cookie 送請求 | XSS：頁面上的惡意 script 讀走 token |
+
+XSS 本身怎麼防，見 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)。
+
+## 守衛的 `next` 與登入頁
+
+Vue Router 5.5 的型別把守衛的第三個參數 `next` 標為 deprecated，新寫法一律用回傳值。
+
+登入頁本身不能設 `requiresAuth`；守衛把 `/login` 也導去 `/login` 時，Vue Router 會在 Console 警告 `Detected a possibly infinite redirection in a navigation guard when going from "/" to "/login". Aborting to avoid a Stack Overflow.`。
+
+## redirect 與開放轉址
 
 `/login?redirect=/appointments/42` 讓使用者登入後回到原本的頁面。如果程式直接 `location.href = redirect`，攻擊者可以寄出 `https://clinic.example/login?redirect=https://evil.example/login`：使用者在 `clinic.example` 登入，接著被送到長得一樣的假網站「再登入一次」。只接受 `/` 開頭、而且不是 `//` 開頭的路徑（`//evil.example` 會被當成另一個網域），解析後確認還在同一個 origin。
 
-### token 過期與更新
+登入成功後用檢查過的路徑換頁（`safeRedirect` 在下面的可執行範例）：
+
+```js
+// LoginView.vue 的 <script setup> 節錄
+const route = useRoute()
+const router = useRouter()
+async function onSubmit() {
+  await auth.login(username.value, password.value)
+  router.replace(safeRedirect(route.query.redirect))   // replace：登入頁不留在瀏覽紀錄裡
+}
+```
+
+## token 過期：同時 401 的請求共用一次更新
 
 有 refresh token 的系統，access token 過期時可以換一個新的。頁面打開時常常同時發出好幾個請求，它們會同時收到 401：
 
@@ -67,25 +158,7 @@ API 回應
 
 重送只做一次：更新後的 token 還是 401，就代表要重新登入，不要再更新，否則會無限循環。
 
-### 登出要清的東西
-
-| 項目 | 不清的後果 |
-|---|---|
-| store 裡的使用者資料、清單、快取的查詢結果 | 下一個登入的人看到上一個人的資料 |
-| 進行中的請求 | 登出後回應才回來，又把資料寫回 store |
-| SSE、WebSocket、輪詢 | 登出後還在接收病患資料 |
-| 其他分頁 | 另一個分頁還能看、還能按按鈕 |
-| 存在 sessionStorage、localStorage 的 token 與草稿 | 下一個人重新整理後自動登入成上一個人 |
-
-Pinia 的 setup store（`defineStore('auth', () => { … })`）沒有內建 `$reset()`。開發模式呼叫時會丟出錯誤 `Store "auth" is built using the setup syntax and does not implement $reset().`，正式建置裡則什麼都不做、也不報錯。每個 setup store 要自己寫一個 `$reset`。
-
-通知其他分頁用 `BroadcastChannel`（2022 年 3 月進入 Baseline）：同一個 origin 的分頁開同名的 channel，一個分頁 `postMessage`，其他分頁收到 `message` 事件。token 放在 localStorage 時，也可以監聽 `storage` 事件，它只在「其他分頁」改了 localStorage 時觸發。
-
-登出時如果用 `location.assign('/login')` 整頁離開，按上一頁時瀏覽器可能從往返快取（bfcache）把整個舊頁面連同記憶體裡的資料一起還原。在 `pageshow` 事件裡 `event.persisted` 為 `true` 時重新檢查登入狀態，或者登出時留在 SPA 裡用 `router.replace` 換頁，讓守衛接手。
-
-## 實際程式
-
-### 檢查 redirect、共用一次更新
+## 可執行範例：檢查 redirect、共用一次更新
 
 兩段邏輯都是純函式，可以直接執行。第一段把各種 `redirect` 丟給檢查函式；第二段模擬三個請求同時拿到 401，比較「各自更新」與「共用一次更新」在 refresh token 輪替時的結果：
 
@@ -147,94 +220,21 @@ await run(false)
 await run(true)
 ```
 
-### auth store 與 apiFetch
+## 登出要清的東西與其他分頁
 
-```js
-// stores/auth.js：setup store，自己寫 $reset
-import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+| 項目 | 不清的後果 |
+|---|---|
+| store 裡的使用者資料、清單、快取的查詢結果 | 下一個登入的人看到上一個人的資料 |
+| 進行中的請求 | 登出後回應才回來，又把資料寫回 store |
+| SSE、WebSocket、輪詢 | 登出後還在接收病患資料 |
+| 其他分頁 | 另一個分頁還能看、還能按按鈕 |
+| 存在 sessionStorage、localStorage 的 token 與草稿 | 下一個人重新整理後自動登入成上一個人 |
 
-export const useAuthStore = defineStore('auth', () => {
-  const token = ref(null)                  // 只放記憶體
-  const role = ref(null)                   // 登入後由 GET /api/me 取得（假設後端提供）
-  const isLoggedIn = computed(() => token.value !== null)
+Pinia 的 setup store（`defineStore('auth', () => { … })`）沒有內建 `$reset()`。開發模式呼叫時會丟出錯誤 `Store "auth" is built using the setup syntax and does not implement $reset().`，正式建置裡則什麼都不做、也不報錯。每個 setup store 要自己寫一個 `$reset`。
 
-  async function login(username, password) {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    })
-    if (!res.ok) throw Object.assign(new Error('登入失敗'), { status: res.status })
-    token.value = (await res.json()).access_token
-  }
-  function $reset() { token.value = null; role.value = null }
-  return { token, role, isLoggedIn, login, $reset }
-})
-```
+通知其他分頁用 `BroadcastChannel`（2022 年 3 月進入 Baseline）：同一個 origin 的分頁開同名的 channel，一個分頁 `postMessage`，其他分頁收到 `message` 事件。token 放在 localStorage 時，也可以監聽 `storage` 事件，它只在「其他分頁」改了 localStorage 時觸發。
 
-```js
-// api.js：所有 API 都經過這裡
-import { useAuthStore } from '@/stores/auth'
-import { router } from '@/router'
-
-export class ApiError extends Error {
-  constructor(status, problem) { super(problem?.title ?? `HTTP ${status}`); this.status = status; this.problem = problem }
-}
-
-export async function apiFetch(path, options = {}) {
-  const auth = useAuthStore()
-  const headers = new Headers(options.headers)
-  if (auth.token) headers.set('Authorization', `Bearer ${auth.token}`)   // 注意 "Bearer " 後面的空白
-  const res = await fetch(`/api${path}`, { ...options, headers })
-  if (res.status === 401) {
-    auth.$reset()
-    const here = router.currentRoute.value
-    if (here.name !== 'login') router.push({ name: 'login', query: { redirect: here.fullPath } })
-    throw new ApiError(401)
-  }
-  if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => null))   // 403 由畫面顯示「沒有權限」
-  return res.status === 204 ? null : res.json()
-}
-```
-
-### 路由守衛與登入頁
-
-```js
-// router.js
-const routes = [
-  { path: '/login', name: 'login', component: () => import('./views/LoginView.vue') },
-  { path: '/forbidden', name: 'forbidden', component: () => import('./views/ForbiddenView.vue') },
-  { path: '/appointments', name: 'appointments', component: () => import('./views/AppointmentsView.vue'), meta: { requiresAuth: true } },
-  { path: '/admin', name: 'admin', component: () => import('./views/AdminView.vue'), meta: { requiresAuth: true, roles: ['admin'] } },
-]
-
-router.beforeEach((to) => {
-  const auth = useAuthStore()
-  if (to.meta.requiresAuth && !auth.isLoggedIn) {
-    return { name: 'login', query: { redirect: to.fullPath } }       // 沒登入：去登入，記下原本要去哪
-  }
-  if (to.meta.roles && !to.meta.roles.includes(auth.role)) {
-    return { name: 'forbidden' }                                       // 登入了但角色不符：不是去登入
-  }
-})
-```
-
-```js
-// LoginView.vue 的 <script setup> 節錄
-const route = useRoute()
-const router = useRouter()
-async function onSubmit() {
-  await auth.login(username.value, password.value)
-  router.replace(safeRedirect(route.query.redirect))   // replace：登入頁不留在瀏覽紀錄裡
-}
-```
-
-登入頁本身不能設 `requiresAuth`；守衛把 `/login` 也導去 `/login` 時，Vue Router 會在 Console 警告 `Detected a possibly infinite redirection in a navigation guard when going from "/" to "/login". Aborting to avoid a Stack Overflow.`。
-
-:::stop 讀到這裡可以先停：會分開處理 401 與 403、檢查 `redirect`、讓同時過期的請求共用一次更新，並用路由守衛管畫面。後面的登出與跨分頁同步，在做登出或共用電腦的情境時再回來讀。
-
-### 登出與其他分頁
+登出時如果用 `location.assign('/login')` 整頁離開，按上一頁時瀏覽器可能從往返快取（bfcache）把整個舊頁面連同記憶體裡的資料一起還原。在 `pageshow` 事件裡 `event.persisted` 為 `true` 時重新檢查登入狀態，或者登出時留在 SPA 裡用 `router.replace` 換頁，讓守衛接手。
 
 ```js
 // logout.js

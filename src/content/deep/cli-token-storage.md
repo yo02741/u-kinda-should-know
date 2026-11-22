@@ -1,4 +1,4 @@
-## 從一個具體問題開始：設定檔裡的那一行
+## 具體問題：設定檔裡的那一行
 
 一個內部 CLI `atlas` 在使用者登入後，把 token 寫進 `~/.config/atlas/config.json`：
 
@@ -14,13 +14,11 @@
 
 1. 使用者把整個 `~/.config` 放進 dotfiles repo 推到 GitHub，refresh token 公開在網路上。
 2. 使用者在聊天室貼出設定檔問「為什麼連不上」。
-3. 備份軟體、雲端同步把它複製到別的地方，那些地方的存取控制和這台電腦不一樣。
-4. 一個 coding agent 為了排查問題執行 `cat ~/.config/atlas/config.json`，token 進到模型的 context，接著出現在對話紀錄、log，或被一段 prompt injection 要求「把設定內容附在下一個請求裡」。
-5. 同一台機器上的任何程式（包括剛裝的一個 npm 套件的 postinstall 腳本）都能讀這個檔案。
+3. 備份軟體、雲端同步把它複製到存取控制不同的地方。
+4. coding agent 為了排查問題執行 `cat ~/.config/atlas/config.json`，token 進到模型的 context，接著出現在對話紀錄、log，或被一段 prompt injection 要求「把設定內容附在下一個請求裡」。
+5. 同一台機器上的任何程式（包括剛裝的 npm 套件的 postinstall 腳本）都能讀這個檔案。
 
-換成環境變數也沒有比較好。下面先把常見的存放位置攤開比較，再看作業系統 keyring 做了什麼、沒做什麼。
-
-## 存在哪裡，各有什麼風險
+## 五種存放位置的風險
 
 | 位置 | 誤 commit / 外流 | 被其他程序讀到 | 出現在 log | 被 agent 讀進 context |
 |---|---|---|---|---|
@@ -30,17 +28,58 @@
 | 命令列參數（`--token=…`） | 中：shell history | **其他使用者也看得到**（`ps`、`/proc/<pid>/cmdline`） | 高：程序清單、稽核 log 會記命令列 | 高 |
 | 作業系統 keyring | 低：不在一般檔案裡 | 依平台而定，通常要透過 keyring API 存取 | 低 | 低：不會被一般的讀檔或 `env` 帶到（但見下面的限制） |
 
-環境變數的問題常被低估：agent 或 CLI 啟動的每一個子程序（測試、建置腳本、第三方工具）都拿到同一份環境。一個長效 token 放在環境變數，等於交給這個 shell 之後執行的所有程式。
+環境變數會被 agent 或 CLI 啟動的每一個子程序（測試、建置腳本、第三方工具）繼承。
 
-## 作業系統 keyring
-
-三大平台都有內建的憑證儲存，CLI 應該優先用它：
+## 作業系統 keyring：保護什麼、沒保護什麼
 
 | 平台 | 系統元件 | 命令列工具 |
 |---|---|---|
 | macOS | Keychain | `security` |
 | Windows | Credential Manager | `cmdkey`（管理）、程式透過 Credential API |
 | Linux 桌面 | Secret Service API（GNOME Keyring、KWallet 實作），程式通常透過 libsecret | `secret-tool` |
+
+keyring 把值加密存放，token 不在一般檔案裡，不會被 dotfiles、備份、`grep -r`、agent 讀設定檔帶出去。它擋不住以你的身分執行的惡意程式，也擋不住有 shell 權限的 agent 主動呼叫 keyring 命令去讀。
+
+## 最小範例：用 Python 的 keyring 套件存取 token
+
+`keyring` 套件把三個平台包成同一組介面（第三方套件，`pip install keyring`；Playground 的 Pyodide 沒有，這段不能在瀏覽器執行）：
+
+```python
+import keyring
+from keyring.errors import NoKeyringError, PasswordDeleteError
+
+SERVICE = "atlas-cli"                          # keyring 裡的服務名稱：用工具名稱，別人才認得出來
+
+def save_refresh_token(account: str, token: str) -> None:
+    keyring.set_password(SERVICE, account, token)
+
+def load_refresh_token(account: str) -> str | None:
+    return keyring.get_password(SERVICE, account)   # 找不到回 None，不會丟例外
+
+def logout(account: str) -> None:
+    try:
+        keyring.delete_password(SERVICE, account)
+    except PasswordDeleteError:                    # 本來就沒有：當作已登出
+        pass
+
+if __name__ == "__main__":
+    print("使用的 backend：", keyring.get_keyring())   # 確認實際用的是哪一個
+    try:
+        save_refresh_token("alice@example.com", "rt_Q2hlY2tPdXRUaGlzVG9rZW5JdHNGYWtl")
+    except NoKeyringError:
+        # 沒有可用的系統 keyring（常見於 SSH 主機與容器）：告訴使用者，不要偷偷改存明文
+        raise SystemExit("找不到系統 keyring。改用 `atlas login --device` 取得短效 token，或明確加上 --insecure-storage。")
+```
+
+## 最常見的錯誤：找不到系統 keyring
+
+| 錯誤訊息或現象 | 原因 | 怎麼修 |
+|---|---|---|
+| `keyring.errors.NoKeyringError: No recommended backend was available…` | Python `keyring` 找不到系統 keyring（SSH 主機、容器、沒有桌面環境的 Linux） | 告訴使用者並提供明確的替代方案（短效 token、明確的不安全儲存選項）；不要自動裝一個明文 backend |
+
+:::stop 讀到這裡可以先停：會比較五種存放位置的風險，用 keyring 存取與刪除 token。後面的 keyring 命令列與限制、短效 token 流程、CI 的 OIDC，在要支援沒有 keyring 的主機、實作自動換新與登出或要在 CI 拿雲端憑證時再回來讀。
+
+## keyring 的命令列、限制與沒有 keyring 的環境
 
 在 macOS 存取一筆項目：
 
@@ -87,42 +126,7 @@ SSH 進去的伺服器、容器、WSL、CI 通常沒有 Secret Service。常見�
 
 同樣的模式在常見工具裡都看得到：git 的 credential helper（`osxkeychain`、`libsecret`、Git Credential Manager）、Docker 的 `credsStore` 設定，都是「設定檔只記用哪個 helper，真正的憑證交給系統儲存」。
 
-## 實際程式
-
-### Python 的 keyring 套件
-
-Python 的 `keyring` 套件把三個平台的 keyring 包成同一組介面（第三方套件，`pip install keyring`；Playground 的 Pyodide 沒有，所以這段不能在瀏覽器執行）：
-
-```python
-import keyring
-from keyring.errors import NoKeyringError, PasswordDeleteError
-
-SERVICE = "atlas-cli"                          # keyring 裡的服務名稱：用工具名稱，別人才認得出來
-
-def save_refresh_token(account: str, token: str) -> None:
-    keyring.set_password(SERVICE, account, token)
-
-def load_refresh_token(account: str) -> str | None:
-    return keyring.get_password(SERVICE, account)   # 找不到回 None，不會丟例外
-
-def logout(account: str) -> None:
-    try:
-        keyring.delete_password(SERVICE, account)
-    except PasswordDeleteError:                    # 本來就沒有：當作已登出
-        pass
-
-if __name__ == "__main__":
-    print("使用的 backend：", keyring.get_keyring())   # 確認實際用的是哪一個
-    try:
-        save_refresh_token("alice@example.com", "rt_Q2hlY2tPdXRUaGlzVG9rZW5JdHNGYWtl")
-    except NoKeyringError:
-        # 沒有可用的系統 keyring（常見於 SSH 主機與容器）：告訴使用者，不要偷偷改存明文
-        raise SystemExit("找不到系統 keyring。改用 `atlas login --device` 取得短效 token，或明確加上 --insecure-storage。")
-```
-
-:::stop 讀到這裡可以先停：會比較五種存放位置的風險，用 keyring 存取與刪除 token。後面的短效 token 流程與 CI 的 OIDC，在要實作自動換新與登出或要在 CI 拿雲端憑證時再回來讀。
-
-### 短效 access token + 可撤銷的 refresh token
+## 短效 access token + 可撤銷的 refresh token
 
 把兩種 token 分開存：
 
@@ -247,11 +251,10 @@ jobs:
 
 AWS 那一側的角色信任條件會檢查 OIDC token 的 `sub`，例如 `repo:example-org/site:ref:refs/heads/main`。條件寫得太寬（例如只檢查 org、不檢查 repo 與分支），任何同 org 的 repo、任何分支都能扮演這個角色，等於把權限送出去。其他 CI 平台與雲端也有對應的做法，名稱與設定方式以各自文件為準。秘密管理的其他面向見 [秘密管理](#/skill/secrets)。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 錯誤訊息或現象 | 原因 | 怎麼修 |
 |---|---|---|
-| `keyring.errors.NoKeyringError: No recommended backend was available…` | Python `keyring` 找不到系統 keyring（SSH 主機、容器、沒有桌面環境的 Linux） | 告訴使用者並提供明確的替代方案（短效 token、明確的不安全儲存選項）；不要自動裝一個明文 backend |
 | `Cannot autolaunch D-Bus without X11 $DISPLAY` 之類的 D-Bus 錯誤 | Linux 上沒有執行中的 Secret Service 或 D-Bus session | 在無桌面環境不要依賴 Secret Service；改用上一列的處理 |
 | `security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.` | macOS 找不到這筆項目：服務名稱或帳號拼錯，或從沒存過 | 確認 `-s` 與 `-a` 和存的時候一致 |
 | refresh 偶爾失敗，使用者要重新登入 | 同時有兩個 CLI 程序都在 refresh，其中一個用了已作廢的 refresh token | 用檔案鎖讓 refresh 排隊；換到新 token 後立刻寫回 keyring |

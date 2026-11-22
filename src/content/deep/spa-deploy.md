@@ -1,4 +1,4 @@
-## 從一個具體問題開始：上線後的三種白畫面
+## 具體問題：上線後的三種白畫面
 
 門診前端第一次部署到院內入口網站的子路徑 `https://portal.example/clinic/`，一天內出了三種白畫面：
 
@@ -13,11 +13,7 @@ TypeError: Failed to fetch dynamically imported module: https://portal.example/c
 
 早上載入的舊版要舊的報表 chunk，中午的部署把它刪了；伺服器把找不到的檔案一律回成 `index.html`，瀏覽器拿到 HTML 當 JavaScript，拒絕執行。
 
-三個問題都不在程式邏輯裡，在「建置產物怎麼放到伺服器上」。
-
-## 運作原理
-
-### SPA 對伺服器的要求
+## SPA 對伺服器的要求：哪些路徑回什麼、快取多久
 
 `vite build` 的產物是一包靜態檔：`index.html`、`assets/` 底下帶 hash 的 JS 與 CSS、`public/` 複製過來的檔案。伺服器不用執行任何程式，只要照下表回應：
 
@@ -29,17 +25,55 @@ TypeError: Failed to fetch dynamically imported module: https://portal.example/c
 | `/clinic/assets/ReportsView-OLD.js`（不存在） | 404 | 不快取 |
 | `/clinic/config.js`（執行時設定） | 檔案本身 | `no-cache` |
 
-nginx、物件儲存加 CDN、GitHub Pages、Firebase Hosting 都放得了 SPA，差別在能不能做到這張表的每一列。nginx 的完整設定與容器化，見 [前端與 nginx 上 K8s](#/skill/spa-containers)。
+- **fallback 只給頁面**：「找不到檔案就回 `index.html`」套用到所有路徑時，不見的舊 chunk 會拿到 200 的 HTML，就是開頭的第三個問題。`/assets/` 底下找不到要回 404。
+- **`index.html` 用 `no-cache`**：它決定要載入哪一版的 chunk，被快取的話使用者就一直拿舊版。`no-cache` 是每次向伺服器確認，沒變時回 304，只傳標頭。
+- **`assets/` 快取一年**：檔名帶內容 hash，內容變了檔名就變，可以標 `immutable`。
 
-### base：網站不在根目錄時
+## `base`：網站不在根目錄時
 
 Vite 的 `base` 預設是 `/`，建置出的 `index.html` 寫的是 `/assets/index-*.js`。放在 `/clinic/` 底下，瀏覽器去要 `https://portal.example/assets/…`，那是入口網站自己的路徑，拿到 404 或別人的檔案。
 
 設 `base: '/clinic/'` 之後，Vite 改寫三個地方：`index.html` 裡的 script 與 link、程式裡 `import.meta.env.BASE_URL` 的值、`public/` 檔案在 `index.html` 裡的參照（實測 `/config.js` 會變成 `/clinic/config.js`）。Vue Router 用 `createWebHistory(import.meta.env.BASE_URL)`，路由才知道 `/clinic/appointments` 裡的 `/clinic` 是前綴。三處（Vite、Vue Router、伺服器上的目錄）要對同一個前綴。
 
-`base: './'`（相對路徑）讓同一份建置放在任何子路徑都能跑，本站就是這樣設定。它只適合 hash 路由：用 history 模式時，從 `/clinic/appointments/42` 重新整理，`./assets/x.js` 會被解析成 `/clinic/appointments/assets/x.js`。
+## 最小範例：Vite、Vue Router 與 nginx
 
-### history 模式與 hash 模式
+```js
+// vite.config.js
+export default defineConfig({
+  plugins: [vue()],
+  base: '/clinic/',                        // 結尾的斜線要有
+})
+```
+
+```js
+// router.js
+import { createRouter, createWebHistory } from 'vue-router'
+export const router = createRouter({
+  history: createWebHistory(import.meta.env.BASE_URL),   // '/clinic/'，和 base 同一個來源
+  routes,
+})
+```
+
+nginx 的最小設定：
+
+```nginx
+# dist/ 的內容放在 /usr/share/nginx/html/clinic/
+root /usr/share/nginx/html;
+
+location /clinic/assets/ {
+    try_files $uri =404;                                   # 找不到就 404，不 fallback
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+}
+
+location /clinic/ {
+    try_files $uri $uri/ /clinic/index.html;               # 頁面路徑找不到檔案：回 index.html
+    add_header Cache-Control "no-cache" always;
+}
+```
+
+:::stop 讀到這裡可以先停：會設定 `base`、history fallback 與兩種快取，深層連結與重新整理都正常。後面的 hash 模式、fallback 的錯誤訊息對照、舊分頁的 chunk 處理與部署檢查，在換靜態主機或發版後有人回報點頁面變白畫面時再回來讀。
+
+## history 模式與 hash 模式，相對的 `base`
 
 | | history 模式（`createWebHistory`） | hash 模式（`createWebHashHistory`） |
 |---|---|---|
@@ -51,9 +85,9 @@ Vite 的 `base` 預設是 `/`，建置出的 `index.html` 寫的是 `/assets/ind
 
 本站用 hash 路由（`#/skill/…`），所以放在 GitHub Pages 與 Firebase Hosting 都不需要 fallback。GitHub Pages 不能設定 rewrite 與回應標頭；用 history 模式時，常見的做法是把 `index.html` 複製成 `404.html`，深層連結會顯示正確的畫面，但 HTTP 狀態碼是 404，監控與搜尋引擎會當成錯誤。
 
-### fallback 只給頁面
+`base: './'`（相對路徑）讓同一份建置放在任何子路徑都能跑，本站就是這樣設定。它只適合 hash 路由：用 history 模式時，從 `/clinic/appointments/42` 重新整理，`./assets/x.js` 會被解析成 `/clinic/appointments/assets/x.js`。
 
-「找不到檔案就回 `index.html`」很容易寫成套用到所有路徑。後果是開頭的第三個問題：
+## fallback 套用到所有路徑時的錯誤訊息
 
 | 伺服器設定 | 舊的 chunk 不見時，瀏覽器收到 | Console |
 |---|---|---|
@@ -62,30 +96,9 @@ Vite 的 `base` 預設是 `/`，建置出的 `index.html` 寫的是 `/assets/ind
 
 （Chrome 141 實測。舊版 Chrome 的第一行寫 `Expected a JavaScript module script`；Firefox 與 Safari 的文字不同。）兩種都會失敗，但 404 一眼看得出是「檔案不在」，MIME 錯誤常被誤會成伺服器設定壞了。更糟的情況：`/assets/` 設了一年的快取，fallback 回的那份 HTML 被快取在 `.js` 的網址下一整年。
 
-### 兩種快取
+檔名 hash 的原理見 [bundle、chunk 與 hash](#/skill/bundles-chunks)。
 
-`index.html` 決定要載入哪一版的 chunk。它被快取，使用者就一直拿舊版，一直要舊的 chunk；所以它用 `Cache-Control: no-cache`，每次向伺服器確認（沒變時回 304，只傳標頭）。`assets/` 底下的檔名帶內容 hash，內容變了檔名就變，所以可以快取一年並標 `immutable`。檔名 hash 的原理見 [bundle、chunk 與 hash](#/skill/bundles-chunks)。
-
-### 部署後，開著的舊頁面
-
-| 時間 | 事件 |
-|---|---|
-| 09:00 | 櫃台打開系統，載入 v1 的 `index.html` 與入口 chunk，還沒進過報表頁 |
-| 12:00 | 部署 v2，伺服器上只剩 v2 的 assets |
-| 14:00 | 點「報表」，v1 的程式去要 `ReportsView-<v1 的 hash>.js`，伺服器上沒有 |
-
-Vite 在動態 import（包含路由懶載入）失敗時，在 `window` 上發出 `vite:preloadError` 事件，`event.payload` 是原本的錯誤。沒有人呼叫 `event.preventDefault()`，錯誤照常丟出；呼叫了就不丟出，交給事件處理。常見的處理是重新載入整頁，拿到 v2 的 `index.html`。兩個細節：
-
-- 重新載入會丟掉畫面上還沒送出的表單，先把草稿存進 sessionStorage。
-- 限制自動重載的次數。新版本身有問題、chunk 一直載不到時，無條件重載會變成無限重新整理。
-
-另一個方向的做法是讓伺服器保留前幾版的 assets（例如部署時不刪舊檔、定期清理），這要伺服器或部署流程配合，見 [前端與 nginx 上 K8s](#/skill/spa-containers) 的「滾動更新時的 chunk 404」。
-
-## 實際程式
-
-### 伺服器規則的模擬
-
-下面把上面那張表寫成一個函式，比較「全部 fallback」與「只給頁面 fallback」對同一批請求的回應：
+把伺服器規則寫成一個函式，比較「全部 fallback」與「只給頁面 fallback」對同一批請求的回應：
 
 ```js run
 // dist 裡實際有的檔案（v2）；Reports 的舊 chunk 已經不在
@@ -118,47 +131,20 @@ for (const rule of ['all-fallback', 'pages-only']) {
 
 `all-fallback` 下，舊 chunk 拿到的是 200 與 `text/html`；`pages-only` 下是 404。把 `serve` 的快取規則改成「`/clinic/assets/` 開頭一律 immutable」，再看 fallback 那一列會變成什麼：那就是 HTML 被快取一年的情況。
 
-### Vite 與 Vue Router
+## 部署後，開著的舊頁面要舊的 chunk
 
-```js
-// vite.config.js
-export default defineConfig({
-  plugins: [vue()],
-  base: '/clinic/',                        // 結尾的斜線要有
-})
-```
+| 時間 | 事件 |
+|---|---|
+| 09:00 | 櫃台打開系統，載入 v1 的 `index.html` 與入口 chunk，還沒進過報表頁 |
+| 12:00 | 部署 v2，伺服器上只剩 v2 的 assets |
+| 14:00 | 點「報表」，v1 的程式去要 `ReportsView-<v1 的 hash>.js`，伺服器上沒有 |
 
-```js
-// router.js
-import { createRouter, createWebHistory } from 'vue-router'
-export const router = createRouter({
-  history: createWebHistory(import.meta.env.BASE_URL),   // '/clinic/'，和 base 同一個來源
-  routes,
-})
-```
+Vite 在動態 import（包含路由懶載入）失敗時，在 `window` 上發出 `vite:preloadError` 事件，`event.payload` 是原本的錯誤。沒有人呼叫 `event.preventDefault()`，錯誤照常丟出；呼叫了就不丟出，交給事件處理。常見的處理是重新載入整頁，拿到 v2 的 `index.html`。兩個細節：
 
-### nginx 的最小設定
+- 重新載入會丟掉畫面上還沒送出的表單，先把草稿存進 sessionStorage。
+- 限制自動重載的次數。新版本身有問題、chunk 一直載不到時，無條件重載會變成無限重新整理。
 
-```nginx
-# dist/ 的內容放在 /usr/share/nginx/html/clinic/
-root /usr/share/nginx/html;
-
-location /clinic/assets/ {
-    try_files $uri =404;                                   # 找不到就 404，不 fallback
-    add_header Cache-Control "public, max-age=31536000, immutable" always;
-}
-
-location /clinic/ {
-    try_files $uri $uri/ /clinic/index.html;               # 頁面路徑找不到檔案：回 index.html
-    add_header Cache-Control "no-cache" always;
-}
-```
-
-`/api` 的轉發、`config.js`、容器與 K8s 的部分見 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。Firebase Hosting、Netlify 這類平台用設定檔的 rewrite 規則做 fallback，原則相同：確認不存在的 assets 不會被改寫成 `index.html`。
-
-:::stop 讀到這裡可以先停：會設定 `base`、history fallback 與兩種快取，深層連結與重新整理都正常。後面的舊分頁 chunk 處理與部署檢查，在發版後有人回報點頁面變白畫面時再回來讀。
-
-### 處理 vite:preloadError
+另一個方向的做法是讓伺服器保留前幾版的 assets（例如部署時不刪舊檔、定期清理），這要伺服器或部署流程配合，見 [前端與 nginx 上 K8s](#/skill/spa-containers) 的「滾動更新時的 chunk 404」。
 
 ```js
 // main.js：放在 createApp 之前
@@ -176,7 +162,9 @@ window.addEventListener('vite:preloadError', (event) => {
 
 重載之後如果又失敗，第二次事件發生在 10 秒內，錯誤照常丟出，畫面可以顯示「系統更新中，請稍後重新整理」，不會一直自動重新整理。
 
-### 部署完的檢查
+## 其他主機與部署完的檢查
+
+nginx、物件儲存加 CDN、GitHub Pages、Firebase Hosting 都放得了 SPA，差別在能不能做到必讀那張表的每一列。Firebase Hosting、Netlify 這類平台用設定檔的 rewrite 規則做 fallback，原則相同：確認不存在的 assets 不會被改寫成 `index.html`。`/api` 的轉發、`config.js`、容器與 K8s 的部分見 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
 
 ```bash
 BASE=https://portal.example/clinic

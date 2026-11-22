@@ -1,4 +1,4 @@
-## 從一個具體問題開始：三千筆掛號，點一下卡半秒
+## 具體問題：三千筆掛號，點一下卡半秒
 
 「今日掛號清單」一開始只有幾十筆，後來整個院區合併成一頁，尖峰時段有 3,000 筆。櫃台反應三件事：
 
@@ -26,11 +26,9 @@
 watch(keyword, (q) => { visible.value = sortRows(filterRows(rows.value, q)) })
 ```
 
-這一課處理頁面載入完成之後的卡頓：大量 DOM、不必要的重新渲染、觸發太頻繁的處理。載入階段的速度見 [Core Web Vitals](#/skill/web-vitals)，主執行緒為什麼一忙畫面就凍結見 [事件迴圈](#/skill/event-loop)。
+載入階段的速度見 [Core Web Vitals](#/skill/web-vitals)，主執行緒為什麼一忙畫面就凍結見 [事件迴圈](#/skill/event-loop)。
 
-## 運作原理
-
-### 一次更新的成本從哪裡來
+## 一次更新的成本，與子元件什麼時候重新渲染
 
 Vue 的一次更新大致是：響應式資料改變 → 找出依賴它的元件 → 每個元件重新執行 render 產生新的 virtual DOM → 和舊的比對（patch）→ 改真正的 DOM → 瀏覽器重新算樣式、版面、繪製。成本跟三個數字成正比：
 
@@ -42,7 +40,7 @@ Vue 的一次更新大致是：響應式資料改變 → 找出依賴它的元�
 
 任何一個 task 超過 50 毫秒，DevTools 就把它標成長任務。長任務期間，點擊與輸入要排隊，畫面也停在原地，INP 跟著變差。
 
-### 子元件什麼時候會重新渲染
+### 子元件什麼時候重新渲染：props 有變才更新
 
 Vue 的子元件在「收到的 props 有任何一個變了」時才更新。官方文件的 Props Stability 一節用的就是上面的例子：每一列都收 `selectedId`，`selectedId` 一變，3,000 列的 props 都變了。把比較移到父元件，只傳一個布林值：
 
@@ -58,15 +56,26 @@ Vue 的子元件在「收到的 props 有任何一個變了」時才更新。官
 
 換選取時，只有原本選中的那列（`true` → `false`）和新選中的那列（`false` → `true`）的 props 變了，其他 2,998 列不更新。
 
-同樣的道理也適用在 computed。Vue 3.4 起，computed 的值沒變就不觸發依賴它的更新；但如果 computed 每次都回傳新的物件或陣列，即使內容相同，Vue 也視為改變。
-
-### 大量資料：分頁、虛擬捲動與 content-visibility
+## 大量資料的三種做法，與最常見的兩個狀況
 
 | 做法 | 怎麼做 | 適合 | 限制 |
 |---|---|---|---|
 | 伺服器分頁 | 一次只向 API 要 50 筆 | 多數管理介面 | 要翻頁；網址要記住頁數（見 [分頁、篩選與網址](#/skill/pagination-filter)） |
 | 虛擬捲動 | 只渲染視窗內加前後幾列，捲動時重用 DOM | 要在同一個畫面連續捲動瀏覽 | Ctrl+F 找不到沒渲染的列；列高要固定或要量；鍵盤與螢幕閱讀器要另外處理 |
 | `content-visibility: auto` | DOM 都在，視窗外的區塊跳過版面與繪製 | 長文件、區塊數量中等 | 只省渲染不省 DOM；只加在一開始就在視窗外的區塊；一定要配 `contain-intrinsic-size`，否則區塊在視窗外被當成 0 高度，捲軸會跳；要用鍵盤確認還走得到視窗外的內容；Baseline 2025（2025-09 起 Safari 也支援） |
+
+### 最常見的兩個狀況
+
+效能問題多半沒有錯誤訊息，要從 Performance 分頁與畫面的行為判斷：
+
+- **一次點擊產生幾百毫秒的長任務，大部分在 `patch`**：一個值改變讓整串列表重新渲染。把 `selectedId` 這類值換成每列的布林 props。
+- **打開頁面就有很長的 `Recalculate style` 與 `Layout`**：DOM 太多。Console 執行 `document.querySelectorAll('*').length` 看總數，改成分頁或虛擬捲動。
+
+:::stop 讀到這裡可以先停：會用 Performance 分頁找長任務，判斷子元件為什麼重新渲染，在分頁與虛擬捲動之間選一個。後面的 `shallowRef`、debounce、observer、虛擬捲動的完整程式，在資料量大或事件觸發太頻繁時再回來讀。
+
+## computed、虛擬捲動的原理與套件
+
+同樣的道理也適用在 computed。Vue 3.4 起，computed 的值沒變就不觸發依賴它的更新；但如果 computed 每次都回傳新的物件或陣列，即使內容相同，Vue 也視為改變。
 
 虛擬捲動的原理：容器的總高度設成「筆數 × 列高」，讓捲軸看起來像全部都在；根據 `scrollTop` 算出目前該顯示第幾到第幾筆，只渲染這一小段，再用 `transform` 或 padding 把它們放到正確的位置。
 
@@ -78,9 +87,7 @@ scrollTop = 24,000px → 第一筆可見的是第 500 筆
 
 Vue 官方文件列出 vue-virtual-scroller、vue-virtual-scroll-grid、vueuc 的 VVirtualList；另外常見的有 @tanstack/vue-virtual 與 VueUse 的 `useVirtualList`。
 
-:::stop 讀到這裡可以先停：會用 Performance 分頁找長任務，判斷子元件為什麼重新渲染，在分頁與虛擬捲動之間選一個。後面的 `shallowRef`、debounce、observer 與完整程式，在資料量大或事件觸發太頻繁時再回來讀。
-
-### 大量唯讀資料不需要深層響應式
+## 大量唯讀資料用 `shallowRef`
 
 `ref([...3000 筆])` 預設是深層響應式：每一筆、每個欄位都包成 Proxy，渲染時每讀一個欄位都要記錄依賴。從 API 拿回來、只會整批換掉的資料，用 `shallowRef`：
 
@@ -100,7 +107,7 @@ function markArrived(id) {
 
 官方文件提醒這通常在「一次渲染要讀十萬個以上的屬性」時才看得出差別，先量再用。`v-memo` 與 `v-once` 也一樣：前者在指定的值沒變時跳過整個子樹，後者只渲染一次；它們解決的是量到的問題，不是預設寫法。
 
-### debounce 與 throttle
+## debounce 與 throttle 的差別
 
 | | debounce | throttle |
 |---|---|---|
@@ -110,7 +117,7 @@ function markArrived(id) {
 
 和畫面同步的工作（例如拖曳時移動一個元素）用 `requestAnimationFrame`，每一格畫面最多做一次。
 
-### 進出畫面與尺寸改變：交給 observer
+## 進出畫面與尺寸改變：交給 observer
 
 AI 產出的「回到頂端」按鈕、無限捲動、圖表重繪，常寫成 `window.addEventListener('scroll', throttle(…))` 或 `resize` 監聽，每次觸發都呼叫 `getBoundingClientRect()` 算位置。這些需求瀏覽器有現成的 API，判斷交給瀏覽器、只在狀態改變時呼叫回呼：
 
@@ -131,9 +138,7 @@ io.observe(document.querySelector('.sentinel'))
 
 Chrome 團隊的 Modern Web Guidance 對「回到頂端」更進一步建議 CSS 的 scroll-state container query（`container-type: scroll-state`），完全不用 JavaScript；這個功能目前只有 Chrome、Edge 144 起支援（Limited availability），要先寫好「一直顯示」或 `IntersectionObserver` 的退路，不能當成唯一寫法。一定要在主執行緒跑完的大量計算（排序、統計），每做 50 毫秒就 `await` 讓出一次主執行緒，寫法見 [Core Web Vitals](#/skill/web-vitals) 的 INP 一節。
 
-## 實際程式
-
-### 用 vue-virtual-scroller 渲染三千筆
+## 用 vue-virtual-scroller 渲染三千筆
 
 ```vue
 <script setup>
@@ -174,7 +179,7 @@ watchDebounced(keyword, (q) => {
 
 `RecycleScroller` 適合列高固定或事先知道的情況；列高要渲染後才知道時用 `DynamicScroller`（vue-virtual-scroller 3.0.5）。
 
-### 找出誰重新渲染了
+## 找出誰重新渲染了
 
 ```js
 // main.js：只在開發版有作用
@@ -184,7 +189,7 @@ if (import.meta.env.DEV) app.config.performance = true
 
 打開後在 Performance 分頁錄一次操作，Timings 軌道會出現 `<ClinicRow> render`、`<ClinicRow> patch` 這類標記（名稱取自 Vue 原始碼的 `<元件名> 類型`），一眼看出一次點擊更新了幾個元件。Vue DevTools 的時間軸也有元件渲染的紀錄。
 
-### debounce 與 throttle 的行為
+## 動手跑：debounce 與 throttle 的行為
 
 下面兩個函式是最小的實作（正式專案用 VueUse 的 `useDebounceFn`、`useThrottleFn` 或 lodash-es），模擬一邊打字一邊捲動：
 
@@ -240,14 +245,10 @@ setTimeout(() => console.log(`輸入 ${word.length} 次`), 900)
 
 20 次捲動事件只更新了 5 次左右；5 次輸入只送出 1 次搜尋，而且是完整的「王小明內科」。實際時間會因計時器的誤差差個幾毫秒。
 
-## 常見錯誤與錯誤訊息
-
-效能問題多半沒有錯誤訊息，要從 Performance 分頁與畫面的行為判斷：
+## 其他狀況與修法
 
 | 現象 | 原因 | 修法 |
 |---|---|---|
-| 一次點擊產生幾百毫秒的長任務，大部分在 `patch` | 一個值改變讓整串列表重新渲染 | 把 `selectedId` 這類值換成每列的布林 props |
-| 打開頁面就有很長的 `Recalculate style` 與 `Layout` | DOM 太多 | 分頁或虛擬捲動；Console 執行 `document.querySelectorAll('*').length` 看總數 |
 | 輸入框打字一頓一頓 | 每次輸入都同步做重的篩選或排序 | debounce 篩選，輸入框本身維持即時 |
 | Network 分頁每打一個字就一個請求 | 搜尋沒有 debounce | `watchDebounced` 或 `useDebounceFn`，並取消前一個請求（見 [取消請求與競態](#/skill/cancel-race)） |
 | 虛擬捲動的清單捲動時跳動、出現空白 | `item-size` 和實際列高不同，或容器沒有高度 | 讓 CSS 的列高等於 `item-size`；容器設高度 |
@@ -260,6 +261,6 @@ setTimeout(() => console.log(`輸入 ${word.length} 次`), 900)
 ## 動手
 
 1. 在自己的列表頁打開 Performance 分頁，CPU 選 `4× slowdown`，錄一次最常用的操作，找出紅色三角形的 task，展開 Bottom-Up 看前三名的函式。
-2. 開發版設 `app.config.performance = true`，錄一次「換選取」，數 Timings 軌道上有幾個 `patch`；照「子元件什麼時候會重新渲染」改 props，再錄一次比較。
+2. 開發版設 `app.config.performance = true`，錄一次「換選取」，數 Timings 軌道上有幾個 `patch`；照「子元件什麼時候重新渲染」改 props，再錄一次比較。
 3. 按上面 `js run` 區塊的「在 Playground 開啟」，把 throttle 的 `wait` 改成 200、debounce 改成 100，看輸出的次數怎麼變。
 4. 在 Console 執行 `document.querySelectorAll('*').length` 記下 DOM 節點數，換成虛擬捲動後再看一次。

@@ -1,6 +1,6 @@
-## 從一個具體問題開始：訂單付款了，點數卻沒加（或加了兩次）
+## 訂單付款了，點數卻沒加（或加了兩次）
 
-訂單服務在付款成功後要做兩件事：把訂單狀態改成 `paid`，並送出一個 `order.paid` 事件。點數服務、出貨服務、通知服務都訂閱這個事件。程式這樣寫：
+訂單服務在付款成功後把訂單狀態改成 `paid`，並送出 `order.paid` 事件。點數、出貨、通知服務都訂閱這個事件：
 
 ```python
 # 很常見的寫法：先寫資料庫，再送事件
@@ -11,28 +11,22 @@ broker.publish("order.paid", {"order_id": order_id, "amount": amount})
 
 上線幾週後，客服收到兩種抱怨：
 
-- 有些訂單付了款，點數一直沒加、也沒出貨。查 log 發現那幾筆在 commit 之後、publish 之前，服務剛好在滾動更新時被砍掉。
+- 有些訂單付了款，點數一直沒加、也沒出貨。那幾筆在 commit 之後、publish 之前，服務在滾動更新時被砍掉。
 - 有些訂單的點數加了兩次。broker 送出事件後沒收到點數服務的 ack，又送了一次。
 
-有人提議把順序反過來：先送事件、再寫資料庫。這樣換成另一種錯：事件送出後交易失敗了（例如違反約束、連線斷了），下游收到一個「訂單已付款」，但資料庫裡這筆訂單根本不是 paid。出貨服務照著事件出了貨。
-
-這叫做**雙寫問題**（dual write）：資料庫和 broker 是兩個系統，沒有辦法放在同一個交易裡。只要「寫入」和「送出」是分開的兩步，中間就可能失敗。
-
-## 雙寫的兩種失敗
+這是**雙寫問題**（dual write）：資料庫和 broker 是兩個系統，放不進同一個交易。「寫入」和「送出」是分開的兩步，中間就可能失敗，換順序只是換一種錯：
 
 | 順序 | 中間失敗時 | 結果 |
 |---|---|---|
 | 先 commit，再 publish | commit 成功，publish 前程式掛掉或 broker 連不上 | **丟事件**：資料改了，下游永遠不知道 |
-| 先 publish，再 commit | publish 成功，commit 失敗 | **幽靈事件**：下游收到一件沒發生的事 |
+| 先 publish，再 commit | publish 成功，commit 失敗（違反約束、連線斷了） | **幽靈事件**：下游收到一件沒發生的事，出貨服務照著出了貨 |
 | publish 包在交易裡 | publish 成功，交易後來 rollback | 同上，事件收不回來 |
 
-在交易裡呼叫 broker 也不行：broker 不參與資料庫的交易，rollback 撤不回已經送出的訊息，而且交易期間等待外部系統會拉長鎖的時間。[交易](#/skill/transactions) 一課提過，交易裡呼叫外部服務是常見的事故來源。
-
-分散式交易（兩階段提交）理論上能讓兩個系統一起 commit，但多數 broker 不支援、效能與可用性的代價也高，[分散式基礎](#/skill/distributed-basics) 有討論。實務上的主流做法是把問題轉成「只寫一個系統」。
+broker 不參與資料庫的交易，rollback 撤不回已經送出的訊息；交易期間等待外部系統還會拉長鎖的時間（見 [交易](#/skill/transactions)）。
 
 ## outbox：事件和資料在同一個交易
 
-**Transactional outbox** 的想法是：事件先不送給 broker，而是寫進同一個資料庫的一張 `outbox` 表，和業務資料在同一個交易裡 commit。之後由另一個程序（relay）讀 outbox，把事件送進 broker。
+**Transactional outbox**：事件先不送給 broker，寫進同一個資料庫的 `outbox` 表，和業務資料在同一個交易裡 commit。之後由另一個程序（relay）讀 outbox，把事件送進 broker。
 
 ```
  ┌────────── 同一個交易 ──────────┐
@@ -55,9 +49,9 @@ broker.publish("order.paid", {"order_id": order_id, "amount": amount})
 | relay publish 成功、標記 published 前掛掉 | 下次 relay 會**再送一次**：重複 |
 | broker 暫時連不上 | relay 重試，事件延遲但不會丟 |
 
-所以 outbox 提供的是**至少一次**（at-least-once）：不會丟，但可能重複。重複由消費端處理。
+outbox 提供的是**至少一次**（at-least-once）：不會丟，但可能重複。重複由消費端處理。
 
-### 在 PostgreSQL 裡實作
+## 在 PostgreSQL 裡實作 outbox 與冪等消費
 
 ```sql run
 -- outbox 表：一列一個待送的事件
@@ -127,24 +121,30 @@ SELECT (SELECT status FROM orders WHERE id = 104) AS order_104,
 
 最後一句的結果：訂單 104 從 `pending` 變成 `paid`；訂單 103 仍是 `paid`，沒有變成 `shipped`；outbox 只有 1 筆（被撤銷的 `order.shipped` 不存在）；使用者 3 的點數是 32 而不是 64。
 
-relay 那一段的 `FOR UPDATE SKIP LOCKED` 讓多個 relay 可以並行而不搶同一批，原理見 [訊息佇列與背景工作](#/skill/queues-workers)。在這個單一連線的瀏覽器環境裡看不出並行效果，但語法相同。實務上 relay 的流程是：在交易裡選出一批並鎖住 → 送到 broker → 成功後才標記並 commit。送出成功、commit 前掛掉，就會重送。
+relay 的流程：在交易裡選出一批並鎖住 → 送到 broker → 成功後才標記並 commit。送出成功、commit 前掛掉，就會重送。`FOR UPDATE SKIP LOCKED` 讓多個 relay 並行而不搶同一批（原理見 [訊息佇列與背景工作](#/skill/queues-workers)；這個單一連線的瀏覽器環境看不出並行效果，語法相同）。
 
-outbox 表會一直長大，要定期刪除已送出一段時間的列，或改用分區表按日期整個丟掉。
+## 消費端冪等：去重紀錄和業務效果同一個交易
 
-## 消費端冪等
+傳遞是至少一次，消費端就必須**冪等**：同一個事件處理兩次，結果和一次一樣。
 
-既然傳遞是至少一次，消費端就必須**冪等**：同一個事件處理兩次，結果和一次一樣。常見兩種做法：
+每個事件有唯一的 id（outbox 的 `id`，或產生時給一個 UUID）。消費端處理前把 id 寫進 `processed_events`，主鍵擋住重複。去重紀錄和業務效果拆成兩個交易會出錯：
 
-### 冪等鍵表
+| 拆法 | 中間掛掉時 |
+|---|---|
+| 先記錄，另一個交易再加點數 | 事件被標為處理過，點數卻沒加 |
+| 先加點數，另一個交易再記錄 | 重送時又加一次 |
 
-每個事件有唯一的 id（上面的 outbox `id`，或產生時給一個 UUID）。消費端處理前把 id 寫進 `processed_events`，主鍵擋住重複。關鍵是：**去重紀錄和業務效果要在同一個交易**。
+上面的 SQL 用一句 `WITH … INSERT … UPDATE` 把兩件事放在同一個交易。沒寫 `ON CONFLICT` 時，重送的事件會讓交易失敗：
 
-- 先記錄、另一個交易再加點數：記錄成功後掛掉，事件被標為處理過，點數卻沒加。
-- 先加點數、另一個交易再記錄：加完後掛掉，重送時又加一次。
+```text
+duplicate key value violates unique constraint "processed_events_pkey"
+```
 
-上面 SQL 用一句 `WITH … INSERT … UPDATE` 把兩件事放在同一句（同一個交易）裡。效果在外部系統（寄信、呼叫第三方 API）時無法和資料庫同交易，就要靠對方支援冪等鍵，見 [付款請求的冪等與重試](#/scenario/idempotency)。
+用 `ON CONFLICT DO NOTHING` 把「重複」當成正常情況跳過。效果在外部系統（寄信、呼叫第三方 API）時無法和資料庫同交易，要靠對方支援冪等鍵，見 [付款請求的冪等與重試](#/scenario/idempotency)。
 
-### 版本號
+:::stop 讀到這裡可以先停：會用 outbox 讓事件與資料在同一個交易寫入，用冪等鍵表讓消費端承受重送。後面的版本號、順序與分區、重放、事件版本與 CDC，在事件亂序、要改事件格式、補送歷史事件或不能改寫入端程式時再回來讀。
+
+## 版本號：同時處理重複與亂序
 
 事件帶著 aggregate 的版本（或序號），消費端記錄目前處理到的版本，只接受更新的：
 
@@ -156,7 +156,9 @@ WHERE order_id = 104 AND version < 3;
 
 版本號同時處理了重複與亂序：版本 2 晚於版本 3 到達，會被丟掉。適合「最新狀態覆蓋」的情境（訂單狀態、使用者資料），不適合「每個事件都要累加」的情境（加點數、扣庫存），後者用冪等鍵表。
 
-下面用 Python 模擬 broker 重送，比較不去重與用冪等鍵去重的消費者：
+## 用 Python 模擬 broker 重送
+
+比較不去重與用冪等鍵去重的消費者：
 
 ```python run
 # broker 的至少一次傳遞：沒收到 ack 就重送，所以同一個事件可能出現兩次
@@ -211,9 +213,12 @@ print(f"冪等鍵去重：點數 = {balance}，跳過重複 {skipped} 次")
 - 消費端同一個分區只能有一個消費者在處理，才能維持順序；增加分區數可以提高並行度，但已有的鍵可能被重新分配到別的分區，改分區數要小心。
 - 重試也會打亂順序：事件 A 處理失敗被丟去重試佇列，事件 B 先處理完了。需要嚴格順序的消費者，要嘛停下來等 A，要嘛用版本號容忍亂序。
 
-outbox relay 自己也要注意：多個 relay 並行送出時，同一個 aggregate 的事件可能亂序進 broker。要保序就讓同一個 aggregate 由同一個 relay 處理，或讓消費端用版本號處理。
+outbox relay 也一樣：多個 relay 並行送出時，同一個 aggregate 的事件可能亂序進 broker。要保序就讓同一個 aggregate 由同一個 relay 處理，或讓消費端用版本號處理。
 
-:::stop 讀到這裡可以先停：會用 outbox 讓事件與資料在同一個交易寫入，用冪等鍵表或版本號讓消費端承受重送與亂序。後面的重放、事件版本與 CDC，在要改事件格式、補送歷史事件或不能改寫入端程式時再回來讀。
+## 兩階段提交與 outbox 表的清理
+
+- 分散式交易（兩階段提交）理論上能讓資料庫與 broker 一起 commit，但多數 broker 不支援、效能與可用性的代價也高，[分散式基礎](#/skill/distributed-basics) 有討論。實務上的主流做法是把問題轉成「只寫一個系統」。
+- outbox 表會一直長大，要定期刪除已送出一段時間的列，或改用分區表按日期整個丟掉。
 
 ## 重放與事件版本
 
@@ -254,7 +259,7 @@ outbox relay 自己也要注意：多個 relay 並行送出時，同一個 aggre
 | 資料改了，下游沒收到 | 雙寫：commit 後 publish 前失敗 | outbox 或 CDC |
 | 下游收到一件沒發生的事 | 先 publish 後 commit，或交易裡 publish 後 rollback | outbox：事件只在 commit 後才可能送出 |
 | 點數加兩次、信寄兩封 | 至少一次傳遞，消費者不冪等 | 冪等鍵表，去重與效果同一交易 |
-| `duplicate key value violates unique constraint "processed_events_pkey"` | 重送的事件撞到冪等鍵表的主鍵；沒用 `ON CONFLICT` 時會讓交易失敗 | 用 `ON CONFLICT DO NOTHING`，把「重複」當成正常情況跳過 |
+
 | 狀態從 shipped 退回 paid | 事件亂序，舊事件覆蓋新狀態 | 版本號：`WHERE version < 新版本` |
 | outbox 越來越大、relay 變慢 | 已送出的列沒清 | 定期刪除，或用分區表；`published_at IS NULL` 加部分索引 |
 | 資料庫磁碟被 WAL 吃滿 | CDC 的 replication slot 停止消費 | 監控 slot 落後量，停用的 slot 要刪除 |

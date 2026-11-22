@@ -1,4 +1,4 @@
-## 從一個具體問題開始：按「回上一步」，掛號就送出了
+## 具體問題：按「回上一步」，掛號就送出了
 
 門診掛號表單分兩步：第一步填基本資料，第二步確認。上線第一天就有三個回報：
 
@@ -8,24 +8,14 @@
 
 另外，設定頁的「接收簡訊提醒」做成一個開關，可是切完還要按頁面最下面的「儲存」才生效。使用者切完就關掉頁面，以為已經設定好了。
 
-這些問題都出在元件選錯或少寫了一個屬性：按鈕的 `type`、欄位的 `type` 與 `label`，以及開關該不該立即生效。
+## 按鈕：`type` 決定會不會送出表單
 
-## 運作原理
+`<button>` 的 `type` 有三種：`submit`（送出表單）、`reset`（清空表單）、`button`（什麼都不做，交給程式）。沒寫 `type`、也沒有 `command` 屬性時，在表單裡就是送出按鈕。所以：
 
-### 按鈕的層級
+- 表單裡只有真正送出的那一顆寫 `type="submit"`，其他一律寫 `type="button"`。
+- 表單有送出按鈕時，在文字欄位按 Enter 會送出表單（implicit submission），很多人習慣這樣送出；送出按鈕用 `div` 做，按 Enter 就不會送。
 
-一個畫面上的按鈕依重要程度分層，視覺上要拉得開：
-
-| 層級 | 用在 | 常見樣式 | 門診系統的例子 |
-|---|---|---|---|
-| primary | 這個區塊最主要的下一步，一個區塊一顆 | 實心主色底 | 確認掛號、送出 |
-| secondary | 其他動作 | 外框或淺色底 | 回上一步、另存草稿 |
-| ghost（tertiary） | 次要、每列都重複出現的動作 | 只有文字或很細的框 | 每列的「詳細」 |
-| danger | 刪除、取消預約等不可逆的動作 | 紅色系 | 取消預約、刪除病歷附件 |
-
-兩顆 primary 並排，使用者要停下來讀文字才知道該按哪顆。danger 按鈕通常搭配確認 Dialog 或「復原」，見 [浮層](#/skill/overlays) 與 [回饋](#/skill/feedback)。
-
-### 連結還是按鈕
+換頁用連結，在原地做事用按鈕。外觀依設計調整，元素依功能選：
 
 | | `<a href>` | `<button>` |
 |---|---|---|
@@ -34,22 +24,11 @@
 | 中鍵、新分頁、複製網址 | 可以 | 不行 |
 | 螢幕閱讀器念出 | 連結 | 按鈕 |
 
-外觀可以依設計調整，元素要依功能選。WAI-ARIA APG 的 Button 模式也這樣寫：元件的外觀與角色都要符合它實際的功能。
-
-### 按鈕的 `type`
-
-`<button>` 的 `type` 有三種：`submit`（送出表單）、`reset`（清空表單）、`button`（什麼都不做，交給程式）。沒寫 `type`、也沒有 `command` 屬性時，在表單裡就是送出按鈕。所以：
-
-- 表單裡只有真正送出的那一顆寫 `type="submit"`，其他一律寫 `type="button"`。
-- 表單有送出按鈕時，在文字欄位按 Enter 會送出表單（implicit submission），很多人習慣這樣送出；送出按鈕用 `div` 做，按 Enter 就不會送。
-
-### 輸入框的名稱、說明與錯誤
+## 輸入框：label、`type` 與 `autocomplete`
 
 每個欄位要有一個名稱。`<label for="phone">` 的文字會成為 `id="phone"` 欄位的名稱，點 label 也會聚焦欄位、擴大點擊範圍。placeholder 只在欄位空白時顯示，部分瀏覽器會拿它當最後的備用名稱，但輸入之後畫面上就看不到了，不能代替 label。
 
 說明文字（「手機號碼，09 開頭共 10 碼」）與錯誤訊息（「請輸入 10 碼手機號碼」）放在欄位旁邊，用 `aria-describedby` 連到欄位，螢幕閱讀器聚焦欄位時會接著念。錯誤時欄位加 `aria-invalid="true"`；狀態的細節見 [互動狀態](#/skill/ui-states)。
-
-### `type`、`inputmode` 與 `autocomplete`
 
 | 欄位 | 寫法 | 手機鍵盤 | 瀏覽器驗證 |
 |---|---|---|---|
@@ -59,38 +38,7 @@
 | 姓名 | `type="text"` `autocomplete="name"` | 一般鍵盤 | 不驗 |
 | 生日 | `type="date"` `autocomplete="bday"` | 系統日曆 | 驗日期 |
 
-病歷號、身分證末碼這類「由數字組成但不是數量」的值，不用 `type="number"`：它會出現上下箭頭，聚焦時滾動滑鼠滾輪可能改到值（依瀏覽器而定）；Vue 的 `v-model` 遇到 `type="number"` 還會自動轉成數字，開頭的 0 就不見了。用 `inputmode="numeric"` 只換鍵盤。
-
-`autocomplete` 讓瀏覽器自動填入。WCAG 2.1 的 1.3.5 Identify Input Purpose（AA）要求收集使用者本人資料的欄位，用程式能判斷的方式標出用途，`autocomplete` 就是這個方式。
-
-### Checkbox、Radio、Switch、Select
-
-| 元件 | 能選幾個 | 何時生效 | 鍵盤 | 例子 |
-|---|---|---|---|---|
-| Checkbox（單一） | 是或否 | 通常按送出才生效 | Space 切換 | 同意就診須知 |
-| Checkbox 群組 | 多個 | 按送出 | Tab 逐一移動、Space 切換 | 過敏藥物（選項少時） |
-| Radio 群組 | 一個，互斥 | 按送出 | Tab 進群組，方向鍵移動並選取 | 初診／複診 |
-| Switch | 開或關 | 立即生效 | Space 切換（Enter 選用） | 接收簡訊提醒 |
-| Select | 一個 | 按送出 | 見 [選擇類元件](#/skill/select-combobox) | 科別（選項多） |
-
-Radio 的鍵盤行為常被誤會：Tab 進入群組時停在已選的那一個（都沒選時停在第一個），在群組裡用方向鍵移動並同時選取，再按 Tab 就離開整個群組。整組用 `<fieldset>` 包起來，`<legend>` 寫群組的題目（「初診或複診」）。
-
-Switch 的 ARIA 角色是 `switch`，狀態用 `aria-checked`；用 `<input type="checkbox">` 做時用原生的 `checked`。APG 提醒 Switch 的 label 不能隨狀態改變：寫「接收簡訊提醒」，不要切換時改成「已開啟」。HTML 的 `<input type="checkbox" switch>` 到 2026-11 只有 Safari 支援，還不是 Baseline，目前用 `role="switch"`。
-
-### readonly 與 disabled
-
-| | `readonly` | `disabled` |
-|---|---|---|
-| 拿得到焦點 | 可以 | 不行 |
-| 值隨表單送出 | 會 | 不會 |
-| 能不能改 | 不能 | 不能 |
-| 用在 | 給人看、要送出的值（病歷號） | 暫時不能操作的欄位 |
-
-### 點擊範圍
-
-WCAG 2.2 的 2.5.8 Target Size (Minimum)（AA）要求點擊目標至少 24×24 CSS px；比較小的目標，要和相鄰目標保持足夠間距（以目標為中心、直徑 24px 的圓不能互相重疊）。AAA 等級的 2.5.5 是 44×44。只有圖示的按鈕最容易不夠大：圖示 16px，按鈕本身也只有 16px。
-
-## 實際程式
+## 最小範例：掛號確認表單
 
 ```vue
 <script setup>
@@ -165,16 +113,61 @@ textarea { min-block-size: 4.5rem; max-block-size: 12rem; field-sizing: content;
 </style>
 ```
 
-幾個細節：
-
 - `aria-describedby` 同時指向說明與錯誤兩個元素，錯誤是空的時候用 CSS 藏起來，元素本身一直在。
-- 「主訴」用 `field-sizing: content` 隨內容長高，`max-block-size` 之後改成捲動。`field-sizing` 在 2026 年 6 月才成為 Baseline（Newly available），舊瀏覽器忽略這行、維持 `min-block-size` 的高度，使用者仍可以拖右下角調整。以前的做法是監聽 `input` 事件、把 `height` 設成 `scrollHeight`。
 - 「病歷號」用 `readonly`，值會送出、也能 Tab 到並被念出來。
-- 開關是 `type="button"` 的按鈕，放在表單裡也不會送出表單。
+- 開關是 `type="button"` 的按鈕，放在表單裡不會送出表單；切換就送 `PATCH`，不等「儲存」。
 
-:::stop 讀到這裡可以先停：會選按鈕的層級與 `type`，替欄位配好 label、`type` 與 `autocomplete`，分得清 Checkbox、Radio、Switch。後面的 icon button 與常見錯誤，在做只有圖示的按鈕或驗收別人的表單時再回來讀。
+:::stop 讀到這裡可以先停：會替按鈕寫對 `type`，替欄位配好 label、`type` 與 `autocomplete`。後面的按鈕層級、Checkbox／Radio／Switch 的差別、readonly 與 disabled、icon button 與常見錯誤，在選元件或驗收別人的表單時再回來讀。
 
-Icon button 的寫法：
+## 按鈕的層級
+
+一個畫面上的按鈕依重要程度分層，視覺上要拉得開：
+
+| 層級 | 用在 | 常見樣式 | 門診系統的例子 |
+|---|---|---|---|
+| primary | 這個區塊最主要的下一步，一個區塊一顆 | 實心主色底 | 確認掛號、送出 |
+| secondary | 其他動作 | 外框或淺色底 | 回上一步、另存草稿 |
+| ghost（tertiary） | 次要、每列都重複出現的動作 | 只有文字或很細的框 | 每列的「詳細」 |
+| danger | 刪除、取消預約等不可逆的動作 | 紅色系 | 取消預約、刪除病歷附件 |
+
+兩顆 primary 並排，使用者要停下來讀文字才知道該按哪顆。danger 按鈕通常搭配確認 Dialog 或「復原」，見 [浮層](#/skill/overlays) 與 [回饋](#/skill/feedback)。
+
+WAI-ARIA APG 的 Button 模式對連結與按鈕的選擇也這樣寫：元件的外觀與角色都要符合它實際的功能。
+
+## 數字代碼不用 `type="number"`
+
+病歷號、身分證末碼這類「由數字組成但不是數量」的值，不用 `type="number"`：它會出現上下箭頭，聚焦時滾動滑鼠滾輪可能改到值（依瀏覽器而定）；Vue 的 `v-model` 遇到 `type="number"` 還會自動轉成數字，開頭的 0 就不見了。用 `inputmode="numeric"` 只換鍵盤。
+
+`autocomplete` 讓瀏覽器自動填入。WCAG 2.1 的 1.3.5 Identify Input Purpose（AA）要求收集使用者本人資料的欄位，用程式能判斷的方式標出用途，`autocomplete` 就是這個方式。
+
+## Checkbox、Radio、Switch、Select 怎麼選
+
+| 元件 | 能選幾個 | 何時生效 | 鍵盤 | 例子 |
+|---|---|---|---|---|
+| Checkbox（單一） | 是或否 | 通常按送出才生效 | Space 切換 | 同意就診須知 |
+| Checkbox 群組 | 多個 | 按送出 | Tab 逐一移動、Space 切換 | 過敏藥物（選項少時） |
+| Radio 群組 | 一個，互斥 | 按送出 | Tab 進群組，方向鍵移動並選取 | 初診／複診 |
+| Switch | 開或關 | 立即生效 | Space 切換（Enter 選用） | 接收簡訊提醒 |
+| Select | 一個 | 按送出 | 見 [選擇類元件](#/skill/select-combobox) | 科別（選項多） |
+
+Radio 的鍵盤行為常被誤會：Tab 進入群組時停在已選的那一個（都沒選時停在第一個），在群組裡用方向鍵移動並同時選取，再按 Tab 就離開整個群組。整組用 `<fieldset>` 包起來，`<legend>` 寫群組的題目（「初診或複診」）。
+
+Switch 的 ARIA 角色是 `switch`，狀態用 `aria-checked`；用 `<input type="checkbox">` 做時用原生的 `checked`。APG 提醒 Switch 的 label 不能隨狀態改變：寫「接收簡訊提醒」，不要切換時改成「已開啟」。HTML 的 `<input type="checkbox" switch>` 到 2026-11 只有 Safari 支援，還不是 Baseline，目前用 `role="switch"`。
+
+## readonly 與 disabled
+
+| | `readonly` | `disabled` |
+|---|---|---|
+| 拿得到焦點 | 可以 | 不行 |
+| 值隨表單送出 | 會 | 不會 |
+| 能不能改 | 不能 | 不能 |
+| 用在 | 給人看、要送出的值（病歷號） | 暫時不能操作的欄位 |
+
+## 點擊範圍與 icon button
+
+WCAG 2.2 的 2.5.8 Target Size (Minimum)（AA）要求點擊目標至少 24×24 CSS px；比較小的目標，要和相鄰目標保持足夠間距（以目標為中心、直徑 24px 的圓不能互相重疊）。AAA 等級的 2.5.5 是 44×44。只有圖示的按鈕最容易不夠大：圖示 16px，按鈕本身也只有 16px。
+
+只有圖示的按鈕：
 
 ```vue
 <button type="button" class="icon-btn" :aria-label="`刪除 ${appt.date} 的預約`" @click="remove(appt.id)">
@@ -187,6 +180,10 @@ Icon button 的寫法：
 ```
 
 `aria-label` 寫出動作與對象：清單裡每一列都有刪除按鈕時，只寫「刪除」，螢幕閱讀器使用者用按鈕清單瀏覽時會聽到十個一樣的「刪除」。
+
+## 隨內容長高的 textarea
+
+範例的「主訴」用 `field-sizing: content` 隨內容長高，`max-block-size` 之後改成捲動。`field-sizing` 在 2026 年 6 月才成為 Baseline（Newly available），舊瀏覽器忽略這行、維持 `min-block-size` 的高度，使用者仍可以拖右下角調整。以前的做法是監聽 `input` 事件、把 `height` 設成 `scrollHeight`。
 
 ## 常見錯誤
 

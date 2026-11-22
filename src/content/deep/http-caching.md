@@ -1,15 +1,13 @@
-## 從一個具體問題開始：上線了，使用者還在跑舊版
+## 具體問題：上線了，使用者還在跑舊版
 
-週四下午部署新版前端，修了結帳按鈕的 bug。一小時後客服仍陸續收到同樣的回報。工程師自己打開網站是新版，請使用者「重新整理」也沒用，要「清除快取」才好。
-
-追查後發現兩件事：
+週四下午部署新版前端，修了結帳按鈕的 bug。一小時後客服仍陸續收到同樣的回報。工程師自己打開網站是新版，請使用者「重新整理」也沒用，要「清除快取」才好。追查後發現兩件事：
 
 1. `index.html` 的回應帶著 `Cache-Control: max-age=86400`，瀏覽器在一天內直接用存著的舊 `index.html`，而舊的 `index.html` 引用的是舊的 `app.js`。
 2. 另一個 API `GET /me/orders` 回應帶了 `Cache-Control: public, max-age=60`，CDN 把 A 使用者的訂單列表存起來，60 秒內回給了其他使用者。
 
-第一個問題讓修正遲遲送不到使用者手上，第二個問題是資料外洩。兩個都只是一個標頭的值寫錯。HTTP 快取的規則決定誰可以存回應、存多久、過期後怎麼確認是否還能用，寫對了能省下大部分流量，寫錯了會出上面這兩種事故。
+第一個問題讓修正送不到使用者手上，第二個是資料外洩。兩個都只是一個標頭的值寫錯。
 
-## 運作原理：快取在哪裡
+## 快取在哪裡，與 Cache-Control 的指令
 
 ```
 瀏覽器 ──→ [瀏覽器快取] ──→ [CDN／反向代理快取] ──→ 原站（你的伺服器）
@@ -25,11 +23,7 @@
 | 你能主動清掉嗎 | 不能，只能等它過期或靠檔名改變 | 通常可以呼叫 CDN 的 purge API |
 | 用哪個指令控制時間 | `max-age` | `s-maxage` 優先，沒有才用 `max-age` |
 
-這個差別決定了策略：**瀏覽器快取的時間要保守**（一旦存了就收不回來），CDN 可以存久一點，內容更新時主動 purge。
-
-## Cache-Control 的指令
-
-### 回應的指令
+**瀏覽器快取的時間要保守**（一旦存了就收不回來），CDN 可以存久一點，內容更新時主動 purge。
 
 | 指令 | 意思 |
 |---|---|
@@ -39,20 +33,46 @@
 | `no-store` | **不要存**，任何快取都不行 |
 | `private` | 只有瀏覽器可以存，共用快取不能存 |
 | `public` | 共用快取也可以存，即使請求帶了 `Authorization` |
-| `must-revalidate` | 過期之後一定要確認，不能在原站連不上時拿過期的版本頂著用 |
 | `immutable` | 新鮮期間內內容不會變，重新整理時也不必確認（支援程度依瀏覽器而異） |
-| `stale-while-revalidate=N` | 過期後 N 秒內可以先回舊的，同時在背景向原站確認 |
 
 最常被搞混的一組：
 
-- **`no-cache` 不是「不要快取」**。它是「存著，但每次都要問」。搭配 ETag，原站回 304 時不用傳 body。
+- **`no-cache` 是「存著，但每次都要問」**。回應帶 `ETag` 時，瀏覽器用 `If-None-Match` 詢問，內容沒變原站就回 `304 Not Modified`，不用傳 body。
 - **`no-store` 才是不要存**。用在含敏感資料、絕不能留在磁碟上的回應。
 
-### 沒有寫 Cache-Control 會怎樣
+## 最小設定：五種回應各自該寫什麼
 
-回應沒有 `Cache-Control` 也沒有 `Expires`，但有 `Last-Modified` 時，快取**可以自己估一個新鮮時間**（heuristic freshness，RFC 9111 允許；常見的估法是「距離上次修改時間的 10%」）。一個 10 天前修改的檔案，可能被存上一天。所以「沒寫」不等於「不快取」，每個回應都應該明確寫出 `Cache-Control`。
+| 回應 | 設定 | 理由 |
+|---|---|---|
+| 檔名帶雜湊的靜態資產 `app.3f9a1c.js` | `Cache-Control: public, max-age=31536000, immutable` | 內容一變，檔名就變；同一個檔名的內容永遠不變，可以存一年 |
+| `index.html`（入口） | `Cache-Control: no-cache` 加 ETag | 每次都確認，部署後下一次載入就拿到新版，再引用新檔名的資產 |
+| 公開、變動慢的 API（商品目錄） | `Cache-Control: public, max-age=30, s-maxage=300` | 瀏覽器存 30 秒、CDN 存 5 分鐘；商品更新時 purge CDN |
+| 個人化 API（我的訂單） | `Cache-Control: private, no-cache` 加 ETag | 不能進共用快取；瀏覽器可以存但每次確認 |
+| 敏感資料（付款資訊、一次性 token） | `Cache-Control: no-store` | 不留在任何地方 |
 
-另外，共用快取預設**不會**存「請求帶有 `Authorization` 標頭」的回應，除非回應明確寫了 `public`、`s-maxage` 或 `must-revalidate`。在 API 回應上隨手加 `public`，就是開頭第二個事故的成因。
+部署工具（Vite、webpack 等）產出的資產檔名本來就帶雜湊，只要入口檔不要長快取，新版就能立刻生效。
+
+## 最常見的兩個錯誤
+
+| 現象 | 原因 | 修正 |
+|---|---|---|
+| 部署後使用者一直拿到舊版 | `index.html` 有長快取 | 入口檔改 `no-cache`；長快取只給檔名帶雜湊的資產 |
+| 使用者看到別人的資料 | 個人化回應被 CDN 存了：寫了 `public`，或 CDN 設定成忽略原站標頭全部快取 | 改 `private`；檢查 CDN 的快取規則是否覆蓋了原站的 `Cache-Control` |
+
+:::stop 讀到這裡可以先停：分得出瀏覽器快取與 CDN，會替靜態資產、入口檔、公開與個人化 API 寫 `Cache-Control`。後面是其他指令、沒寫標頭時的行為、新鮮度與 `Age`、ETag 與 304 的細節、`Vary` 與可執行的模擬，在回應從來沒有 304、同一個網址依語言或壓縮回不同內容、或 CDN 命中率很低時再回來讀。
+
+## 其他指令，與沒有寫 Cache-Control 的行為
+
+| 指令 | 意思 |
+|---|---|
+| `must-revalidate` | 過期之後一定要確認，不能在原站連不上時拿過期的版本頂著用 |
+| `stale-while-revalidate=N` | 過期後 N 秒內可以先回舊的，同時在背景向原站確認 |
+
+回應沒有 `Cache-Control` 也沒有 `Expires`，但有 `Last-Modified` 時，快取**可以自己估一個新鮮時間**（heuristic freshness，RFC 9111 允許；常見的估法是「距離上次修改時間的 10%」）。一個 10 天前修改的檔案，可能被存上一天。「沒寫」不等於「不快取」，每個回應都應該明確寫出 `Cache-Control`。
+
+共用快取預設**不會**存「請求帶有 `Authorization` 標頭」的回應，除非回應明確寫了 `public`、`s-maxage` 或 `must-revalidate`。在 API 回應上隨手加 `public`，就是開頭第二個事故的成因。
+
+部分 CDN 支援 `CDN-Cache-Control`（RFC 9213），讓 CDN 和瀏覽器的設定可以完全分開；各家 CDN 也有自己的設定方式。快取到期瞬間大量請求打回原站（雪崩、擊穿）的處理，見 [快取到期的瞬間](#/scenario/edge-cache)；API 層要用 HTTP 快取還是 Redis，見 [API 快取](#/scenario/cache)。
 
 ## 新鮮度與年齡
 
@@ -116,11 +136,9 @@ ETag 怎麼產生：
 
 `If-Match` 是同一套機制的另一個用途：寫入時帶上版本，版本不對回 `412 Precondition Failed`，用來防止覆蓋別人的修改（見 [REST API 設計](#/skill/rest-design)）。
 
-:::stop 讀到這裡可以先停：會寫 `Cache-Control`、用 ETag 拿到 304。後面的 Vary 與典型設定，在同一個網址依語言、壓縮或登入狀態回不同內容時再回來讀。
-
 ## Vary：同一個網址，不同的回應
 
-`/products/1` 對 `Accept-Encoding: br` 的請求回 Brotli 壓縮的 body，對不支援的客戶端回未壓縮的。快取若只用網址當 key，就可能把 Brotli 的 body 給了不支援的客戶端。`Vary` 告訴快取：「key 要加上這些請求標頭」：
+`/products/1` 對 `Accept-Encoding: br` 的請求回 Brotli 壓縮的 body，對不支援的客戶端回未壓縮的。快取若只用網址當 key，就可能把 Brotli 的 body 給了不支援的客戶端。`Vary` 告訴快取：key 要加上這些請求標頭。
 
 ```http
 Vary: Accept-Encoding
@@ -135,20 +153,6 @@ Vary: Accept-Encoding
 | `*` | 每個請求都視為不同，實際上無法快取 |
 
 CDN 對 `Vary` 的支援程度不一，有些只支援特定幾個標頭，或用自己的 cache key 設定取代 `Vary`，上線前要查所用 CDN 的文件。
-
-## 幾種典型的設定
-
-| 回應 | 設定 | 理由 |
-|---|---|---|
-| 檔名帶雜湊的靜態資產 `app.3f9a1c.js` | `Cache-Control: public, max-age=31536000, immutable` | 內容一變，檔名就變；同一個檔名的內容永遠不變，可以存一年 |
-| `index.html`（入口） | `Cache-Control: no-cache` 加 ETag | 每次都確認，部署後下一次載入就拿到新版，再引用新檔名的資產 |
-| 公開、變動慢的 API（商品目錄） | `Cache-Control: public, max-age=30, s-maxage=300` | 瀏覽器存 30 秒、CDN 存 5 分鐘；商品更新時 purge CDN |
-| 個人化 API（我的訂單） | `Cache-Control: private, no-cache` 加 ETag | 不能進共用快取；瀏覽器可以存但每次確認 |
-| 敏感資料（付款資訊、一次性 token） | `Cache-Control: no-store` | 不留在任何地方 |
-
-開頭的第一個事故，是把 `index.html` 當成了第一列。部署工具（Vite、webpack 等）產出的資產檔名本來就帶雜湊，只要入口檔不要長快取，新版就能立刻生效。
-
-部分 CDN 支援 `CDN-Cache-Control`（RFC 9213），讓 CDN 和瀏覽器的設定可以完全分開；各家 CDN 也有自己的設定方式。快取到期瞬間大量請求打回原站（雪崩、擊穿）的處理，見 [快取到期的瞬間](#/scenario/edge-cache)；API 層要用 HTTP 快取還是 Redis，見 [API 快取](#/scenario/cache)。
 
 ## 實際程式：模擬快取與條件請求
 
@@ -215,12 +219,10 @@ console.log(get('/products/1', 50, origin))
 console.log(get('/products/1', 200, origin))
 ```
 
-## 常見錯誤
+## 其他常見錯誤
 
 | 現象 | 原因 | 修正 |
 |---|---|---|
-| 部署後使用者一直拿到舊版 | `index.html` 有長快取 | 入口檔改 `no-cache`；長快取只給檔名帶雜湊的資產 |
-| 使用者看到別人的資料 | 個人化回應被 CDN 存了：寫了 `public`，或 CDN 設定成忽略原站標頭全部快取 | 改 `private`；檢查 CDN 的快取規則是否覆蓋了原站的 `Cache-Control` |
 | 每次都 200，從來沒有 304 | 回應沒有 `ETag`／`Last-Modified`；或 ETag 每次都不同（例如把時間戳、隨機 id 算進雜湊）；或多台伺服器各自產生不同的 ETag | 用資料版本產生 ETag；確認多台伺服器對同一內容產生相同的值 |
 | 304 之後畫面還是舊的 | 原站判斷錯，資料已變但 ETag 沒變（ETag 只依據部分欄位） | ETag 要涵蓋回應裡所有會變的內容 |
 | CDN 命中率很低 | `Vary: Cookie`、`Vary: User-Agent`；查詢字串裡有追蹤參數讓每個網址都不同 | 移除不必要的 `Vary`；在 CDN 設定忽略特定查詢參數 |

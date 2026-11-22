@@ -1,17 +1,15 @@
-## 從一個具體問題開始：一個 640 行的 TodayClinic.vue
+## 具體問題：一個 640 行的 TodayClinic.vue
 
-「今日門診」頁交給 AI 一次做完，產出是一個 640 行的 `TodayClinic.vue`：呼叫三支 API、14 個 ref、3 個 watch、表格的每一列直接寫在模板裡。畫面能動，接著要改需求時問題一個個出現：
+「今日門診」頁交給 AI 一次做完，產出是一個 640 行的 `TodayClinic.vue`：呼叫三支 API、14 個 ref、3 個 watch、表格的每一列直接寫在模板裡。畫面能動，改需求時問題一個個出現：
 
 - 日期同時存在三個地方：元件的 `selectedDate` ref、Pinia 的 `ui.date`、網址的 `?date=`。日期列改了 store，表格讀的是 ref，兩邊差一天。
 - 要在「預約查詢」頁重用那張表格，只能整段複製，因為表格的模板裡直接呼叫了 `fetch`。
 - 想替「報到」按鈕寫元件測試，得先 mock 三支 API、路由與 store。
 - 一個 watch 把 `appointments` 篩選後抄到 `filtered`，另一個 watch 再算 `checkedInCount`；改了報到狀態，數字要等下一次 watch 才更新。
 
-先決定元件怎麼拆、每個元件收什麼、送什麼、狀態放在哪裡，再請 AI 寫程式。拆分是設計，寫程式是實作，兩件事分開做，各自都容易驗收。
+先決定元件怎麼拆、每個元件收什麼、送什麼、狀態放在哪裡，再請 AI 寫程式。
 
-## 運作原理
-
-### 由外到內拆
+## 元件樹與介面表：由外到內拆，寫下 props 與 emits
 
 1. **區域**：照 [把畫面描述成文字](#/skill/describe-ui) 的版面段落，一個區域通常是一個元件：日期列、診間 Tabs、預約表格。
 2. **重複的東西**：表格的每一列、卡片清單的每一張卡，各是一個元件。
@@ -31,7 +29,7 @@ TodayClinicPage                 頁面元件：讀網址、抓資料、處理錯
 
 ### 每個元件的介面：props 與 emits
 
-元件之間只透過 props 與 emits 溝通：資料往下、事件往上。把每個元件的輸入與輸出寫成一張表，就是元件的規格：
+元件之間只透過 props 與 emits 溝通：資料往下、事件往上。每個元件的輸入與輸出寫成一張表：
 
 | 元件 | props（輸入） | emits（輸出） | 自己持有的狀態 |
 |---|---|---|---|
@@ -41,11 +39,9 @@ TodayClinicPage                 頁面元件：讀網址、抓資料、處理錯
 | `AppointmentRow` | `appointment` | `check-in`（預約 id） | 報到中（按鈕停用） |
 | `StatusBadge` | `status` | 無 | 無 |
 
-沒有這張表時，AI 會自己決定介面：有時把 store 直接 import 進 `AppointmentRow`，有時讓子元件自己抓資料，有時多出一個表上沒有的 prop。有了表，驗收時一個一個對 `defineProps` 與 `defineEmits` 就好。
+沒有這張表時，AI 會自己決定介面：有時把 store 直接 import 進 `AppointmentRow`，有時讓子元件自己抓資料。有了表，驗收時一個一個對 `defineProps` 與 `defineEmits` 就好。
 
-`v-model` 是一個 prop 加一個 `update:` 事件的簡寫。Vue 3.4 起穩定的 `defineModel()` 讓子元件少寫這兩段：`const date = defineModel('date')` 就宣告了 `date` prop 與 `update:date` 事件，父元件用 `v-model:date` 接。它沒有改變資料流的方向：值仍然由父元件持有。
-
-### 狀態放哪一層
+## 狀態放哪一層
 
 | 問題 | 放這裡 | 例子 |
 |---|---|---|
@@ -55,9 +51,36 @@ TodayClinicPage                 頁面元件：讀網址、抓資料、處理錯
 | 只有一個元件用 | 那個元件自己 | 展開了哪一列、報到中的按鈕、輸入框打到一半的字 |
 | 能從其他狀態算出來 | 不存，用 `computed` | 篩選後的清單、已報到人數 |
 
-由上往下問，第一個答「是」的那一列決定放哪裡。最常見的錯是放太高：什麼都放進 Pinia，每個元件都能改，出了錯不知道是誰改的。其次是同一份資料放兩個地方，例如開頭的日期。網址的讀寫方式見 [分頁、篩選與網址](#/skill/pagination-filter)，Pinia 的用法見 [Pinia：全域狀態](#/skill/pinia)。
+由上往下問，第一個答「是」的那一列決定放哪裡。
 
-### 頁面元件與展示元件
+## 第一步：先要元件樹與介面表，與最常見的兩個錯誤
+
+```text
+「今日門診」頁先不要寫程式。請輸出：
+1. 元件樹（名稱與層級）。
+2. 每個元件的 props（名稱、型別、必填）、emits（事件名稱與 payload）、自己持有的狀態。
+3. 每份狀態放在哪裡：網址、Pinia、頁面元件或子元件，附一句理由。
+限制：只有頁面元件可以呼叫 API、讀寫網址；登入者資訊從 Pinia 的 auth store 讀；子元件不 import fetch、router 或 store。
+```
+
+確認或修改這份輸出之後，再請它照這份規格實作，並且一個元件一個元件交付。
+
+### 最常見的兩個錯誤
+
+- **同一份資料兩處不同步（日期差一天）**：同一個狀態放在 ref、store、網址三處。選一個來源，其他地方從它讀。
+- **`[Vue warn] Set operation on key "date" failed: target is readonly.`**：子元件直接改了 props。用 `defineModel` 或 emit 讓父元件改。
+
+:::stop 讀到這裡可以先停：會由外到內拆出元件樹、寫出介面表、決定每份狀態放哪一層，並先向 AI 要規格再要程式。後面的 `defineModel`、頁面元件與展示元件的完整程式、computed 與再拆的訊號，在開始實作或元件又變大時再回來讀。
+
+## `v-model` 與 `defineModel()`
+
+`v-model` 是一個 prop 加一個 `update:` 事件的簡寫。Vue 3.4 起穩定的 `defineModel()` 讓子元件少寫這兩段：`const date = defineModel('date')` 就宣告了 `date` prop 與 `update:date` 事件，父元件用 `v-model:date` 接。它沒有改變資料流的方向：值仍然由父元件持有。
+
+## 狀態放錯層的兩種情況
+
+最常見的錯是放太高：什麼都放進 Pinia，每個元件都能改，出了錯不知道是誰改的。其次是同一份資料放兩個地方，例如開頭的日期。網址的讀寫方式見 [分頁、篩選與網址](#/skill/pagination-filter)，Pinia 的用法見 [Pinia：全域狀態](#/skill/pinia)。
+
+## 頁面元件與展示元件的分工
 
 | | 頁面元件（`TodayClinicPage`） | 展示元件（`AppointmentTable` 等） |
 |---|---|---|
@@ -69,7 +92,7 @@ TodayClinicPage                 頁面元件：讀網址、抓資料、處理錯
 
 展示元件只看 props，所以能單獨測試，也能在 Storybook 這類工具裡把 loading、empty、error 各畫一次給人看。所有的「資料從哪來」集中在頁面元件，要換 API 或加快取時只改一個地方。
 
-### 能算出來的不要存
+## 能算出來的不要存
 
 ```js
 // 多一份狀態：appointments 改了，要等 watch 執行完 filtered 才跟上，第一次還可能漏掉
@@ -83,7 +106,7 @@ const checkedInCount = computed(() => visible.value.filter((a) => a.status === '
 
 「A 變了就更新 B」是 computed 的工作；watch 留給副作用，例如呼叫 API、寫入 localStorage。這也是 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes) 裡的一項。
 
-### 該再拆的訊號
+## 該再拆的訊號
 
 - 模板裡有好幾段互不相關的區塊，各自有自己的 `v-if` 與事件。
 - `<script setup>` 裡的 ref 分成幾群，每群只被模板的某一段用到。
@@ -92,23 +115,7 @@ const checkedInCount = computed(() => visible.value.filter((a) => a.status === '
 
 這些是經驗上的訊號，不是行數規則。反過來也有拆過頭的情況：一個只被用一次、沒有狀態也沒有行為的三行元件，拆出去只是多一個檔案要跳。
 
-## 實際程式
-
-### 先要元件樹與介面表
-
-給 AI 的第一步只要規格，先不要程式：
-
-```text
-「今日門診」頁先不要寫程式。請輸出：
-1. 元件樹（名稱與層級）。
-2. 每個元件的 props（名稱、型別、必填）、emits（事件名稱與 payload）、自己持有的狀態。
-3. 每份狀態放在哪裡：網址、Pinia、頁面元件或子元件，附一句理由。
-限制：只有頁面元件可以呼叫 API、讀寫網址；登入者資訊從 Pinia 的 auth store 讀；子元件不 import fetch、router 或 store。
-```
-
-確認或修改這份輸出之後，再請它照這份規格實作，並且一個元件一個元件交付。
-
-### 頁面元件
+## 範例程式：頁面元件
 
 ```vue
 <!-- TodayClinicPage.vue -->
@@ -172,7 +179,7 @@ async function checkIn(id) {
 </template>
 ```
 
-### 展示元件
+## 範例程式：展示元件
 
 ```vue
 <!-- DateBar.vue：用 defineModel 宣告 v-model:date -->
@@ -227,16 +234,12 @@ const emit = defineEmits(['check-in', 'retry'])
 
 `AppointmentTable` 沒有 import 任何 API、router 或 store。它的元件測試只要給 `items` 與 `status`，檢查畫面與 `check-in` 事件的 payload。
 
-:::stop 讀到這裡可以先停：會由外到內拆出元件樹、寫出介面表，分清頁面元件與展示元件。後面的常見錯誤，在拆完的元件又開始變大或互相牽動時再回來對照。
-
-## 常見錯誤
+## 其他常見錯誤
 
 | 現象 | 原因 | 修法 |
 |---|---|---|
 | 一個頁面一個幾百行的元件 | 直接要整頁的程式 | 先要元件樹與介面表，確認後再實作 |
-| 同一份資料兩處不同步（日期差一天） | 同一個狀態放在 ref、store、網址三處 | 選一個來源，其他地方從它讀 |
 | 子元件裡出現 `fetch`、`useRouter`、store | 展示元件自己抓資料 | 資料由頁面元件給，子元件只 emit |
-| `[Vue warn] Set operation on key "date" failed: target is readonly.` | 子元件直接改了 props | 用 `defineModel` 或 emit 讓父元件改 |
 | 子元件 `props.items.push(…)`，Console 沒有警告但父元件的資料被改了 | 改 props 內部的陣列或物件，Vue 不會警告 | 開 `vue/no-mutating-props`；改成 emit |
 | 數字晚一拍才更新 | 用 watch 抄一份衍生資料 | 改成 computed |
 | props 一路往下傳了四層 | 中間的元件只是轉手 | 用 slot 讓父元件直接放內容，或 `provide`／`inject` |

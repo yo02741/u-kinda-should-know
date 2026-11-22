@@ -1,4 +1,4 @@
-## 從一個具體問題開始：搜尋結果裡的「載入中」
+## 具體問題：搜尋結果裡的「載入中」
 
 醫院把對外的「門診時刻表」也做進了門診前端的 SPA，網址是 `https://clinic.example/schedule`。上線一個月後，行銷同事發現兩件事：
 
@@ -31,11 +31,9 @@
 Hydration completed but contains mismatches.
 ```
 
-頁面上方的「現在時間 09:00」是伺服器在渲染那一刻算的，瀏覽器接手時已經過了一分鐘。下面依序說明三種渲染方式、hydration 在做什麼，以及這個警告怎麼處理。
+頁面上方的「現在時間 09:00」是伺服器在渲染那一刻算的，瀏覽器接手時已經過了一分鐘。
 
-## 運作原理
-
-### 三種渲染方式的時間線
+## CSR、SSR、SSG：HTML 在哪裡、什麼時候產生
 
 同一套 Vue 元件可以在三個地方、三個時間點變成 HTML：
 
@@ -60,67 +58,15 @@ SSG  請求 HTML（建置時已經產生好）─ 畫出時刻表 ─ 下載 JS 
 
 SSR 與 SSG 讓內容提早出現，LCP（見 [Core Web Vitals](#/skill/web-vitals)）通常因此改善；可以操作的時間點不一定比較早，因為瀏覽器一樣要下載並執行同一份 JS。
 
-### hydration：接手伺服器的 HTML
+## hydration：接手伺服器的 HTML
 
 CSR 用 `createApp(App).mount('#app')`，Vue 從零建立 DOM。SSR 與 SSG 的頁面，DOM 已經在那裡了，瀏覽器端改用 `createSSRApp(App).mount('#app')`：Vue 照樣在瀏覽器執行一次渲染，但不建立新的節點，而是沿著現有的 DOM 逐一比對，在對應的元素上接上事件監聽與響應式狀態。這個過程叫 hydration。
 
-hydration 完成之前，畫面上的按鈕看得到，但沒有任何監聽，點了沒有反應。頁面越大、JS 越多、裝置越慢，這段空窗越長。Vue 3.5 加入了延遲 hydration，例如讓頁尾的元件捲到視窗內才 hydrate：
+hydration 完成之前，畫面上的按鈕看得到，但沒有任何監聽，點了沒有反應。頁面越大、JS 越多、裝置越慢，這段空窗越長。
 
-```js
-import { defineAsyncComponent, hydrateOnVisible } from 'vue'
+伺服器與瀏覽器各渲染一次，兩次的結果必須相同。亂數、`Date.now()`、「現在時間」這類每次渲染都不同的值，就會造成開頭的 mismatch 警告。
 
-// 只在 SSR 的頁面有作用：元件的 HTML 先顯示，進入視窗才下載程式並 hydrate
-const ClinicMap = defineAsyncComponent({
-  loader: () => import('./ClinicMap.vue'),
-  hydrate: hydrateOnVisible(),
-})
-```
-
-### hydration mismatch
-
-伺服器與瀏覽器各渲染一次，兩次的結果必須相同。Vue 官方文件列出三個常見原因：
-
-- **不合法的 HTML 巢狀**：`<p><div>…</div></p>`。伺服器送出這段字串，瀏覽器的 HTML 解析器在遇到 `<div>` 時就把 `<p>` 關掉，實際的 DOM 和 Vue 預期的不同。
-- **每次渲染結果不同的值**：亂數、`Date.now()`、「現在時間」。
-- **伺服器與瀏覽器的時區不同**：`toLocaleString()` 沒指定時區時用執行環境的時區，在伺服器（常是 UTC）與使用者的瀏覽器（台北）印出不同的時間。門診時間屬於院區所在地，格式化時寫明 `timeZone: 'Asia/Taipei'`（`Intl.DateTimeFormat` 或 `toLocaleString` 的選項），兩邊就印出同一個字串。
-
-另外，在渲染時讀 `window.innerWidth`、`localStorage` 決定要顯示什麼，伺服器上沒有這些值，也會不一致。
-
-Vue 遇到不一致時會把那個節點改成瀏覽器這次渲染的結果，頁面通常還能用，但多做了工，閃一下也可能被使用者看到。開發版會指出是哪個元素、兩邊各是什麼值；正式版預設只在 Console 留一行 `Hydration completed but contains mismatches.`，不說是哪裡（要細節得在建置時打開 `__VUE_PROD_HYDRATION_MISMATCH_DETAILS__`）。所以要在開發階段清乾淨。
-
-### SSR 在伺服器上的限制
-
-- `setup` 與 `<script setup>` 的頂層會在伺服器執行；`onMounted`、`onUpdated`、`onUnmounted` 不會。`window`、`document`、`localStorage` 只能在 `onMounted` 之後碰，寫在頂層會在伺服器上丟出 `ReferenceError: window is not defined`。
-- 在 `setup` 頂層開的 `setInterval`，伺服器上沒有卸載可以清掉它，會一直留在伺服器的程序裡；計時器放 `onMounted`，在 `onUnmounted` 清掉（見 [Vue 的生命週期](#/skill/lifecycle)）。
-- 伺服器程序只啟動一次、服務所有人。模組頂層 `export const state = reactive({})` 這種共用狀態，會被不同使用者的請求共用，A 的資料可能出現在 B 的頁面上（Vue 文件稱為 cross-request state pollution）。app、router、Pinia store 要每個請求各建一份。
-
-## 實際程式
-
-### 最小的 SSR：Node.js 上渲染、瀏覽器上 hydrate
-
-```js
-// server.js（在 Node.js 執行）
-import { createSSRApp } from 'vue'
-import { renderToString } from 'vue/server-renderer'
-
-const app = createSSRApp({
-  data: () => ({ now: '09:00', rooms: ['內科 101', '外科 203'] }),
-  template: `<main><h1>今日門診</h1><p class="now">{{ now }}</p>
-    <ul><li v-for="r in rooms" :key="r">{{ r }}</li></ul></main>`,
-})
-
-console.log(await renderToString(app))
-```
-
-用 Vue 3.5.45 實際執行，印出：
-
-```html
-<main><h1>今日門診</h1><p class="now">09:00</p><ul><!--[--><li>內科 101</li><li>外科 203</li><!--]--></ul></main>
-```
-
-`<!--[-->` 與 `<!--]-->` 是 Vue 留給 hydration 用的註解，標出 `v-for` 這類片段的開頭與結尾。正式的專案不會自己寫伺服器：要處理路由、資料抓取、每個請求一份 store、client 與 server 兩份建置，Vue 官方建議直接用框架。
-
-### 修掉「現在時間」的 mismatch
+## 最小範例：修掉「現在時間」的 mismatch
 
 ```vue
 <script setup>
@@ -144,6 +90,46 @@ onUnmounted(() => clearInterval(timer))
 </template>
 ```
 
+:::stop 讀到這裡可以先停：會從初始 HTML 分辨 CSR、SSR、SSG，修掉一個 hydration mismatch。後面的最小 SSR、mismatch 的其他原因、伺服器上的限制、Nuxt `routeRules` 與選擇方式，在排查 SSR 的警告或要替不同頁面各選渲染方式時再回來讀。
+
+## 最小的 SSR：Node.js 上渲染、瀏覽器上 hydrate
+
+```js
+// server.js（在 Node.js 執行）
+import { createSSRApp } from 'vue'
+import { renderToString } from 'vue/server-renderer'
+
+const app = createSSRApp({
+  data: () => ({ now: '09:00', rooms: ['內科 101', '外科 203'] }),
+  template: `<main><h1>今日門診</h1><p class="now">{{ now }}</p>
+    <ul><li v-for="r in rooms" :key="r">{{ r }}</li></ul></main>`,
+})
+
+console.log(await renderToString(app))
+```
+
+用 Vue 3.5.45 實際執行，印出：
+
+```html
+<main><h1>今日門診</h1><p class="now">09:00</p><ul><!--[--><li>內科 101</li><li>外科 203</li><!--]--></ul></main>
+```
+
+`<!--[-->` 與 `<!--]-->` 是 Vue 留給 hydration 用的註解，標出 `v-for` 這類片段的開頭與結尾。正式的專案不會自己寫伺服器：要處理路由、資料抓取、每個請求一份 store、client 與 server 兩份建置，Vue 官方建議直接用框架。
+
+## hydration mismatch 的三個常見原因
+
+Vue 官方文件列出三個常見原因：
+
+- **不合法的 HTML 巢狀**：`<p><div>…</div></p>`。伺服器送出這段字串，瀏覽器的 HTML 解析器在遇到 `<div>` 時就把 `<p>` 關掉，實際的 DOM 和 Vue 預期的不同。
+- **每次渲染結果不同的值**：亂數、`Date.now()`、「現在時間」。
+- **伺服器與瀏覽器的時區不同**：`toLocaleString()` 沒指定時區時用執行環境的時區，在伺服器（常是 UTC）與使用者的瀏覽器（台北）印出不同的時間。門診時間屬於院區所在地，格式化時寫明 `timeZone: 'Asia/Taipei'`（`Intl.DateTimeFormat` 或 `toLocaleString` 的選項），兩邊就印出同一個字串。
+
+另外，在渲染時讀 `window.innerWidth`、`localStorage` 決定要顯示什麼，伺服器上沒有這些值，也會不一致。
+
+Vue 遇到不一致時會把那個節點改成瀏覽器這次渲染的結果，頁面通常還能用，但多做了工，閃一下也可能被使用者看到。開發版會指出是哪個元素、兩邊各是什麼值；正式版預設只在 Console 留一行 `Hydration completed but contains mismatches.`，不說是哪裡（要細節得在建置時打開 `__VUE_PROD_HYDRATION_MISMATCH_DETAILS__`）。所以要在開發階段清乾淨。
+
+## 允許 mismatch、指定時區與 `useId`
+
 確定兩邊一定不同、而且不重要的值，Vue 3.5 起可以用 `data-allow-mismatch` 明確允許，值可以限定類型（`text`、`children`、`class`、`style`、`attribute`）：
 
 ```html
@@ -166,9 +152,27 @@ console.log(at.toLocaleString('zh-TW', { timeZone: 'UTC' }))   // 沒寫時區�
 
 元素需要不重複的 `id`（例如 `<label for>` 對應的欄位）時，用 Vue 3.5 的 `useId()`，伺服器與瀏覽器產生同一個值；用亂數產生 `id` 就是一個 mismatch。
 
-:::stop 讀到這裡可以先停：會從初始 HTML 分辨 CSR、SSR、SSG，修掉一個 hydration mismatch。後面的 Nuxt `routeRules` 與選擇方式，在要替不同頁面各選渲染方式時再回來讀。
+## 延遲 hydration
 
-### 用 Nuxt 依路由選渲染方式
+Vue 3.5 加入了延遲 hydration，例如讓頁尾的元件捲到視窗內才 hydrate：
+
+```js
+import { defineAsyncComponent, hydrateOnVisible } from 'vue'
+
+// 只在 SSR 的頁面有作用：元件的 HTML 先顯示，進入視窗才下載程式並 hydrate
+const ClinicMap = defineAsyncComponent({
+  loader: () => import('./ClinicMap.vue'),
+  hydrate: hydrateOnVisible(),
+})
+```
+
+## SSR 在伺服器上的限制
+
+- `setup` 與 `<script setup>` 的頂層會在伺服器執行；`onMounted`、`onUpdated`、`onUnmounted` 不會。`window`、`document`、`localStorage` 只能在 `onMounted` 之後碰，寫在頂層會在伺服器上丟出 `ReferenceError: window is not defined`。
+- 在 `setup` 頂層開的 `setInterval`，伺服器上沒有卸載可以清掉它，會一直留在伺服器的程序裡；計時器放 `onMounted`，在 `onUnmounted` 清掉（見 [Vue 的生命週期](#/skill/lifecycle)）。
+- 伺服器程序只啟動一次、服務所有人。模組頂層 `export const state = reactive({})` 這種共用狀態，會被不同使用者的請求共用，A 的資料可能出現在 B 的頁面上（Vue 文件稱為 cross-request state pollution）。app、router、Pinia store 要每個請求各建一份。
+
+## 用 Nuxt 依路由選渲染方式
 
 Nuxt 4 預設每個頁面都 SSR。門診系統可以這樣分：
 
@@ -187,7 +191,7 @@ export default defineNuxtConfig({
 
 不需要 Node.js 伺服器、只想讓幾個公開頁面預先渲染時，VitePress 這類 SSG 工具或 Nuxt 的 `nuxt generate` 產出的是靜態檔，部署方式和 [SPA 的部署](#/skill/spa-deploy) 一樣。
 
-### 怎麼選
+## 怎麼選：頁面與渲染方式
 
 | 頁面 | 建議 | 理由 |
 |---|---|---|

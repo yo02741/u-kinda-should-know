@@ -1,49 +1,19 @@
-## 從一個具體問題開始：從開發指令直接上線
+## 具體問題：把開發指令直接拿去上線
 
-一個 FastAPI 服務在本機用 `uvicorn app.main:app --reload` 開發，Dockerfile 的 `CMD` 就照抄了這一行。上線後依序發生三件事：
+一個 FastAPI 服務在本機用 `uvicorn app.main:app --reload` 開發，Dockerfile 的 `CMD` 照抄了這一行。上線後依序發生三件事：
 
-**第一件：尖峰時回應變慢，但主機的 CPU 只用了 25%。** 主機有 4 核，服務只有一個行程；Python 行程同一時間只能用一顆核心跑 Python 程式碼（GIL），其他三顆閒著。`--reload` 還額外起了一個監看檔案變動的行程。
-
-**第二件：有人把指令改成 `--workers 17`**（照「核心數 × 2 + 1」，但算的是主機的 8 核，而不是容器被限制的 2 核）。流量一來，資料庫開始拒絕連線：
+1. **尖峰時回應變慢，主機的 CPU 只用了 25%。** 主機有 4 核，服務只有一個行程；Python 行程同一時間只能用一顆核心跑 Python 程式碼（GIL）。
+2. **有人把指令改成 `--workers 17`**（照「核心數 × 2 + 1」，但算的是主機的 8 核，容器被限制在 2 核）。流量一來，資料庫開始拒絕連線。17 個 worker × 每個連線池 10 條 × 3 個副本 = 510 條連線，資料庫的 `max_connections` 是 100：
 
 ```text
 psycopg.OperationalError: connection failed: … FATAL:  sorry, too many clients already
 ```
 
-17 個 worker × 每個連線池 10 條 × 3 個副本 = 510 條連線，資料庫的 `max_connections` 是 100。
+3. **每次部署都有一陣 502，偶爾有付款流程做到一半中斷。** 部署工具停舊容器時送 SIGTERM，等 10 秒後送 SIGKILL；有些請求要跑 15 秒，在中途被硬殺。
 
-**第三件：每次部署都有一陣 502，偶爾有付款流程做到一半中斷。** 部署工具停舊容器時送 SIGTERM，等 10 秒後送 SIGKILL；有些請求要跑 15 秒，在中途被硬殺。
+## 應用伺服器：一個 master 管多個 worker，數量取三個上限的最小值
 
-這三件事分別對應這一課的三個主題：應用伺服器與 worker 模型、worker 數怎麼算、優雅關機。最後談健康檢查，以及由誰來管理這些行程。
-
-## 框架、介面、伺服器
-
-| 層 | 例子 | 負責 |
-|---|---|---|
-| Web 框架 | Flask、Django、FastAPI | 路由、解析請求、你的商業邏輯 |
-| 介面規格 | WSGI（同步）、ASGI（非同步） | 規定伺服器怎麼呼叫框架：WSGI 是「一個請求呼叫一次函式、回傳回應」；ASGI 是 async 函式，支援 WebSocket 與長連線 |
-| 應用伺服器 | gunicorn（WSGI）、uvicorn（ASGI）、granian、hypercorn | 聽埠、解析 HTTP、管理 worker、處理訊號與逾時 |
-
-Flask 與 Django（傳統寫法）走 WSGI，FastAPI 與 Starlette 走 ASGI，Django 兩者都支援。框架只定義「收到請求要做什麼」，**誰來接連線、開幾個行程、怎麼關機**是應用伺服器的工作。
-
-### 為什麼不用框架的開發伺服器
-
-`flask run` 啟動時會直接警告：
-
-```text
-WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
-```
-
-Django 的 `runserver` 文件也明確寫著不要用在正式環境。開發伺服器（以及 `--reload` 模式）是為了「改了程式立刻生效、出錯時看得到細節」設計的：
-
-- 監看檔案變動、自動重啟：正式環境不需要，還多吃資源。
-- 互動式除錯頁：Werkzeug 的除錯器可以在瀏覽器裡**執行任意 Python 程式碼**，雖然有 PIN 保護，對外開放後仍是一個能遠端執行程式碼的入口。
-- 沒有 worker 管理：不會在行程崩潰時重啟它、不會砍掉卡住的請求、不會依設定開多個行程。
-- 效能與穩定性沒有針對大量並行連線調校。
-
-## worker 模型
-
-正式的應用伺服器多半用 **pre-fork** 模型：一個主行程（master / arbiter）負責聽埠與管理，fork 出數個 worker 行程實際處理請求。
+框架（Flask、Django、FastAPI）只定義收到請求要做什麼。接連線、開幾個行程、怎麼關機是**應用伺服器**（gunicorn、uvicorn）的工作。它們多半用 **pre-fork** 模型：主行程（master / arbiter）聽埠與管理，fork 出數個 worker 行程處理請求。
 
 ```text
 gunicorn master（PID 1，不處理請求）
@@ -54,17 +24,7 @@ gunicorn master（PID 1，不處理請求）
  └─ worker 4   ← 崩潰或卡住超過 timeout：master 殺掉它並補一個新的
 ```
 
-worker 之間**不共用記憶體**：每個 worker 都各自 import 一次程式、各自建連線池、各自有記憶體中的快取。worker 內部怎麼同時處理多個請求，有三種模型：
-
-| 模型 | 例子 | 一個 worker 同時處理 | 適合 | 要注意 |
-|---|---|---|---|---|
-| 同步行程 | gunicorn `sync` worker | 1 個請求 | CPU 輕、I/O 少、程式碼不是 thread-safe | 一個慢請求就佔住整個 worker；需要較多 worker |
-| 執行緒 | gunicorn `gthread`（`--threads 4`） | 執行緒數個請求 | 同步框架、I/O 等待多 | 程式碼與函式庫要 thread-safe；GIL 讓純 CPU 工作無法平行 |
-| 非同步 | uvicorn（event loop） | 很多個，在 `await` 時切換 | ASGI 框架、大量 I/O 等待、WebSocket | **任何阻塞呼叫都會卡住整個 worker 的所有請求** |
-
-最後一欄的「阻塞呼叫」是 async 服務最常見的效能問題：在 `async def` 裡用同步的資料庫驅動、`requests.get()`、`time.sleep()`，event loop 就停在那裡，這個 worker 上的所有請求一起等。原理與檢查方式見 [同步、多執行緒與 async](#/skill/python-async)；行程、執行緒與 GIL 見 [電腦怎麼跑你的程式：行程、執行緒、記憶體](#/skill/how-programs-run)。
-
-常見的組合：
+worker 之間**不共用記憶體**：每個 worker 各自 import 一次程式、各自建連線池、各自有記憶體中的快取。啟動指令：
 
 ```bash
 # ASGI（FastAPI）：uvicorn 自己管理多個 worker
@@ -78,20 +38,15 @@ gunicorn app.main:app -k uvicorn_worker.UvicornWorker -w 4 -b 0.0.0.0:8000
 gunicorn app.wsgi:application -w 5 --threads 4 -b 0.0.0.0:8000
 ```
 
-uvicorn 與 gunicorn 都會讀 `WEB_CONCURRENCY` 環境變數當作預設的 worker 數，可以不改 image、用設定調整（見 [環境設定與 12-factor](#/skill/config-12factor)）。
+worker 數從三個上限開始算，取最小值：
 
-## worker 數：從哪裡開始算
+| 上限 | 算法 |
+|---|---|
+| CPU | 同步 worker 的起點是 gunicorn 文件建議的 `(2 × 核心數) + 1`；async worker 的起點通常是**核心數**個 |
+| 記憶體 | worker 數 × 每個 worker 的 RSS（實際量，不要猜）低於容器的記憶體上限，並留緩衝；超過會被 OOM killer 殺掉 |
+| 資料庫連線 | 副本數 × 每個副本的 worker 數 × 每個 worker 的連線池上限（含 overflow）≤ `max_connections` 減掉保留給管理、migration、監控的連線 |
 
-沒有一個公式能直接給出答案，但可以從三個上限開始，取最小值，再用壓測調整：
-
-1. **CPU**：
-   - 同步 worker：gunicorn 文件建議的起點是 `(2 × 核心數) + 1`，理由是 worker 有一部分時間在等 I/O。
-   - async worker：一個 worker 已經能同時處理很多請求，起點通常是**核心數**個。
-   - 「核心數」要用**這個容器實際能用的 CPU**。在容器裡 `os.cpu_count()` 回傳的是主機的 CPU 數，不是 cgroup 限制的配額；開頭的 17 就是這樣算出來的。
-2. **記憶體**：worker 數 × 每個 worker 的 RSS（實際量，不要猜）要低於容器的記憶體上限，並留緩衝。超過就會被 OOM killer 殺掉。
-3. **資料庫連線**：副本數 × 每個副本的 worker 數 × 每個 worker 的連線池上限（含 overflow）≤ 資料庫的 `max_connections` 減掉保留給管理、migration、監控的連線。
-
-需要多少並行處理能力，可以用 Little's Law 估：**同時處理中的請求數 ≈ 每秒請求數 × 平均回應時間**。每秒 200 個請求、平均 0.12 秒，平均同時有 24 個請求在處理；同步 worker 一次處理一個，全部副本加起來至少要 24 個 worker（尖峰還要更多）。容量規劃的完整做法見 [硬體資源與容量規劃](#/skill/capacity-planning)。
+「核心數」要用**這個容器實際能用的 CPU**。在容器裡 `os.cpu_count()` 回傳的是主機的 CPU 數，不是 cgroup 限制的配額；開頭的 17 就是這樣算出來的。
 
 下面這段把三個上限一起算，可以直接執行：
 
@@ -122,25 +77,79 @@ plan(cpus=2, mem_limit_mb=2048, worker_rss_mb=180, replicas=3, pool_size=3, max_
      db_max_connections=100, db_reserved=10, async_worker=False, rps=200, avg_latency_s=0.12)
 ```
 
-第一組的結果是每個副本只能開 3 個 worker，總共 9 個，遠低於需要的 24 個以上。瓶頸在資料庫連線，不在 CPU。同步 worker 一次只用一條連線，縮小連線池之後（第二組）上限換成 CPU，總共 15 個，仍然不夠。接下來的選項是加副本或 CPU、在資料庫前面加連線池代理（例如 PgBouncer）讓更多 worker 共用較少的資料庫連線，或改用 async worker 讓少數 worker 處理更多並行請求。
+第一組卡在資料庫連線，不在 CPU。算出來的數字是起點，再用壓測調整。
 
-## 優雅關機
+## 優雅關機：寬限期由內而外遞增
 
-部署、擴縮、主機維護都會停掉行程。停的方式是先送 **SIGTERM**，等一段寬限期，還沒結束就送 **SIGKILL**（訊號的差別見 [Linux 與 shell 基礎](#/skill/linux-basics)）。應用伺服器收到 SIGTERM 時應該：
+部署、擴縮、主機維護都會停掉行程：先送 **SIGTERM**，等一段寬限期，還沒結束就送 **SIGKILL**。應用伺服器收到 SIGTERM 後停止接受新連線，把進行中的請求做完（最多等到自己的寬限期）再結束。
 
-1. **停止接受新連線**：關閉聽埠的 socket。負載平衡器或平台此時也應該停止送新請求過來。
-2. **把進行中的請求做完**，最多等到自己的寬限期（graceful timeout）。
-3. **清理**：關閉資料庫連線池、把緩衝的 log 與指標送出、結束背景工作。
-4. **以退出碼 0 結束**。
+gunicorn 與 uvicorn 都內建這個流程，前提是**它們收得到 SIGTERM**：Dockerfile 要用 exec form，讓伺服器本身是 PID 1（見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)）。外層的寬限期要比內層長，否則外層會在內層做完之前動手。gunicorn 的 `--graceful-timeout` 預設 30 秒，`docker stop` 預設只等 10 秒。開頭的請求最長 15 秒：應用伺服器設 20 秒，Docker 的寬限期調成 25 秒以上。
 
-gunicorn 與 uvicorn 都內建這個流程，前提是**它們收得到 SIGTERM**：Dockerfile 要用 exec form，讓伺服器本身是 PID 1（見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)）。
+## 最常見的兩個錯誤
 
-寬限期要**由內而外遞增**，否則外層會在內層做完之前動手：
+- **`FATAL:  sorry, too many clients already`**：所有副本的連線總數超過資料庫的 `max_connections`。重算 worker × 連線池 × 副本，縮小連線池或加連線池代理。
+- **`[CRITICAL] WORKER TIMEOUT (pid:2481)`**：同步 worker 處理單一請求超過 `--timeout`（預設 30 秒），被 master 殺掉重開。找慢的請求（慢查詢、沒設逾時的外部呼叫），長工作改背景執行。
+
+:::stop 讀到這裡可以先停：會用 gunicorn 或 uvicorn 啟動多個 worker，算得出 worker 數與連線池上限，會設定優雅關機的寬限期。後面的 worker 內部模型、健康檢查、行程管理與完整錯誤表，在服務變慢、部署時出現 502 或要決定由誰管行程時再回來讀。
+
+## 框架、介面、伺服器，以及為什麼不用開發伺服器
+
+| 層 | 例子 | 負責 |
+|---|---|---|
+| Web 框架 | Flask、Django、FastAPI | 路由、解析請求、你的商業邏輯 |
+| 介面規格 | WSGI（同步）、ASGI（非同步） | 規定伺服器怎麼呼叫框架：WSGI 是「一個請求呼叫一次函式、回傳回應」；ASGI 是 async 函式，支援 WebSocket 與長連線 |
+| 應用伺服器 | gunicorn（WSGI）、uvicorn（ASGI）、granian、hypercorn | 聽埠、解析 HTTP、管理 worker、處理訊號與逾時 |
+
+Flask 與 Django（傳統寫法）走 WSGI，FastAPI 與 Starlette 走 ASGI，Django 兩者都支援。uvicorn 與 gunicorn 都會讀 `WEB_CONCURRENCY` 環境變數當作預設的 worker 數，可以不改 image、用設定調整（見 [環境設定與 12-factor](#/skill/config-12factor)）。
+
+`flask run` 啟動時會直接警告：
+
+```text
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+```
+
+Django 的 `runserver` 文件也明確寫著不要用在正式環境。開發伺服器（以及 `--reload` 模式）是為了「改了程式立刻生效、出錯時看得到細節」設計的：
+
+- 監看檔案變動、自動重啟：正式環境不需要，還多吃資源。
+- 互動式除錯頁：Werkzeug 的除錯器可以在瀏覽器裡**執行任意 Python 程式碼**，雖然有 PIN 保護，對外開放後仍是一個能遠端執行程式碼的入口。
+- 沒有 worker 管理：不會在行程崩潰時重啟它、不會砍掉卡住的請求、不會依設定開多個行程。
+- 效能與穩定性沒有針對大量並行連線調校。
+
+## worker 內部的三種並行模型
+
+| 模型 | 例子 | 一個 worker 同時處理 | 適合 | 要注意 |
+|---|---|---|---|---|
+| 同步行程 | gunicorn `sync` worker | 1 個請求 | CPU 輕、I/O 少、程式碼不是 thread-safe | 一個慢請求就佔住整個 worker；需要較多 worker |
+| 執行緒 | gunicorn `gthread`（`--threads 4`） | 執行緒數個請求 | 同步框架、I/O 等待多 | 程式碼與函式庫要 thread-safe；GIL 讓純 CPU 工作無法平行 |
+| 非同步 | uvicorn（event loop） | 很多個，在 `await` 時切換 | ASGI 框架、大量 I/O 等待、WebSocket | **任何阻塞呼叫都會卡住整個 worker 的所有請求** |
+
+「阻塞呼叫」是 async 服務最常見的效能問題：在 `async def` 裡用同步的資料庫驅動、`requests.get()`、`time.sleep()`，event loop 就停在那裡，這個 worker 上的所有請求一起等。原理與檢查方式見 [同步、多執行緒與 async](#/skill/python-async)；行程、執行緒與 GIL 見 [電腦怎麼跑你的程式：行程、執行緒、記憶體](#/skill/how-programs-run)。
+
+## 需要多少 worker：Little's Law
+
+**同時處理中的請求數 ≈ 每秒請求數 × 平均回應時間**。每秒 200 個請求、平均 0.12 秒，平均同時有 24 個請求在處理；同步 worker 一次處理一個，全部副本加起來至少要 24 個 worker（尖峰還要更多）。容量規劃的完整做法見 [硬體資源與容量規劃](#/skill/capacity-planning)。
+
+worker 估算那段的第一組結果是每個副本 3 個 worker，總共 9 個，遠低於需要的 24 個以上。同步 worker 一次只用一條連線，縮小連線池之後（第二組）上限換成 CPU，總共 15 個，仍然不夠。接下來的選項：
+
+- 加副本或 CPU。
+- 在資料庫前面加連線池代理（例如 PgBouncer），讓更多 worker 共用較少的資料庫連線。
+- 改用 async worker，讓少數 worker 處理更多並行請求。
+
+## 優雅關機的模擬與其他逾時設定
+
+各層的寬限期設定：
 
 | 層 | 設定 | 預設 | 開頭的問題 |
 |---|---|---|---|
 | 應用伺服器 | gunicorn `--graceful-timeout`；uvicorn `--timeout-graceful-shutdown` | gunicorn 30 秒 | 請求最長 15 秒，設 20 秒 |
 | 容器 / 平台 | `docker stop -t`、compose 的 `stop_grace_period`、Kubernetes 的 `terminationGracePeriodSeconds`、systemd 的 `TimeoutStopSec` | Docker 10 秒、Kubernetes 30 秒、systemd 90 秒 | Docker 的 10 秒比應用程式的寬限期短，要調成 25 秒以上 |
+
+應用伺服器收到 SIGTERM 時的完整步驟（訊號的差別見 [Linux 與 shell 基礎](#/skill/linux-basics)）：
+
+1. **停止接受新連線**：關閉聽埠的 socket。負載平衡器或平台此時也應該停止送新請求過來。
+2. **把進行中的請求做完**，最多等到自己的寬限期（graceful timeout）。
+3. **清理**：關閉資料庫連線池、把緩衝的 log 與指標送出、結束背景工作。
+4. **以退出碼 0 結束**。
 
 下面模擬優雅關機：伺服器在收到 SIGTERM 後不再接新請求、等手上的請求做完，超過寬限期的才被中斷。可以直接執行（時間縮小成秒的十分之一）：
 
@@ -247,8 +256,6 @@ async def ready(response: Response):
 ```
 
 健康檢查端點不要需要登入、不要做重的查詢、不要寫 log 寫到洗版（每幾秒被呼叫一次）。Docker 的 `HEALTHCHECK` 與 compose 的 `service_healthy` 用的是同一類端點。
-
-:::stop 讀到這裡可以先停：分得出框架、介面與伺服器，算得出 worker 數與連線池上限，會做優雅關機與 `/health`、`/ready`。後面誰來管理行程與常見錯誤，在要決定由 systemd、容器平台還是 gunicorn 的 master 管行程時再回來讀。
 
 ## 誰來管理行程
 

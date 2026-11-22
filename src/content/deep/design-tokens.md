@@ -1,4 +1,4 @@
-## 從一個具體問題開始：加暗色主題，要改 214 個地方
+## 具體問題：加暗色主題，要改 214 個地方
 
 門診系統要加暗色主題，給夜間值班的護理站用。工程師先在專案裡搜尋色碼：`#` 開頭的 hex 出現 214 次，散在 63 個元件裡；同一個「主色藍」有 `#1d4ed8`、`#1e40af`、`#2563eb` 三種寫法，因為不同的人在不同時間從設計稿吸色。間距也一樣：`margin` 有 12、13、14、15、16px，13 和 15 從哪裡來沒有人知道。
 
@@ -10,9 +10,7 @@
 
 如果一開始就把顏色、間距、字級寫成有名字的 token，元件只引用名字，加暗色主題就是替同一組名字換一組值。
 
-## 運作原理
-
-### 三層 token
+## 三層 token：元件只引用語意 token
 
 ```text
 基礎 token（primitive）     語意 token（semantic）        元件 token（component，選用）
@@ -30,19 +28,7 @@
 
 名字用用途而不用外觀：`--color-danger` 而不是 `--color-red`。哪天危險色從紅改成深橘，名字仍然正確。
 
-### 刻度
-
-| 類別 | 刻度範例 | 用在 |
-|---|---|---|
-| 間距 | 4、8、12、16、24、32、48px（`--space-1` 到 `--space-7`） | margin、padding、gap |
-| 字級 | 12、14、16、20、24、32px | 文字 |
-| 圓角 | 4、8px、全圓 | 按鈕、卡片、Badge |
-| 陰影 | 2 到 3 階 | 卡片、浮層 |
-| 動畫時間 | 150、250ms | transition |
-
-刻度的值多少是設計決定，沒有標準答案。重要的是值的數量少、命名一致；設計稿出現 13px，要嘛是設計稿的誤差，要嘛刻度少了一階，兩種都要和設計師確認。
-
-### CSS custom properties
+## 用 CSS custom properties 做亮暗主題
 
 瀏覽器原生的變數（Baseline 2017），token 在網頁上最直接的寫法：
 
@@ -50,9 +36,6 @@
 - 會繼承：在 `:root` 宣告，整頁都讀得到；在某個容器裡重新宣告，只影響那個容器底下的元素。
 - 執行時可以改：改 `<html>` 上的屬性或 class，所有引用它的地方立刻重新計算。這是主題切換的基礎。
 - `var(--x, 預設值)` 的第二個參數是變數不存在時的備用值。
-- 值寫錯（例如顏色變數放了 `16px`）不會報錯，使用它的屬性會變成無效值、退回繼承值或初始值，畫面靜靜地錯。用 `@property` 註冊型別可以讓瀏覽器檢查（Baseline 2024）。值是 `light-dark()` 的顏色 token 不要註冊成 `<color>`：註冊後繼承下去的是已經算好的單一顏色，子元素改了 `color-scheme` 也不會跟著換。
-
-### 亮暗主題
 
 ```css
 :root {
@@ -82,11 +65,75 @@
 - `prefers-color-scheme` 讀作業系統的設定（Baseline 2020）。
 - `data-theme` 是使用者在網站上手動選的，優先於系統設定；選擇存在 localStorage，頁面載入時在 `<head>` 裡的一小段 script 先設好，避免先閃一下亮色。
 - `color-scheme`（Baseline 2022）告訴瀏覽器這一頁是亮或暗，表單元件、捲軸、`<input type="date">` 的日曆這些瀏覽器畫的東西才會跟著變暗。開頭提到的「輸入框還是白色」就是少了這行。
-- `light-dark(亮色值, 暗色值)` 函式依 `color-scheme` 選值，可以把一組 token 寫在一行，例如 `--color-bg: light-dark(#f9fafb, #030712)`。它在 2024 年 5 月進入 Baseline，依 2026-11 的 web-features 資料已列為廣泛可用（2026 年 11 月起）；不支援的舊瀏覽器裡，用到這個 token 的屬性會變成無效值、退回繼承值或初始值；要顧到舊瀏覽器就保留上面 `prefers-color-scheme` 加 `[data-theme]` 的寫法當退路。
+
+## 最小範例：主題切換並記住選擇
+
+```js
+// useTheme.js：'light' | 'dark' | 'system'，選擇存在 localStorage
+import { ref, watchEffect } from 'vue'
+
+const KEY = 'theme'
+const theme = ref(readSaved())
+
+function readSaved() {
+  try { return localStorage.getItem(KEY) || 'system' } catch { return 'system' }
+}
+
+watchEffect(() => {
+  const root = document.documentElement
+  if (theme.value === 'system') root.removeAttribute('data-theme')   // 交給 prefers-color-scheme
+  else root.setAttribute('data-theme', theme.value)
+  try { localStorage.setItem(KEY, theme.value) } catch { /* 私密模式可能寫不進去，不影響畫面 */ }
+})
+
+export function useTheme() {
+  return { theme, setTheme: (t) => { theme.value = t } }
+}
+```
+
+```html
+<!-- index.html 的 <head>：在 CSS 套用前就設好主題，避免先閃一下亮色 -->
+<script>
+  try {
+    const t = localStorage.getItem('theme')
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t)
+  } catch {}
+</script>
+```
+
+:::stop 讀到這裡可以先停：會把 token 分成基礎與語意兩層、用 custom properties 做亮暗主題，並記住使用者選的主題。後面的刻度、對比計算、`light-dark()`、token 檔格式與元件庫選型，在檢查暗色主題的對比、設計稿和程式要共用 token 或要挑元件庫時再回來讀。
+
+## 刻度：間距、字級、圓角
+
+| 類別 | 刻度範例 | 用在 |
+|---|---|---|
+| 間距 | 4、8、12、16、24、32、48px（`--space-1` 到 `--space-7`） | margin、padding、gap |
+| 字級 | 12、14、16、20、24、32px | 文字 |
+| 圓角 | 4、8px、全圓 | 按鈕、卡片、Badge |
+| 陰影 | 2 到 3 階 | 卡片、浮層 |
+| 動畫時間 | 150、250ms | transition |
+
+刻度的值多少是設計決定，沒有標準答案。重要的是值的數量少、命名一致；設計稿出現 13px，要嘛是設計稿的誤差，要嘛刻度少了一階，兩種都要和設計師確認。
+
+元件裡只用語意 token 與刻度：
+
+```vue
+<style scoped>
+.card {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+.card .meta { color: var(--color-text-muted); font-size: var(--font-size-sm); }
+.card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+</style>
+```
+
+## 對比：暗色主題要重新檢查每一組顏色
 
 暗色主題不是把顏色反轉。暗色背景上的主色通常要調亮一階，陰影的效果變弱，常改用邊框或較亮的表面色表示層次；每一組文字與背景的對比都要重新檢查。
-
-### 對比
 
 | 對象 | 最低對比 | WCAG |
 |---|---|---|
@@ -123,9 +170,14 @@ for (const [label, fg, bg] of pairs) {
 
 第二行就是開頭的問題：亮色主題的灰色說明文字直接搬到暗色背景，對比掉到 3:1 以下。
 
-:::stop 讀到這裡可以先停：會把 token 分成基礎與語意兩層、用 custom properties 做亮暗主題，並算出每組文字與背景的對比。後面的 token 檔格式與元件庫選型，在設計稿和程式要共用 token 或要挑元件庫時再回來讀。
+## `light-dark()` 與 `@property`
 
-### token 檔與轉換工具
+- `light-dark(亮色值, 暗色值)` 函式依 `color-scheme` 選值，可以把一組 token 寫在一行，例如 `--color-bg: light-dark(#f9fafb, #030712)`。它在 2024 年 5 月進入 Baseline，依 2026-11 的 web-features 資料已列為廣泛可用（2026 年 11 月起）。
+- 不支援 `light-dark()` 的舊瀏覽器裡，用到這個 token 的屬性會變成無效值、退回繼承值或初始值；要顧到舊瀏覽器就保留 `prefers-color-scheme` 加 `[data-theme]` 的寫法當退路。
+- custom property 的值寫錯（例如顏色變數放了 `16px`）不會報錯，使用它的屬性會變成無效值、退回繼承值或初始值，畫面靜靜地錯。用 `@property` 註冊型別可以讓瀏覽器檢查（Baseline 2024）。
+- 值是 `light-dark()` 的顏色 token 不要註冊成 `<color>`：註冊後繼承下去的是已經算好的單一顏色，子元素改了 `color-scheme` 也不會跟著換。
+
+## token 檔與轉換工具
 
 只有網頁時，token 寫成 CSS 就夠了。設計稿、網頁、App 要共用同一組 token 時，通常用一份中立的檔案描述，再轉成各平台的格式。
 
@@ -155,7 +207,7 @@ W3C 底下的 Design Tokens Community Group 在 2025 年 10 月發布了格式�
 
 Style Dictionary（2026-11 是 5.x 版）這類工具讀這份檔案，輸出 CSS custom properties、JavaScript 常數或 App 用的格式。Tailwind CSS v4 把主題寫在 CSS 的 `@theme` 裡，值也是 CSS custom properties（4.3.5 版的預設主題檔就是一長串 `--color-*`、`--spacing` 變數）。
 
-### 元件庫、headless 元件、自己做
+## 元件庫、headless 元件、自己做
 
 | 做法 | 例子（Vue） | 給你什麼 | 你要做什麼 |
 |---|---|---|---|
@@ -164,59 +216,6 @@ Style Dictionary（2026-11 是 5.x 版）這類工具讀這份檔案，輸出 CS
 | 自己做 | | 完全自由 | 狀態、鍵盤、ARIA、各瀏覽器差異全部自己處理 |
 
 選型看兩件事：設計稿和元件庫的預設外觀差多少，以及團隊有沒有人力維護鍵盤與無障礙。外觀要完全照設計稿、又要照 WAI-ARIA APG 的鍵盤行為時，headless 元件通常最划算。用元件庫時，先找它的主題變數（例如 Element Plus 用 `--el-color-primary` 這類 CSS 變數），讓它指向專案的語意 token，不要在元件上逐一覆寫樣式。
-
-## 實際程式
-
-`tokens/primitives.css` 與 `tokens/semantic.css` 的寫法見上面「亮暗主題」一節。主題切換的 composable：
-
-```js
-// useTheme.js：'light' | 'dark' | 'system'，選擇存在 localStorage
-import { ref, watchEffect } from 'vue'
-
-const KEY = 'theme'
-const theme = ref(readSaved())
-
-function readSaved() {
-  try { return localStorage.getItem(KEY) || 'system' } catch { return 'system' }
-}
-
-watchEffect(() => {
-  const root = document.documentElement
-  if (theme.value === 'system') root.removeAttribute('data-theme')   // 交給 prefers-color-scheme
-  else root.setAttribute('data-theme', theme.value)
-  try { localStorage.setItem(KEY, theme.value) } catch { /* 私密模式可能寫不進去，不影響畫面 */ }
-})
-
-export function useTheme() {
-  return { theme, setTheme: (t) => { theme.value = t } }
-}
-```
-
-```html
-<!-- index.html 的 <head>：在 CSS 套用前就設好主題，避免先閃一下亮色 -->
-<script>
-  try {
-    const t = localStorage.getItem('theme')
-    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t)
-  } catch {}
-</script>
-```
-
-元件裡只用語意 token：
-
-```vue
-<style scoped>
-.card {
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-4);
-}
-.card .meta { color: var(--color-text-muted); font-size: var(--font-size-sm); }
-.card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-</style>
-```
 
 ## 常見錯誤
 

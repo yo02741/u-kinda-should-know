@@ -1,6 +1,6 @@
-## 從一個具體問題開始：上線滿一年的那個早上
+## 叢集上線滿一年的早上：憑證到期，版本也停止修補
 
-院內第一座 Kubernetes 叢集在 2025 年 11 月 12 日用 kubeadm 建好：三台控制平面、三台 worker，跑門診掛號的 `clinic-api` 與幾個院內服務。一年來沒出過大事，也沒有人動過它。2026 年 11 月 16 日星期一早上，值班的工程師要查一個 Pod，`kubectl` 回了這一行：
+院內第一座 Kubernetes 叢集在 2025 年 11 月 12 日用 kubeadm 建好：三台控制平面、三台 worker，跑門診掛號的 `clinic-api`。一年來沒有人動過它。2026 年 11 月 16 日早上，值班的工程師要查一個 Pod：
 
 ```bash
 $ kubectl get pods -n clinic
@@ -9,16 +9,91 @@ Unable to connect to the server: tls: failed to verify certificate: x509: certif
 
 同一天資安組轉來一則 Kubernetes 的弱點公告，修補版只出在 1.35、1.36、1.37。叢集是 1.34，而 1.34 在 2026 年 10 月 27 日已經停止修補。
 
-兩件事出自同一個原因：叢集上線後，沒有人負責它的生命週期。
+兩件事的原因相同：叢集上線後，沒有人負責它的生命週期。
 
-- **憑證到期**：kubeadm 建叢集時產生的元件憑證（API server、etcd、元件之間的用戶端憑證，以及 `admin.conf` 裡給 `kubectl` 用的那一張）預設效期 1 年，CA 預設 10 年。這是 kubeadm 的預設值，kubeadm 1.31 起可以用設定檔的 `certificateValidityPeriod` 調整；其他發行版有自己的效期與輪替規則。
+- **憑證到期**：kubeadm 建叢集時產生的元件憑證（含 `admin.conf` 裡給 `kubectl` 用的那一張）預設效期 1 年，CA 預設 10 年。
 - **版本落後**：上游大約每 4 個月出一個次版本，每版修補約 14 個月。一年沒升級，叢集就落到沒有修補的版本。
 
 `kubeadm upgrade` 預設會順便更新它管理的憑證，所以照節奏升級的叢集，通常不會碰到第一個問題。
 
+## 版本節奏與版本差異政策：先控制平面，再節點
+
+版本號是 `1.次版本.修補版`，例如 1.35.9。上游的規則（以 [kubernetes.io/releases](https://kubernetes.io/releases/) 為準）：
+
+- 大約每 4 個月出一個次版本（minor），同時維護最近三個。
+- 每個次版本約有 14 個月的修補：前 12 個月是一般支援，最後 2 個月是維護模式，只收安全修補與嚴重問題的修正。
+- 修補版大約每月一次；同一個次版本內換修補版比較輕。
+
+2026 年 11 月的狀態（示意，日期以官方頁面為準）：
+
+| 次版本 | 發行日 | 停止修補 |
+|---|---|---|
+| 1.34 | 2025-08-27 | 2026-10-27（已停止） |
+| 1.35 | 2025-12-17 | 2027-02-28 |
+| 1.36 | 2026-04-22 | 2027-06-28 |
+| 1.37 | 2026-08-26 | 2027-10-28 |
+
+所以叢集每年至少升級一次。控制平面一次只能升一個次版本：1.34 到 1.37 要依序升三次，每一次都要做完整的檢查與節點輪替。
+
+升級途中，叢集裡同時有新舊版本。各元件之間可以差多少（摘要，以官方 [Version Skew Policy](https://kubernetes.io/releases/version-skew-policy/) 為準）：
+
+| 元件 | 相對於 API server |
+|---|---|
+| 多台 API server 之間 | 最多差 1 個次版本 |
+| controller-manager、scheduler | 不能比 API server 新，最多舊 1 個次版本 |
+| kubelet、kube-proxy | 不能比 API server 新，最多舊 3 個次版本（1.25 以前的版本只能舊 2 個） |
+| kubectl | 新或舊 1 個次版本以內 |
+
+這張表決定了升級順序：
+
+- **先控制平面，再節點**。kubelet 不能比 API server 新，節點不能先升。
+- kubelet 可以舊 3 個次版本，節點可以分批升，不必和控制平面同一晚做完，但仍要盡快跟上。用 kubeadm 時，節點升級還要符合 kubeadm 本身的版本規定（以 kubeadm 文件為準）。
+- 管理者電腦與 CI 裡的 `kubectl` 也要跟著換。
+
+## 用 kubeadm 升一個次版本
+
+以 kubeadm 從 1.34 升 1.35 為例（細節以官方的 [Upgrading kubeadm clusters](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-upgrade/) 為準，`x` 換成要升的修補版）：
+
+```bash
+# 0. 事前：etcd 快照（見備份一節）、變更單核准、測試叢集演練過同一個版本
+
+# 1. 每台節點：套件來源換成 1.35 的套件庫（pkgs.k8s.io 每個次版本一個庫）；斷網環境指向院內鏡像
+sudo sed -i 's#/v1.34/#/v1.35/#' /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+
+# 2. 第一台控制平面：先升 kubeadm，看計畫，再套用
+sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm='1.35.x-*' && sudo apt-mark hold kubeadm
+sudo kubeadm upgrade plan
+sudo kubeadm upgrade apply v1.35.x     # 控制平面元件、etcd、CoreDNS、kube-proxy，並更新這台的憑證
+
+# 3. 其他控制平面：一樣先升 kubeadm，再執行
+sudo kubeadm upgrade node
+
+# 4. 每台控制平面依序：drain → 升 kubelet 與 kubectl → 重啟 kubelet → uncordon
+kubectl drain k8s-cp-1 --ignore-daemonsets
+sudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet='1.35.x-*' kubectl='1.35.x-*' && sudo apt-mark hold kubelet kubectl
+sudo systemctl daemon-reload && sudo systemctl restart kubelet
+kubectl uncordon k8s-cp-1
+
+# 5. worker 一台一台：升 kubeadm → kubeadm upgrade node → drain → 升 kubelet → 重啟 → uncordon
+```
+
+`kubeadm upgrade plan` 檢查能不能升、列出每個元件的新舊版本；`apply` 中途失敗可以重跑。升級前要先找出目標版本不再提供的 API：叢集升到不再提供某個 apiVersion 的版本之後，用舊寫法的 manifest 一套用就失敗：
+
+```text
+error: resource mapping not found for name: "clinic-api" namespace: "clinic" from "pdb.yaml": no matches for kind "PodDisruptionBudget" in version "policy/v1beta1"
+ensure CRDs are installed first
+```
+
+:::stop 讀到這裡可以先停：會說出憑證與版本各自多久到期，依版本差異政策排出一次升一個次版本的順序。後面的元件、發行版比較、被移除的 API 與升級路徑的程式，在規劃升級前回來讀；drain 與 PDB、備份還原、憑證與監控，在要做節點維護、排還原演練，或叢集快滿一年時再讀。
+
+## 憑證到期那天：哪些還能動
+
 那天早上掛號沒有中斷：已經在跑的容器由各節點的 kubelet 照顧，流量照常進來。但 controller-manager 與 scheduler 也拿同一批到期的憑證連 API server，叢集不能再變更：新版部署不上去，Pod 被刪除或節點故障時沒有新的補上。
 
-叢集要先裝哪些周邊元件，見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)；這一課講上線之後的工作。
+kubeadm 產生的元件憑證包括 API server、etcd、元件之間的用戶端憑證，以及 `admin.conf` 裡給 `kubectl` 用的那一張。1 年與 10 年是 kubeadm 的預設值，kubeadm 1.31 起可以用設定檔的 `certificateValidityPeriod` 調整；其他發行版有自己的效期與輪替規則。
+
+叢集要先裝哪些周邊元件，見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。
 
 ## 維運要顧的元件
 
@@ -60,52 +135,9 @@ Rancher 不是發行版，是管理多座叢集的平台：統一登入與權限
 
 地端、雲端與混合雲的取捨見 [地端、雲端還是混合雲](#/skill/hosting-models)；雲端代管做掉了哪些事，見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。
 
-## 版本與升級
+## 升級前：找出被移除的 API
 
-### 版本節奏
-
-版本號是 `1.次版本.修補版`，例如 1.35.9。上游的規則（以 [kubernetes.io/releases](https://kubernetes.io/releases/) 為準）：
-
-- 大約每 4 個月出一個次版本（minor），同時維護最近三個。
-- 每個次版本約有 14 個月的修補：前 12 個月是一般支援，最後 2 個月是維護模式，只收安全修補與嚴重問題的修正。
-- 修補版大約每月一次；同一個次版本內換修補版比較輕。
-
-2026 年 11 月的狀態（示意，日期以官方頁面為準）：
-
-| 次版本 | 發行日 | 停止修補 |
-|---|---|---|
-| 1.34 | 2025-08-27 | 2026-10-27（已停止） |
-| 1.35 | 2025-12-17 | 2027-02-28 |
-| 1.36 | 2026-04-22 | 2027-06-28 |
-| 1.37 | 2026-08-26 | 2027-10-28 |
-
-所以叢集每年至少升級一次。控制平面一次只能升一個次版本：1.34 到 1.37 要依序升三次，每一次都要做完整的檢查與節點輪替。
-
-### 版本差異政策（version skew）
-
-升級途中，叢集裡同時有新舊版本。各元件之間可以差多少（摘要，以官方 [Version Skew Policy](https://kubernetes.io/releases/version-skew-policy/) 為準）：
-
-| 元件 | 相對於 API server |
-|---|---|
-| 多台 API server 之間 | 最多差 1 個次版本 |
-| controller-manager、scheduler | 不能比 API server 新，最多舊 1 個次版本 |
-| kubelet、kube-proxy | 不能比 API server 新，最多舊 3 個次版本（1.25 以前的版本只能舊 2 個） |
-| kubectl | 新或舊 1 個次版本以內 |
-
-這張表決定了升級順序：
-
-- **先控制平面，再節點**。kubelet 不能比 API server 新，節點不能先升。
-- kubelet 可以舊 3 個次版本，節點可以分批升，不必和控制平面同一晚做完，但仍要盡快跟上。用 kubeadm 時，節點升級還要符合 kubeadm 本身的版本規定（以 kubeadm 文件為準）。
-- 管理者電腦與 CI 裡的 `kubectl` 也要跟著換。
-
-### 升級前：找出被移除的 API
-
-beta 版的 API 在正式版出來後會被標成 deprecated，幾個版本後停止提供。叢集升到不再提供某個 apiVersion 的版本之後，用舊寫法的 manifest 一套用就失敗：
-
-```text
-error: resource mapping not found for name: "clinic-api" namespace: "clinic" from "pdb.yaml": no matches for kind "PodDisruptionBudget" in version "policy/v1beta1"
-ensure CRDs are installed first
-```
+beta 版的 API 在正式版出來後會被標成 deprecated，幾個版本後停止提供。
 
 已經在叢集裡的物件不會消失，API server 改用新的版本提供它們。會壞的是 Git 裡的 manifest、Helm chart、CI 的 `kubectl apply`，以及還在呼叫舊 API 的程式與 operator。
 
@@ -134,40 +166,14 @@ horizontalpodautoscaler.autoscaling/clinic-api created
 $ kubectl get --raw /metrics | grep apiserver_requested_deprecated_apis   # 管理者：誰還在用
 ```
 
-### 升級的順序
+## kubeadm 升級的注意事項：憑證、斷網、周邊元件與回復
 
-以 kubeadm 從 1.34 升 1.35 為例（細節以官方的 [Upgrading kubeadm clusters](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-upgrade/) 為準，`x` 換成要升的修補版）：
-
-```bash
-# 0. 事前：etcd 快照（見備份一節）、變更單核准、測試叢集演練過同一個版本
-
-# 1. 每台節點：套件來源換成 1.35 的套件庫（pkgs.k8s.io 每個次版本一個庫）；斷網環境指向院內鏡像
-sudo sed -i 's#/v1.34/#/v1.35/#' /etc/apt/sources.list.d/kubernetes.list
-sudo apt-get update
-
-# 2. 第一台控制平面：先升 kubeadm，看計畫，再套用
-sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm='1.35.x-*' && sudo apt-mark hold kubeadm
-sudo kubeadm upgrade plan
-sudo kubeadm upgrade apply v1.35.x     # 控制平面元件、etcd、CoreDNS、kube-proxy，並更新這台的憑證
-
-# 3. 其他控制平面：一樣先升 kubeadm，再執行
-sudo kubeadm upgrade node
-
-# 4. 每台控制平面依序：drain → 升 kubelet 與 kubectl → 重啟 kubelet → uncordon
-kubectl drain k8s-cp-1 --ignore-daemonsets
-sudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet='1.35.x-*' kubectl='1.35.x-*' && sudo apt-mark hold kubelet kubectl
-sudo systemctl daemon-reload && sudo systemctl restart kubelet
-kubectl uncordon k8s-cp-1
-
-# 5. worker 一台一台：升 kubeadm → kubeadm upgrade node → drain → 升 kubelet → 重啟 → uncordon
-```
-
-- `kubeadm upgrade plan` 檢查能不能升、列出每個元件的新舊版本；`apply` 中途失敗可以重跑。`kubeadm upgrade` 預設會更新這台節點上的憑證（`--certificate-renewal=false` 關掉）。
+- `kubeadm upgrade` 預設會更新這台節點上的憑證（`--certificate-renewal=false` 關掉）。
 - 斷網的院內環境，新版需要的映像（`kubeadm config images list` 列得出來）要先同步到院內的 registry，叢集設定的 `imageRepository` 指向它；其他下載來源見 [地端、雲端還是混合雲](#/skill/hosting-models) 的斷網一節。
 - CNI、Ingress controller、CSI driver、監控、Velero 各有支援的版本範圍，控制平面升級前先確認。
 - 控制平面降版沒有一般性的官方支援，升壞了的回復手段是用升級前的 etcd 快照與舊版元件重建，所以要先在測試叢集演練、記下時間。升級排進變更單，寫清楚維護時段、回復條件與步驟，見 [變更管理](#/skill/change-management)。
 
-### 排出升級路徑
+## 用程式排出升級路徑
 
 下面用示意的版本資料，替開頭那座 1.34 的叢集排出到 1.37 的路徑與每一步的檢查，再檢查幾種升級途中的版本組合：
 
@@ -263,8 +269,6 @@ for title, state in states.items():
 ```
 
 三個步驟的檢查只差在版本號，每一步都要演練、排維護時段、輪替所有節點。路徑上的 1.35 只剩三個多月的修補，不能停在那裡。
-
-:::stop 讀到這裡可以先停：會分出要顧的元件、比較發行版，並依版本差異政策排出一次升一個次版本的路徑。後面的 drain 與 PDB、備份還原、憑證與監控，在要做節點維護、排還原演練，或叢集快滿一年時再回來讀。
 
 ## 節點維護：cordon、drain 與 PDB
 

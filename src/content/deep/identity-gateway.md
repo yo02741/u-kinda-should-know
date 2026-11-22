@@ -1,6 +1,6 @@
-## 從一個具體問題開始：七個內部工具、七套登入
+## 具體問題：七個內部工具、七套登入
 
-一家公司有七個內部工具：部署面板、報表系統、wiki、feature flag 後台、資料查詢工具、一個 CLI、幾個 MCP server。它們是不同團隊在不同時間做的，各自處理登入：
+一家公司有七個內部工具：部署面板、報表系統、wiki、feature flag 後台、資料查詢工具、一個 CLI、幾個 MCP server。不同團隊在不同時間做的，各自處理登入：
 
 | 工具 | 登入方式 | 問題 |
 |---|---|---|
@@ -10,17 +10,15 @@
 | 資料查詢 CLI | 個人 API key，建立後永不過期 | key 寫在設定檔裡，沒有人知道全公司有多少把還有效 |
 | MCP server | 各自不同 | 見 [MCP Gateway](#/skill/mcp-gateway) |
 
-一年後要回答三個問題，沒有一個答得出來：
+一年後有三個問題答不出來：
 
 - **某位員工離職了，他在哪些工具上還有有效的 token？** 每個工具的 token 格式、存放、到期規則都不一樣，只能一個一個去問。
-- **某個 refresh token 外洩了，能不能只撤銷那一個裝置？** 有的工具根本沒有 refresh 的概念，有的只能整個帳號重設。
+- **某個 refresh token 外洩了，能不能只撤銷那一個裝置？** 有的工具沒有 refresh 的概念，有的只能整個帳號重設。
 - **報表系統的擁有者想知道誰在用、用多少**：只有自己的 access log，看不出是人還是腳本、是哪個用戶端。
-
-每個工具各做一次登入，代表同一件事做了七遍，而且七遍的品質不一樣。
 
 ## 架構：身分閘道放在中間
 
-集中式身分閘道（identity gateway）把「確認你是誰」和「發 token、管 token」收到一個地方。內部工具不再接 LDAP、不再存密碼，只做一件事：驗證閘道簽發的 token。
+集中式身分閘道（identity gateway）把「確認你是誰」和「發 token、管 token」收到一個地方。內部工具不再接 LDAP、不再存密碼，只驗證閘道簽發的 token。
 
 ```text
   上游身分來源（只有閘道接）              身分閘道                         內部工具（只驗 token）
@@ -34,7 +32,30 @@
                                  └──────────────────────────┘
 ```
 
-可以自建，也可以用現成的身分系統擔任這個角色（例如 Keycloak 這類支援 LDAP 同步、外部 IdP 串接與多種 OAuth 流程的開源方案；功能細節以各自文件為準）。不論哪種，要做的事情是同一組。
+可以自建，也可以用現成的身分系統擔任這個角色（例如 Keycloak 這類支援 LDAP 同步、外部 IdP 串接與多種 OAuth 流程的開源方案；功能細節以各自文件為準）。
+
+## 三種流程對應三種用戶端
+
+閘道對下游的工具與用戶端，提供三種標準流程（各流程的 HTTP 往返見 [Device Code、PKCE、Client Credentials](#/skill/oauth-device-pkce)）：
+
+| 用戶端 | 流程 | token 代表誰 | 範例 |
+|---|---|---|---|
+| CLI、agent、跑在 SSH 主機或容器裡的工具 | Device Code | 使用者 | 資料查詢 CLI、遠端主機上的 agent |
+| 網頁、手機 App、有瀏覽器的桌機 CLI | 授權碼 + PKCE | 使用者 | 報表系統、wiki、MCP client |
+| 沒有使用者的服務、排程 | Client Credentials | 服務本身 | 每晚的對帳批次、CI 的部署步驟 |
+
+閘道用自己的私鑰簽發 JWT access token，公鑰放在 JWKS。每個工具是一個獨立的**資源**，token 的 `aud` 指定給誰用：發給報表系統的 token 打不開部署面板（驗證細節見 [MCP 的授權](#/skill/mcp-authorization)，內容同樣適用於任何資源伺服器）。
+
+## 最常見的兩個錯誤
+
+| 現象或訊息 | 原因 | 怎麼修 |
+|---|---|---|
+| 工具收到 `invalid_token`，閘道 log 顯示 audience 不符 | 用戶端拿 A 工具的 token 去打 B 工具 | 每個工具要各自的 token（申請時指定 `resource` 或對應的 scope） |
+| 閘道簽章金鑰輪替後，部分工具全部 401 | 工具把公鑰寫死，沒有讀 JWKS | 工具一律從 JWKS 取公鑰並依 `kid` 選用 |
+
+:::stop 讀到這裡可以先停：會畫出閘道在身分來源與各工具之間的位置，依用戶端選流程。後面的上游接法與身分對應、到期、rotation、撤銷與停用，在接第二個身分來源、設計 token 壽命或處理離職停用時再回來讀。
+
+## 上游接法與身分對應
 
 ### 上游：只有閘道接身分來源
 
@@ -52,23 +73,9 @@
 - **不要只用 email 自動合併帳號**。某個上游允許使用者自己改 email，或允許註冊任意 email，攻擊者就能把自己的帳號連到別人的內部身分。
 - **群組**從上游同步（LDAP 群組、Entra ID 群組），對應成內部工具看得懂的角色，寫進 token 的 claim 或讓工具查詢。
 
-## 三種流程對應三種用戶端
-
-閘道對下游的工具與用戶端，提供三種標準流程（各流程的 HTTP 往返見 [Device Code、PKCE、Client Credentials](#/skill/oauth-device-pkce)）：
-
-| 用戶端 | 流程 | token 代表誰 | 範例 |
-|---|---|---|---|
-| CLI、agent、跑在 SSH 主機或容器裡的工具 | Device Code | 使用者 | 資料查詢 CLI、遠端主機上的 agent |
-| 網頁、手機 App、有瀏覽器的桌機 CLI | 授權碼 + PKCE | 使用者 | 報表系統、wiki、MCP client |
-| 沒有使用者的服務、排程 | Client Credentials | 服務本身 | 每晚的對帳批次、CI 的部署步驟 |
-
-閘道用自己的私鑰簽發 JWT access token，公鑰放在 JWKS。每個工具是一個獨立的**資源**，token 的 `aud` 指定給誰用：發給報表系統的 token 打不開部署面板（驗證細節見 [MCP 的授權](#/skill/mcp-authorization)，內容同樣適用於任何資源伺服器）。
-
-:::stop 讀到這裡可以先停：會畫出閘道在身分來源與各工具之間的位置，依用戶端選流程。後面的到期、rotation、撤銷與停用，在設計 token 壽命或處理離職停用時再回來讀。
-
 ## Token 的生命週期
 
-集中發 token 最大的價值在於**集中管 token**。每個 token 從發出到失效，閘道都知道它在哪個狀態。
+集中發 token 之後，每個 token 從發出到失效，閘道都知道它在哪個狀態。
 
 ### 到期
 
@@ -215,16 +222,14 @@ for row in gw.events:
 
 輸出顯示了兩件事：重放偵測讓合法的 `RT3` 也一起失效（alice 要重新登入）；bob 停用後，他手上的 JWT access token 在被撤銷之前仍然有效，直到閘道在 refresh 時發現並撤銷家族，introspection 才回報失效。用 JWKS 本地驗證、不呼叫 introspection 的工具，則要等到 access token 到期。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 現象或訊息 | 原因 | 怎麼修 |
 |---|---|---|
 | refresh 時收到 `{"error":"invalid_grant"}`，使用者被迫重新登入 | refresh token 過期、家族被撤銷，或用戶端並行送出兩次 refresh 觸發了重放偵測 | 用戶端的 refresh 要排隊（同一時間只有一個請求在換）；換到新 token 先寫進儲存再使用 |
-| 工具收到 `invalid_token`，閘道 log 顯示 audience 不符 | 用戶端拿 A 工具的 token 去打 B 工具 | 每個工具要各自的 token（申請時指定 `resource` 或對應的 scope） |
 | 某位使用者在上游改了 email 後，閘道多出一個新帳號 | 身分對應用 email 當鍵 | 改用上游的穩定 id；已經分裂的帳號人工合併 |
 | 停用帳號後，那個人的 token 還能用好幾個小時 | access token 壽命太長，或閘道沒在 refresh 時檢查上游 | 縮短 access token；refresh 時檢查上游；高風險工具改用 introspection |
 | 各工具仍然各自保留一份 LDAP 服務帳號密碼 | 遷移沒做完，舊的登入路徑還開著 | 列出所有直接連 LDAP 的系統，遷移後關掉它們對 LDAP 的網路存取 |
-| 閘道簽章金鑰輪替後，部分工具全部 401 | 工具把公鑰寫死，沒有讀 JWKS | 工具一律從 JWKS 取公鑰並依 `kid` 選用 |
 
 ## 動手
 

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：改一個欄位名稱，停機六分鐘
+## 具體問題：改一個欄位名稱，停機六分鐘
 
 `customers` 表的 `name` 欄位要改名成 `full_name`。新版程式（v2）改用 `full_name`，部署流程是「先跑 migration，再滾動更新三個 Pod」：
 
@@ -10,54 +10,14 @@
 | 14:06:00 | | v2 ×3 | 恢復 |
 | 14:20:00 | 發現 v2 另有 bug，想回滾 | | 回滾到 v1 會再壞一次：欄位已經叫 `full_name` 了 |
 
-反過來「先部署再跑 migration」也一樣：v2 先上線時，`full_name` 還不存在。問題的根源是：**部署期間新舊版本一定會同時存在**，而這次的 schema 變更讓兩個版本不可能同時正常運作。
+反過來「先部署再跑 migration」也一樣：v2 先上線時，`full_name` 還不存在。**部署期間新舊版本一定會同時存在**，而這次的 schema 變更讓兩個版本不可能同時正常運作。
 
-這一課講三件事：換版的幾種方式各自怎麼運作、怎麼讓資料庫變更與新舊版本都相容、以及什麼時候該自動停下來回滾。
+## 四種換版方式：新舊版本都會同時存在
 
-## 部署與發布是兩件事
-
-- **部署（deploy）**：新版程式在正式環境跑起來。
-- **發布（release）**：使用者開始用到新的行為。
-
-傳統做法兩者同時發生；分開之後，部署可以很頻繁、很無聊，發布則用 feature flag 或流量比例控制。下面的策略處理的是部署，feature flag 處理的是發布。
-
-## 換版的方式
-
-### rolling：一台一台換
-
-新版的實例一個個起來、通過 readiness 後接流量，舊版的一個個下線。Kubernetes Deployment 的預設策略就是這個，`maxSurge` 與 `maxUnavailable` 控制一次換幾個，細節見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。
-
-- 不需要額外的整套資源。
-- 過程中**新舊版本同時服務**，可能持續幾分鐘到幾十分鐘。同一個使用者的連續請求可能先打到新版、再打到舊版。
-- 回滾也是一次 rolling，同樣要時間。
-
-### blue-green：兩套切換
-
-準備兩套完整環境：blue（目前的正式版）與 green（新版）。green 部署好、驗證完，把流量入口（負載平衡器、Service 的 selector、DNS）一次切過去。出事就切回 blue。
-
-- 切換幾乎是瞬間的，回滾也是。
-- 需要兩倍的運算資源（至少在切換期間）。
-- **資料庫通常只有一個**，blue 和 green 共用。所以 schema 一樣要跟兩個版本相容，blue-green 沒有解決 migration 的問題。
-- 用 DNS 切換時，客戶端與中間的快取會依 TTL 繼續連到舊的位址一段時間，切換並不是瞬間完成。
-
-### canary：先給一小部分流量
-
-新版先接一小部分流量（例如 5%），和舊版（baseline）比較錯誤率與延遲，沒問題再逐步放大：
-
-```text
-5% ──觀察 10 分鐘──► 25% ──觀察 10 分鐘──► 50% ──► 100%
- │                    │
- └── 指標變差 ────────┴──► 流量切回 0%（回滾），只影響了那一小部分使用者
-```
-
-- 需要能依比例分流的基礎設施（service mesh、ingress controller 或負載平衡器的權重設定），以及能分別看新舊版本指標的監控。
-- 需要**足夠的流量**：每分鐘只有 20 個請求的服務，5% 是一個請求，看不出任何東西。流量少時拉長觀察時間，或直接用較大的比例。
-- 比較的對象是同一時段的舊版，而不是昨天的數字：流量尖峰、外部依賴變慢會同時影響兩邊。
-- Argo Rollouts、Flagger 這類工具可以把放量步驟與自動判斷寫成設定。
-
-### feature flag：程式已部署，功能另外打開
-
-flag 讓「誰看得到新功能」與部署脫鉤：先對內部帳號開、再對 5% 使用者開、出事就關掉，不需要重新部署。百分比放量的實作見 [Git 工作流與分支策略](#/skill/git-workflow) 的 feature flag 一節。
+- **rolling**：新版的實例一個個起來、通過 readiness 後接流量，舊版的一個個下線。
+- **blue-green**：準備兩套完整環境，新版驗證完，把流量入口一次切過去，出事就切回。
+- **canary**：新版先接一小部分流量（例如 5%），和舊版比較錯誤率與延遲，沒問題再逐步放大。
+- **feature flag**：程式先部署，「誰看得到新功能」另外打開，出事就關掉。
 
 | | rolling | blue-green | canary | feature flag |
 |---|---|---|---|---|
@@ -67,13 +27,9 @@ flag 讓「誰看得到新功能」與部署脫鉤：先對內部帳號開、再
 | 需要的基礎 | readiness probe | 流量切換點 | 分流與分版本指標 | flag 系統、清理紀律 |
 | 對資料庫相容性的要求 | 有 | 有（共用資料庫） | 有 | 有 |
 
-最後一列是重點：**沒有一種策略能免除 schema 相容性的要求**。
+## expand–contract：把破壞性的 schema 變更拆成相容的步驟
 
-## 資料庫遷移與部署順序：expand–contract
-
-規則只有一條：**任何時刻正在跑的所有版本，都要能跟當下的 schema 一起運作**。做法是把一個破壞性的變更拆成幾個各自相容的步驟，先擴張（expand），等所有舊版本都消失、確定不會回滾之後，再收縮（contract）。
-
-把 `name` 改名成 `full_name`：
+**任何時刻正在跑的所有版本，都要能跟當下的 schema 一起運作**。做法是把一個破壞性的變更拆成幾個各自相容的步驟，先擴張（expand），等所有舊版本都消失、確定不會回滾之後，再收縮（contract）。
 
 | 步驟 | schema | 程式版本 | 這一步完成時可以同時存在的版本 |
 |---|---|---|---|
@@ -84,9 +40,9 @@ flag 讓「誰看得到新功能」與部署脫鉤：先對內部帳號開、再
 | 5. 停止寫舊欄 | 同上 | v4：只用 `full_name` | v3、v4 |
 | 6. contract | 刪除 `name` | v4 | v4 |
 
-步驟 2 是關鍵：v1 和 v2 同時在跑時，v1 寫入的新資料只有 `name`，所以 v2 必須讀 `name`；等回填完成、v1 全部下線，v3 才能改讀 `full_name`。每一步都能單獨回滾到前一步，直到步驟 6；步驟 6 不可逆，要等到確定不會再回滾才做。
+v1 和 v2 同時在跑時，v1 寫入的新資料只有 `name`，所以 v2 必須讀 `name`；等回填完成、v1 全部下線，v3 才能改讀 `full_name`。每一步都能單獨回滾到前一步，直到步驟 6；步驟 6 不可逆，要等到確定不會再回滾才做。
 
-v1 在步驟 2 之後還會寫入只有 `name` 的資料。可以用資料庫 trigger 補齊，或在回填時把它們一起補上。下面在 PostgreSQL 裡實際走一遍步驟 1 到 4：
+下面在 PostgreSQL 裡實際走一遍步驟 1 到 4：
 
 ```sql run
 CREATE TABLE customers (id serial PRIMARY KEY, name text NOT NULL);
@@ -120,9 +76,61 @@ ALTER TABLE customers DROP CONSTRAINT customers_full_name_nn;
 SELECT id, name, full_name FROM customers ORDER BY id;
 ```
 
-:::stop 讀到這裡可以先停：會分辨 rolling、blue-green、canary 與 feature flag，並把一個欄位改名拆成 expand–contract 的幾次部署。後面的 migration 鎖、回滾還是往前修、自動回滾，在要對大表跑 migration 或設計部署閘門時再回來讀。
+## 最常見的兩個錯誤
 
-### migration 的鎖與執行時機
+- **部署期間零星出現 `ERROR: column "name" does not exist`**：schema 變更與正在跑的某個版本不相容。改成 expand–contract；已經發生時，先讓所有實例都換成相容的版本。
+- **migration 卡住，同時大量請求逾時**：`ALTER TABLE` 在等鎖，後面的查詢排在它後面。migration 前先 `SET lock_timeout = '5s'`，拿不到鎖會出現 `canceling statement due to lock timeout`，重試或先處理掉長交易（`pg_stat_activity`）。
+
+:::stop 讀到這裡可以先停：會分辨 rolling、blue-green、canary 與 feature flag，並把一個欄位改名拆成 expand–contract 的幾次部署。後面各種換版方式的細節、migration 的鎖、回滾還是往前修、自動回滾，在要選部署策略、對大表跑 migration 或設計部署閘門時再回來讀。
+
+## 部署與發布是兩件事
+
+- **部署（deploy）**：新版程式在正式環境跑起來。
+- **發布（release）**：使用者開始用到新的行為。
+
+傳統做法兩者同時發生；分開之後，部署可以很頻繁、很無聊，發布則用 feature flag 或流量比例控制。下面的策略處理的是部署，feature flag 處理的是發布。
+
+## 四種換版方式的細節
+
+比較表的最後一列：**沒有一種策略能免除 schema 相容性的要求**。
+
+### rolling：一台一台換
+
+Kubernetes Deployment 的預設策略就是 rolling，`maxSurge` 與 `maxUnavailable` 控制一次換幾個，細節見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。
+
+- 不需要額外的整套資源。
+- 過程中**新舊版本同時服務**，可能持續幾分鐘到幾十分鐘。同一個使用者的連續請求可能先打到新版、再打到舊版。
+- 回滾也是一次 rolling，同樣要時間。
+
+### blue-green：兩套切換
+
+blue 是目前的正式版，green 是新版；流量入口可以是負載平衡器、Service 的 selector、DNS。
+
+- 切換幾乎是瞬間的，回滾也是。
+- 需要兩倍的運算資源（至少在切換期間）。
+- **資料庫通常只有一個**，blue 和 green 共用。所以 schema 一樣要跟兩個版本相容，blue-green 沒有解決 migration 的問題。
+- 用 DNS 切換時，客戶端與中間的快取會依 TTL 繼續連到舊的位址一段時間，切換並不是瞬間完成。
+
+### canary：先給一小部分流量
+
+```text
+5% ──觀察 10 分鐘──► 25% ──觀察 10 分鐘──► 50% ──► 100%
+ │                    │
+ └── 指標變差 ────────┴──► 流量切回 0%（回滾），只影響了那一小部分使用者
+```
+
+- 需要能依比例分流的基礎設施（service mesh、ingress controller 或負載平衡器的權重設定），以及能分別看新舊版本指標的監控。
+- 需要**足夠的流量**：每分鐘只有 20 個請求的服務，5% 是一個請求，看不出任何東西。流量少時拉長觀察時間，或直接用較大的比例。
+- 比較的對象是同一時段的舊版（baseline），而不是昨天的數字：流量尖峰、外部依賴變慢會同時影響兩邊。
+- Argo Rollouts、Flagger 這類工具可以把放量步驟與自動判斷寫成設定。
+
+### feature flag：程式已部署，功能另外打開
+
+flag 讓「誰看得到新功能」與部署脫鉤：先對內部帳號開、再對 5% 使用者開、出事就關掉，不需要重新部署。百分比放量的實作見 [Git 工作流與分支策略](#/skill/git-workflow) 的 feature flag 一節。
+
+## migration 的鎖、執行時機與相容性檢查
+
+v1 在雙寫（步驟 2）之後還會寫入只有 `name` 的資料。可以用資料庫 trigger 補齊，或在回填時把它們一起補上。
 
 - **`ALTER TABLE` 要拿最強的鎖**（ACCESS EXCLUSIVE）。指令本身很快，但如果有一個長交易還握著這張表，`ALTER` 會排隊等它，排隊期間後面所有讀寫這張表的查詢也一起排隊。migration 前先 `SET lock_timeout = '5s'`，拿不到鎖就失敗重試，而不是讓整個服務卡住。
 - **建索引用 `CREATE INDEX CONCURRENTLY`**：不擋寫入，但不能在交易裡執行；很多 migration 工具預設把每個 migration 包在交易裡，要另外設定。

@@ -1,6 +1,6 @@
-## 從一個具體問題開始：staging 驗過了，production 還是壞了
+## 具體問題：staging 驗過了，production 還是壞了
 
-一個團隊的部署流程是這樣：合進 main 後，`deploy-staging` job 執行 `docker build` 再部署到 staging；QA 驗過之後，有人按下 `deploy-production`，它**再執行一次** `docker build`，部署到 production。
+一個團隊的部署流程：合進 main 後，`deploy-staging` job 執行 `docker build` 再部署到 staging；QA 驗過之後，有人按下 `deploy-production`，它**再執行一次** `docker build`，部署到 production。
 
 | 時間 | 發生什麼 |
 |---|---|
@@ -10,24 +10,13 @@
 | 週四 14:10 | production 出現 staging 從沒見過的錯誤 |
 | 週四 14:30 | 要回滾到「上一版」：上一版的 image 也是當時臨時 build 的，沒有保存 |
 
-同一份程式碼、同一個 commit，build 了兩次就是兩個不同的東西。staging 的三天驗證，驗的是一個從來沒有上過 production 的 image。
+同一個 commit build 了兩次就是兩個不同的東西。staging 的三天驗證，驗的是一個從來沒有上過 production 的 image。
 
-同一個 workflow 裡還有另一個問題：production 資料庫密碼存在 repo 層級的 secret，任何分支的任何 job 都讀得到，包括某位同事為了除錯，在自己分支的 workflow 裡加的 `env | sort`。
+同一個 workflow 還有另一個問題：production 資料庫密碼存在 repo 層級的 secret，任何分支的任何 job 都讀得到，包括某位同事為了除錯，在自己分支的 workflow 裡加的 `env | sort`。
 
-這一課的兩個主題：同一個 artifact 走過所有環境，以及設定與秘密由平台在需要的地方注入。
+## 晉升：build 一次，同一個 image 走過所有環境
 
-## 環境與晉升
-
-| 環境 | 用途 | 誰能部署 | 資料 |
-|---|---|---|---|
-| 本機／dev | 開發、除錯 | 開發者自己 | 假資料、測試資料 |
-| 預覽環境（選配） | 每個 PR 一個臨時環境，給審查者實際操作 | CI 自動建立、PR 關閉時銷毀 | 種子資料 |
-| staging | 正式部署前的最後驗證：遷移、設定、整合 | CI 在合進 main 後自動部署 | 去識別化或合成資料，**不是** production 的複本 |
-| production | 服務真實使用者 | 經過核准的部署流程 | 真實資料 |
-
-staging 的價值取決於它跟 production **有多像**：同樣的 image、同樣的部署方式、同樣大版本的資料庫、同樣的設定結構（值不同）。差異越多，「staging 沒問題」能代表的就越少。
-
-**晉升（promotion）**的意思是：build 一次，把同一個 artifact 依序部署到各環境，每個環境只換設定。
+**晉升（promotion）**：build 一次，把同一個 artifact 依序部署到各環境，每個環境只換設定。
 
 ```text
 commit 8d1e7f4
@@ -41,21 +30,13 @@ commit 8d1e7f4
    └──► production  同一個 digest ＋ production 的設定與秘密（需要核准）
 ```
 
-### tag 會變、digest 不會
-
 `shop-api:8d1e7f4` 這種 tag 是一個可以移動的名字：任何有寫入權限的人都可以把它指到另一個 image。image 的 **digest**（`sha256:…`）是內容的雜湊，內容不同 digest 就不同。
 
 - build 時用 commit SHA 當 tag，方便人看。
 - 部署時用 digest（`image@sha256:…`）指定，確保 staging 和 production 跑的是位元組完全相同的東西。
 - 回滾就是把上一個 digest 再部署一次。registry 的清理政策要保留最近幾個部署過的版本。
 
-### job 之間怎麼傳
-
-CI 的每個 job 通常在全新的機器或容器裡執行，**不共享檔案系統**。build job 產生的東西要靠以下方式傳給後面的 job：
-
-- **registry**：image 本身推到 registry，後面的 job 用 digest 拉取。
-- **job outputs**：短字串（例如 digest）用 GitHub Actions 的 `outputs` 傳；GitLab 可以把值寫進檔案，用 `artifacts: reports: dotenv:` 傳給後面的 job。
-- **artifact**：測試報告、覆蓋率、建置出來的靜態檔。cache 不能拿來傳，它不保證存在。
+環境之間不同的東西（對外網址、log 等級、資料庫密碼）都不放進 image，由平台在部署時注入。
 
 ## 完整範例：GitHub Actions 晉升流程
 
@@ -115,9 +96,35 @@ jobs:
 
 兩個 deploy job 都沒有 `docker build`，image 都來自 `needs.build.outputs.image`。`DATABASE_URL` 在兩個 job 裡寫法一樣，值不同：job 綁了哪個 environment，就拿到那個環境的 secret。
 
-### environment 的保護規則
+environment 在 Settings → Environments 設定，可以要求指定的人核准、限制只有某些分支能部署。YAML 只負責宣告 `environment: production`。**沒寫 `environment:` 的 job 不受這些規則約束**，也拿不到環境層級的 secret。
 
-GitHub 的 environment 在 Settings → Environments 設定，可以加上：
+## 最常見的兩個錯誤
+
+- **secret 在 job 裡是空字串**：job 沒有 `environment:`，拿不到環境層級的 secret；或是 fork 來的 PR，本來就不該拿到。在 job 綁定 environment。
+- **`manifest unknown`**：部署用的 tag 或 digest 在 registry 裡不存在（被清理政策刪掉、或打錯）。清理政策保留最近部署過的版本，部署用 build job 輸出的 digest。
+
+:::stop 讀到這裡可以先停：會讓同一個 image 用 digest 從 staging 晉升到 production，並用 environment 把 secret 與核准綁在部署 job 上。後面的環境比較、job 之間傳值、設定分層、OIDC 與存取控管，在要加新環境、部署要拿雲端權限或要決定誰能碰正式資料時再回來讀。
+
+## 各個環境的用途與資料
+
+| 環境 | 用途 | 誰能部署 | 資料 |
+|---|---|---|---|
+| 本機／dev | 開發、除錯 | 開發者自己 | 假資料、測試資料 |
+| 預覽環境（選配） | 每個 PR 一個臨時環境，給審查者實際操作 | CI 自動建立、PR 關閉時銷毀 | 種子資料 |
+| staging | 正式部署前的最後驗證：遷移、設定、整合 | CI 在合進 main 後自動部署 | 去識別化或合成資料，**不是** production 的複本 |
+| production | 服務真實使用者 | 經過核准的部署流程 | 真實資料 |
+
+staging 的價值取決於它跟 production **有多像**：同樣的 image、同樣的部署方式、同樣大版本的資料庫、同樣的設定結構（值不同）。差異越多，「staging 沒問題」能代表的就越少。
+
+## job 之間怎麼傳 image 與檔案
+
+CI 的每個 job 通常在全新的機器或容器裡執行，**不共享檔案系統**。build job 產生的東西要靠以下方式傳給後面的 job：
+
+- **registry**：image 本身推到 registry，後面的 job 用 digest 拉取。
+- **job outputs**：短字串（例如 digest）用 GitHub Actions 的 `outputs` 傳；GitLab 可以把值寫進檔案，用 `artifacts: reports: dotenv:` 傳給後面的 job。
+- **artifact**：測試報告、覆蓋率、建置出來的靜態檔。cache 不能拿來傳，它不保證存在。
+
+## environment 的保護規則
 
 | 規則 | 效果 |
 |---|---|
@@ -126,7 +133,7 @@ GitHub 的 environment 在 Settings → Environments 設定，可以加上：
 | Deployment branches and tags | 只有指定的分支或 tag 能部署到這個環境 |
 | Environment secrets 與 variables | 只有綁定這個環境的 job 拿得到 |
 
-這些規則寫在平台設定裡，YAML 只負責宣告 `environment: production`。**沒寫 `environment:` 的 job 不受這些規則約束**，也拿不到環境層級的 secret。私有 repo 能不能用 required reviewers 依方案而定，以官方文件為準。
+這些規則寫在平台設定裡。私有 repo 能不能用 required reviewers 依方案而定，以官方文件為準。
 
 GitLab 的對應做法：job 加 `environment: name: production`、`when: manual` 讓部署需要有人按下；變數可以設定 environment scope，只注入特定環境的 job；protected 變數只給受保護分支。見 [GitLab CI/CD](#/skill/gitlab-cicd)。
 
@@ -185,8 +192,6 @@ print("目前程序有沒有 DATABASE_URL：", "DATABASE_URL" in os.environ)
 - **fork 來的 PR 拿不到 secret**：GitHub 對 fork 觸發的 `pull_request` 不提供 secrets（`GITHUB_TOKEN` 也是唯讀）。為了繞過這點改用 `pull_request_target` 並 checkout PR 的程式碼，等於讓陌生人的程式碼在有秘密的環境裡執行，是已知的高風險寫法。
 - **protected 才擋得住**：GitLab 的 protected 變數、GitHub 的 environment secrets 加上分支限制，確保只有審查過、合進受保護分支的程式碼拿得到 production 的秘密。
 - 秘密的輪替、撤銷與存放方式見 [秘密管理](#/skill/secrets)。
-
-:::stop 讀到這裡可以先停：會讓同一個 image 從 staging 晉升到 production、設 environment 的核准與分支限制、用環境變數注入設定與秘密。後面的 OIDC 與環境資料的存取控管，在部署要拿雲端權限或要決定誰能碰正式資料時再回來讀。
 
 ## OIDC：不存長期金鑰
 

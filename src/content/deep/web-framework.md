@@ -1,4 +1,4 @@
-## 從一個具體問題開始：後端明明回了 500，瀏覽器卻說是 CORS 錯誤
+## 具體問題：後端明明回了 500，瀏覽器卻說是 CORS 錯誤
 
 前端（`https://shop.example`）呼叫 API 建立訂單，瀏覽器的 console 顯示：
 
@@ -8,11 +8,9 @@ Access to fetch at 'https://api.shop.example/orders' from origin 'https://shop.e
 
 團隊先去檢查 CORS 設定：`CORSMiddleware` 好好地掛著，允許的來源也寫對了；其他 API 都正常。原因在後端 log 裡：handler 丟出一個沒有被處理的例外，回了 500。
 
-為什麼 500 會變成 CORS 錯誤？在 Starlette（FastAPI 的底層）裡，負責把「沒人處理的例外」變成 500 回應的那一層，位在**所有自己加的 middleware 外面**。例外一路往外冒，穿過 `CORSMiddleware`，它沒有機會在回應上加 `Access-Control-Allow-Origin`；最外層產生的 500 沒有這個標頭，瀏覽器就拒絕讓前端讀取回應，只回報 CORS 錯誤。實際用 `TestClient(app, raise_server_exceptions=False)` 帶 `Origin` 標頭打一個會丟例外的 endpoint，回應的標頭只有 `content-length` 和 `content-type`；同一個 client 打正常的 endpoint，才看得到 `access-control-allow-origin`。
+為什麼 500 會變成 CORS 錯誤？在 Starlette（FastAPI 的底層）裡，負責把「沒人處理的例外」變成 500 回應的那一層，位在**所有自己加的 middleware 外面**。例外一路往外冒，穿過 `CORSMiddleware`，它沒有機會在回應上加 `Access-Control-Allow-Origin`；最外層產生的 500 沒有這個標頭，瀏覽器就拒絕讓前端讀取回應，只回報 CORS 錯誤。
 
-這類問題只要知道「請求依序經過哪幾層、每一層出錯時誰負責回應」就能很快定位。這篇把那條路徑一層一層拆開。
-
-## 一個請求經過的每一層
+## 一個請求經過的每一層、每一層出錯時的回應
 
 ```text
 TCP 連線
@@ -47,7 +45,100 @@ ASGI server（uvicorn）：解析 HTTP，把請求轉成 scope／receive／send
 | 回應序列化 | 回傳的資料不符合 `response_model` | `500`（伺服器的錯，不是客戶端的） |
 | 任何地方 | 未處理的例外 | `500 Internal Server Error`（純文字，不經過自己加的 middleware） |
 
-### ASGI 與 WSGI
+## 最小範例：FastAPI 每一層各寫一段
+
+需要安裝 fastapi 與 uvicorn，不能在瀏覽器執行。
+
+```python
+import time
+import uuid
+from collections.abc import Iterator
+
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+app = FastAPI()
+
+# ── middleware：每個請求都經過；這裡加 request id 與耗時 ──
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    start = time.perf_counter()
+    response = await call_next(request)          # 往內層走，拿到回應再回來
+    response.headers["x-request-id"] = request_id
+    response.headers["server-timing"] = f"app;dur={(time.perf_counter() - start) * 1000:.1f}"
+    return response
+
+# 最後加入的在最外層：CORS 包在 request_context 外面
+app.add_middleware(CORSMiddleware, allow_origins=["https://shop.example"],
+                   allow_methods=["*"], allow_headers=["*"])
+
+# ── 自訂例外：service 層丟出，這裡統一轉成 HTTP ──
+class OutOfStock(Exception):
+    def __init__(self, product_id: int):
+        self.product_id = product_id
+
+@app.exception_handler(OutOfStock)
+async def out_of_stock_handler(request: Request, exc: OutOfStock):
+    return JSONResponse(status_code=409, content={"error": "out_of_stock", "product_id": exc.product_id})
+
+# ── 依賴：DB session 與目前使用者 ──
+def get_db() -> Iterator["Session"]:
+    db = SessionLocal()
+    try:
+        yield db                                  # handler 執行期間用這個 session
+    finally:
+        db.close()                                # 請求結束後關閉
+
+def get_current_user(request: Request, db=Depends(get_db)) -> "User":
+    token = request.headers.get("authorization", "").removeprefix("Bearer ")
+    user = find_user_by_token(db, token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return user
+
+# ── 請求與回應模型：驗證進來的、過濾出去的 ──
+class OrderIn(BaseModel):
+    product_id: int
+    qty: int = Field(gt=0, le=10)
+
+class OrderOut(BaseModel):
+    id: int
+    product_id: int
+    qty: int
+    status: str                                   # 內部欄位（成本價等）不在這裡，就不會被回傳
+
+# ── handler：只剩商業邏輯 ──
+@app.post("/orders", response_model=OrderOut, status_code=201)
+def create_order(order: OrderIn, user=Depends(get_current_user), db=Depends(get_db)):
+    return place_order(db, user, order.product_id, order.qty)   # 可能 raise OutOfStock
+```
+
+這裡 `create_order` 是 `def` 而不是 `async def`：裡面用的是同步的 DB session，FastAPI 會把它放到執行緒池執行，不會卡住 event loop（見 [同步、多執行緒與 async](#/skill/python-async)）。
+
+## 最常見的兩個錯誤
+
+**瀏覽器回報 CORS 錯誤，後端 log 有 500。** 未處理的例外在最外層變成 500，沒有經過 CORS middleware。先修 500；為自訂例外註冊 `exception_handler`，讓它在內層就變成正常回應。
+
+**`/users/me` 回 422，`loc` 是 `["path", "user_id"]`。** 路由順序錯了：
+
+FastAPI 依**宣告順序**比對路由。下面兩個路由的順序寫反了：
+
+```python
+@app.get("/users/{user_id}")
+def get_user(user_id: int): ...
+
+@app.get("/users/me")          # 永遠到不了：/users/me 先被上面那條吃掉
+def get_me(): ...
+```
+
+`GET /users/me` 會先比對到 `/users/{user_id}`，`"me"` 轉不成 int，於是回 422，`loc` 是 `["path", "user_id"]`。固定路徑要宣告在參數路徑之前。
+
+:::stop 讀到這裡可以先停：會說出請求經過的每一層、每一層出錯時回什麼，在 FastAPI 裡各寫一段。後面的 ASGI 與 WSGI、依賴注入的性質、middleware 的取捨、極小框架，在要設計依賴與 middleware 或想看懂框架內部時再回來讀。
+
+## ASGI 與 WSGI
 
 框架和 server 之間有一個約定好的介面，Python 有兩套：
 
@@ -62,21 +153,7 @@ ASGI server（uvicorn）：解析 HTTP，把請求轉成 scope／receive／send
 
 FastAPI 是 ASGI 應用程式，所以用 uvicorn 啟動。框架做的事，就是把 `scope`（方法、路徑、標頭）與 `receive`（讀 body）包裝成方便的 `Request`，再把 handler 的回傳值透過 `send` 送回去。
 
-### 路由比對：順序有意義
-
-FastAPI 依**宣告順序**比對路由。下面兩個路由的順序寫反時：
-
-```python
-@app.get("/users/{user_id}")
-def get_user(user_id: int): ...
-
-@app.get("/users/me")          # 永遠到不了：/users/me 先被上面那條吃掉
-def get_me(): ...
-```
-
-`GET /users/me` 會先比對到 `/users/{user_id}`，`"me"` 轉不成 int，於是回 422，`loc` 是 `["path", "user_id"]`。固定路徑要宣告在參數路徑之前。
-
-### 依賴注入：一張每個請求重新解的圖
+## 依賴注入：一張每個請求重新解的圖
 
 `Depends(get_db)` 的意思是「處理這個請求前，先呼叫 `get_db`，把結果當參數給我」。依賴可以再依賴別的依賴，形成一張圖：
 
@@ -95,7 +172,7 @@ create_order(order, user, db)
 - **測試可以替換**：`app.dependency_overrides[get_db] = get_test_db`，不必改 handler（見 [測試金字塔與 pytest](#/skill/testing)）。
 - **權限檢查適合寫成依賴**：只有需要的路由才掛 `Depends(require_admin)`，比寫在 middleware 裡用路徑判斷清楚。
 
-### middleware 適合做什麼
+## middleware 適合做什麼
 
 middleware 包住**每一個**請求，適合做與路由無關的橫切工作：request id、存取 log 與耗時、CORS、壓縮、安全性標頭。不適合放在 middleware 的：
 
@@ -105,89 +182,7 @@ middleware 包住**每一個**請求，適合做與路由無關的橫切工作�
 
 多個 middleware 的順序：Starlette 裡**最後加入的在最外層**，請求先經過它、回應最後經過它。
 
-## 實際程式
-
-### FastAPI：每一層各寫一段
-
-需要安裝 fastapi 與 uvicorn，不能在瀏覽器執行。
-
-```python
-import time
-import uuid
-from collections.abc import Iterator
-
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-
-app = FastAPI()
-
-
-# ── middleware：每個請求都經過；這裡加 request id 與耗時 ──
-@app.middleware("http")
-async def request_context(request: Request, call_next):
-    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-    start = time.perf_counter()
-    response = await call_next(request)          # 往內層走，拿到回應再回來
-    response.headers["x-request-id"] = request_id
-    response.headers["server-timing"] = f"app;dur={(time.perf_counter() - start) * 1000:.1f}"
-    return response
-
-# 最後加入的在最外層：CORS 包在 request_context 外面
-app.add_middleware(CORSMiddleware, allow_origins=["https://shop.example"],
-                   allow_methods=["*"], allow_headers=["*"])
-
-
-# ── 自訂例外：service 層丟出，這裡統一轉成 HTTP ──
-class OutOfStock(Exception):
-    def __init__(self, product_id: int):
-        self.product_id = product_id
-
-@app.exception_handler(OutOfStock)
-async def out_of_stock_handler(request: Request, exc: OutOfStock):
-    return JSONResponse(status_code=409, content={"error": "out_of_stock", "product_id": exc.product_id})
-
-
-# ── 依賴：DB session 與目前使用者 ──
-def get_db() -> Iterator["Session"]:
-    db = SessionLocal()
-    try:
-        yield db                                  # handler 執行期間用這個 session
-    finally:
-        db.close()                                # 請求結束後關閉
-
-def get_current_user(request: Request, db=Depends(get_db)) -> "User":
-    token = request.headers.get("authorization", "").removeprefix("Bearer ")
-    user = find_user_by_token(db, token)
-    if user is None:
-        raise HTTPException(status_code=401, detail="invalid token")
-    return user
-
-
-# ── 請求與回應模型：驗證進來的、過濾出去的 ──
-class OrderIn(BaseModel):
-    product_id: int
-    qty: int = Field(gt=0, le=10)
-
-class OrderOut(BaseModel):
-    id: int
-    product_id: int
-    qty: int
-    status: str                                   # 內部欄位（成本價等）不在這裡，就不會被回傳
-
-
-# ── handler：只剩商業邏輯 ──
-@app.post("/orders", response_model=OrderOut, status_code=201)
-def create_order(order: OrderIn, user=Depends(get_current_user), db=Depends(get_db)):
-    return place_order(db, user, order.product_id, order.qty)   # 可能 raise OutOfStock
-```
-
-這裡 `create_order` 是 `def` 而不是 `async def`：裡面用的是同步的 DB session，FastAPI 會把它放到執行緒池執行，不會卡住 event loop（見 [同步、多執行緒與 async](#/skill/python-async)）。
-
-:::stop 讀到這裡可以先停：會說出請求經過的每一層，在 FastAPI 裡各寫一段。後面的極小框架與手動呼叫 WSGI／ASGI，在想看懂框架內部怎麼接起來時再回來讀。
-
-### 在瀏覽器裡跑一個極小的框架
+## 動手跑：一個極小的框架
 
 下面用標準函式庫寫一個一百行左右的框架，照真實框架的順序走一次生命週期：middleware → 路由 → 依賴 → 驗證 → handler → 序列化 → 例外處理。每一層都印出經過的紀錄。
 
@@ -395,7 +390,7 @@ for req in cases:
 
 注意第五個請求（handler 丟出 `RuntimeError`）：`timing` 的「←」那一行沒有印，`x-request-id` 標頭也沒有加上。例外直接穿過兩層 middleware 到最外層變成 500，這就是開頭 CORS 標頭消失的原因。
 
-### 手動呼叫一個 WSGI 與一個 ASGI 應用程式
+## 動手跑：手動呼叫 WSGI 與 ASGI 應用程式
 
 ```python run
 import asyncio
@@ -437,7 +432,9 @@ await asgi_app(scope, receive, send)
 print("ASGI:", sent[0]["status"], sent[1]["body"].decode())
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
+
+開頭的 CORS 現象可以實測：用 `TestClient(app, raise_server_exceptions=False)` 帶 `Origin` 標頭打一個會丟例外的 endpoint，回應的標頭只有 `content-length` 和 `content-type`；同一個 client 打正常的 endpoint，才看得到 `access-control-allow-origin`。
 
 **422 Unprocessable Entity**：FastAPI 的驗證錯誤，`detail` 會指出哪個欄位、在哪裡（`body`、`query`、`path`）：
 
@@ -452,7 +449,6 @@ print("ASGI:", sent[0]["status"], sent[1]["body"].decode())
 
 | 現象 | 原因 | 怎麼修 |
 |---|---|---|
-| 瀏覽器回報 CORS 錯誤，後端 log 有 500 | 未處理的例外在最外層變成 500，沒有經過 CORS middleware | 先修 500；為自訂例外註冊 `exception_handler`，讓它在內層就變成正常回應 |
 | `405 Method Not Allowed` | 路徑對、方法錯（例如前端用 PUT，後端只定義 PATCH） | 對照 OpenAPI 文件（`/docs`） |
 | 回應是 500，log 有 `ResponseValidationError` | handler 回傳的資料不符合 `response_model` | 這是後端的錯：修 handler 或模型 |
 | 回應裡出現 `password_hash` 等不該外流的欄位 | 沒有設 `response_model`，直接回傳了 ORM 物件或 dict | 一律用專門的輸出模型 |

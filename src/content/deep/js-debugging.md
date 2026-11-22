@@ -1,4 +1,4 @@
-## 從一個具體問題開始：正式站白畫面，錯誤指向第 1 行
+## 具體問題：正式站白畫面，錯誤指向第 1 行
 
 櫃台回報：今天下午報表頁打開是白的。在正式站打開 Console，只有這一段：
 
@@ -10,17 +10,9 @@ Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'n
     at async index-C1a2b3c4.js:1:47977
 ```
 
-訊息本身說得很清楚：某個值是 `undefined`，程式卻去讀它的 `name`。麻煩在位置：`index-C1a2b3c4.js` 是 Vite 建置出來、壓縮成一行的檔案，第 1 行第 48213 個字元對不回任何一個 `.vue` 檔。在本機跑開發環境也重現不了，因為本機的測試資料每個診間都有醫師。
+訊息說得很清楚：某個值是 `undefined`，程式卻去讀它的 `name`。麻煩在位置：`index-C1a2b3c4.js` 是 Vite 建置出來、壓縮成一行的檔案，第 1 行第 48213 個字元對不回任何一個 `.vue` 檔。本機也重現不了，因為本機的測試資料每個診間都有醫師。
 
-這次的查法是：先把正式站那支 API 的回應存下來（Network 分頁對請求按右鍵 `Copy` → `Copy response`），換進本機的假資料；在開發環境打開 Sources 分頁，勾選 `Pause on uncaught exceptions`，重新整理。程式停在 `ClinicRow.vue` 的 `row.doctor.name` 那一行，Scope 裡的 `row` 是家醫科 108，沒有 `doctor` 欄位。改成 `row.doctor?.name ?? '醫師未定'` 就修好了。
-
-事後補了兩件事：建置產生 hidden source map 交給錯誤監控，下次的 stack trace 直接是原始檔名與行號；在 `app.config.errorHandler` 裡把錯誤送回後端，不必等櫃台打電話。這一課整理讀錯誤訊息、對回原始碼、用 DevTools 停下來看現場，以及在 Vue 裡把錯誤收集起來的方法。
-
-## 運作原理
-
-### 錯誤物件與錯誤類型
-
-丟出的錯誤通常是 `Error` 或它的子類別，有三個常用的屬性：`name`（類型）、`message`（訊息）、`stack`（呼叫鏈的文字）。ES2022 起還可以帶 `cause`，把原本的錯誤包在新的錯誤裡（Baseline 2021）。
+## 讀錯誤訊息：類型、stack trace、source map
 
 | 類型 | 意思 | 常見例子（Chrome 的訊息） |
 |---|---|---|
@@ -28,12 +20,6 @@ Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'n
 | `ReferenceError` | 用了不存在的變數 | `patient is not defined`、`Cannot access 'A' before initialization` |
 | `SyntaxError` | 程式碼或 JSON 的格式錯 | `Unexpected token '<', "<!doctype "... is not valid JSON` |
 | `RangeError` | 數值超出範圍 | `Maximum call stack size exceeded`（遞迴沒有停） |
-
-同一個錯在不同瀏覽器的措辭不同：讀 `undefined` 的屬性，Safari 是 `undefined is not an object (evaluating 'row.doctor.name')`，Firefox 以 `can't access property "name"` 開頭。搜尋錯誤訊息時，拿掉變數名再搜比較容易找到。
-
-`Unexpected token '<', "<!doctype "... is not valid JSON` 值得記住：`res.json()` 拿到的是 HTML。多半是 API 路徑寫錯，伺服器把不存在的路徑回成了 `index.html`；到 Network 分頁看那一筆的 Response 就知道。
-
-### 讀 stack trace
 
 ```
 TypeError: Cannot read properties of undefined (reading 'name')
@@ -43,15 +29,56 @@ TypeError: Cannot read properties of undefined (reading 'name')
     at async loadReport (api.js:12:18)   ← 經過 await 的呼叫者
 ```
 
-由上往下讀：第一行是錯在哪裡，往下是一層一層的呼叫者。先找第一個自己寫的檔案，`node_modules`、Vue 的 runtime 這些 frame 通常不是問題所在。V8（Chrome、Edge、Node）會在經過 `await` 的地方加上 `at async …` 的 frame，所以非同步函式也看得到是誰呼叫的。
+由上往下讀：第一行是錯在哪裡，往下是一層一層的呼叫者。先找第一個自己寫的檔案，`node_modules`、Vue 的 runtime 這些 frame 通常不是問題所在。`Uncaught` 表示沒有任何 `try`/`catch` 接住它，`Uncaught (in promise)` 表示是一個沒人處理的 Promise 失敗。
 
-錯誤訊息前面的 `Uncaught` 表示沒有任何 `try`/`catch` 接住它，`Uncaught (in promise)` 表示是一個沒人處理的 Promise 失敗。
+source map 是一個 `.map` 的 JSON 檔，記錄「建置後的第幾行第幾個字」對到「哪個原始檔的第幾行」。DevTools 讀到它之後，stack trace 與 Sources 分頁都顯示原始檔名與行號。Vite 開發時一律提供；建置時預設不產生，所以正式站只看得到 `index-<hash>.js:1:48213`。
 
-### source map
+## 最小範例：錯誤的 name 與 message，停在出錯的那一行
 
-建置會把幾百個檔案打包、壓縮成幾個 `index-<hash>.js`，行號與變數名都不一樣了。source map 是一個 `.map` 的 JSON 檔，記錄「建置後的第幾行第幾個字」對到「哪個原始檔的第幾行」。JS 檔最後一行的 `//# sourceMappingURL=index-C1a2b3c4.js.map` 告訴 DevTools 去哪裡找它。DevTools 讀到 source map 後，stack trace 與 Sources 分頁都顯示原始檔名與行號，也能在原始碼上下中斷點。
+```js run
+// 每一種都是前端常見的錯；在這裡接住，印出 name 與 message
+const samples = {
+  '讀 undefined 的屬性': () => { const row = { dept: '家醫科' }; return row.doctor.name },
+  'JSON 拿到 HTML': () => JSON.parse('<!doctype html><html lang="zh-Hant">'),
+  'JSON 拿到空字串': () => JSON.parse(''),
+  '變數不存在': () => patientName.trim(),
+  '不是函式': () => { const data = Promise.resolve([]); return data.map((x) => x) },
+  '遞迴沒有停': () => { const walk = (n) => walk(n + 1); return walk(0) },
+}
+for (const [label, fn] of Object.entries(samples)) {
+  try {
+    fn()
+  } catch (err) {
+    console.log(`${label} → ${err.name}: ${err.message}`)
+  }
+}
+```
 
-Vite 開發時一律提供 source map。建置時由 `build.sourcemap` 決定（Vite 8 的說明）：
+開頭那個錯的查法：
+
+1. 在正式站的 Network 分頁對那支 API 的請求按右鍵 `Copy` → `Copy response`，換進本機的假資料。
+2. 在開發環境打開 Sources 分頁，勾選 `Pause on uncaught exceptions`，重新整理。
+3. 程式停在 `ClinicRow.vue` 的 `row.doctor.name` 那一行。Scope 區塊裡的 `row` 是家醫科 108，沒有 `doctor` 欄位。
+4. 改成 `row.doctor?.name ?? '醫師未定'`。
+
+## 最常見的兩個錯誤
+
+- **`TypeError: Cannot read properties of undefined (reading 'name')`**：某個值是 `undefined`。停在那一行看 Scope，往回找值從哪裡來；資料可能缺欄位就用 `?.`。
+- **`SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON`**：`res.json()` 拿到的是 HTML。多半是 API 路徑寫錯，伺服器把不存在的路徑回成了 `index.html`；到 Network 分頁看那一筆的網址與 Response。
+
+:::stop 讀到這裡可以先停：讀得懂錯誤類型與 stack trace，會在開發環境用 `Pause on uncaught exceptions` 停在出錯的那一行。後面的中斷點種類、Console 方法、Vue 的錯誤流向、全域錯誤收集與 hidden source map，在錯誤難重現或要替正式站接錯誤監控時再回來讀。
+
+## 錯誤物件，以及各瀏覽器的措辭
+
+丟出的錯誤通常是 `Error` 或它的子類別，有三個常用的屬性：`name`（類型）、`message`（訊息）、`stack`（呼叫鏈的文字）。ES2022 起還可以帶 `cause`，把原本的錯誤包在新的錯誤裡（Baseline 2021）。
+
+同一個錯在不同瀏覽器的措辭不同：讀 `undefined` 的屬性，Safari 是 `undefined is not an object (evaluating 'row.doctor.name')`，Firefox 以 `can't access property "name"` 開頭。搜尋錯誤訊息時，拿掉變數名再搜比較容易找到。
+
+V8（Chrome、Edge、Node）會在經過 `await` 的地方加上 `at async …` 的 frame，所以非同步函式也看得到是誰呼叫的。
+
+## source map 的設定：`build.sourcemap` 與 ignore list
+
+JS 檔最後一行的 `//# sourceMappingURL=index-C1a2b3c4.js.map` 告訴 DevTools 去哪裡找 source map。有了它，也能在原始碼上下中斷點。建置時由 `build.sourcemap` 決定（Vite 8 的說明）：
 
 | 設定 | 產生 `.map` | JS 檔尾的 `sourceMappingURL` | 用途 |
 |---|---|---|---|
@@ -64,7 +91,24 @@ Vite 開發時一律提供 source map。建置時由 `build.sourcemap` 決定（
 
 Vite 開發伺服器還會把 `node_modules` 裡的檔案標進 source map 的 ignore list（`server.sourcemapIgnoreList` 的預設），DevTools 一步一步執行時會跳過它們，stack trace 也會收起來。想進到某個套件裡看，在 Sources 分頁對檔案按右鍵選 `Remove from ignore list`；Call Stack 區塊也可以勾 `Show ignore-listed frames` 顯示被收起來的 frame；反過來，對不想看的檔案選 `Add script to ignore list`。
 
-### 用 DevTools 停下來看現場
+建置時產生 hidden source map：
+
+```js
+// vite.config.js
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  build: {
+    sourcemap: 'hidden',   // 產生 .map，但 JS 檔尾不加 sourceMappingURL
+  },
+})
+```
+
+建置後 `dist/assets/` 裡每個 `.js` 旁邊多一個 `.js.map`。上傳給錯誤監控服務之後，從部署的檔案裡移除（或設定伺服器不提供 `.map`）。
+
+## 中斷點的種類，停下來之後看什麼
 
 `console.log` 要先猜該印什麼；中斷點讓程式停在某一行，當下所有的值都看得到。
 
@@ -87,7 +131,7 @@ Vite 開發伺服器還會把 `node_modules` 裡的檔案標進 source map 的 i
 - Console 在暫停時是在目前的作用域執行，可以直接打 `row.doctor`、`list.filter(...)` 試。
 - 繼續執行（F8）、跳過下一個函式呼叫（F10）、進入函式（F11）、跳出目前的函式（Shift+F11）。
 
-### Console 的方法
+## Console 的方法
 
 | 方法 | 用途 |
 |---|---|
@@ -103,7 +147,7 @@ Vite 開發伺服器還會把 `node_modules` 裡的檔案標進 source map 的 i
 
 Console 裡還能用 `$0` 取得 Elements 分頁目前選取的元素，`copy(obj)` 把值複製到剪貼簿。
 
-### Vue 的錯誤會走到哪裡
+## Vue 的錯誤會走到哪裡
 
 ```
 元件的 setup、渲染、生命週期鉤子、watcher、@click 處理函式丟出錯誤
@@ -128,32 +172,7 @@ Vue 只接得到它自己呼叫的函式丟出的錯。下面這些不經過 Vue
 - 呼叫了 async 函式卻沒有回傳或 `await` 它的 Promise：`onMounted(() => { load() })` 裡 `load()` 失敗，Vue 收不到；寫成 `onMounted(async () => { await load() })` 或 `onMounted(() => load())`，Vue 才收得到。其他沒人接的 Promise 由 `window` 的 `unhandledrejection` 事件接。
 - 從別的網域載入的 script（第三方套件的 CDN 網址）丟出的錯，`window` 的 `error` 事件只拿到 `Script error.`，沒有訊息與位置，除非 `<script>` 加上 `crossorigin` 而且對方的回應帶有 CORS 標頭。
 
-## 實際程式碼
-
-### 錯誤的 name 與 message
-
-```js run
-// 每一種都是前端常見的錯；在這裡接住，印出 name 與 message
-const samples = {
-  '讀 undefined 的屬性': () => { const row = { dept: '家醫科' }; return row.doctor.name },
-  'JSON 拿到 HTML': () => JSON.parse('<!doctype html><html lang="zh-Hant">'),
-  'JSON 拿到空字串': () => JSON.parse(''),
-  '變數不存在': () => patientName.trim(),
-  '不是函式': () => { const data = Promise.resolve([]); return data.map((x) => x) },
-  '遞迴沒有停': () => { const walk = (n) => walk(n + 1); return walk(0) },
-}
-for (const [label, fn] of Object.entries(samples)) {
-  try {
-    fn()
-  } catch (err) {
-    console.log(`${label} → ${err.name}: ${err.message}`)
-  }
-}
-```
-
-:::stop 讀到這裡可以先停：讀得懂錯誤類型與 stack trace，會用 source map 與中斷點找到出錯的那一行。後面的 `cause`、全域錯誤收集與 hidden source map，在要替正式站接錯誤監控時再回來讀。
-
-### 用 `cause` 保留原本的錯誤
+## 用 `cause` 保留原本的錯誤
 
 ```js run
 async function fetchReport(month) {
@@ -180,7 +199,7 @@ try {
 
 Chrome 的 Console 印出帶 `cause` 的錯誤時，下面會多一段 `Caused by:`，列出原本的錯誤與它的 stack。
 
-### 在 `main.js` 收集錯誤
+## 在 `main.js` 收集錯誤
 
 ```js
 // main.js
@@ -221,7 +240,7 @@ app.use(router).mount('#app')
 
 設定了 errorHandler 之後，Vue 不再自己印出錯誤，開發時記得像上面一樣自己 `console.error`，否則錯誤會「消失」。送出的資料不要放病患姓名這類個資。
 
-### 用 `onErrorCaptured` 只讓一個區塊壞掉
+## 用 `onErrorCaptured` 只讓一個區塊壞掉
 
 ```vue
 <!-- PanelBoundary.vue：包住儀表板的每一塊，一塊壞掉不影響其他塊 -->
@@ -243,32 +262,13 @@ onErrorCaptured((err, instance, info) => {
 
 回傳 `false` 會讓錯誤停在這裡，errorHandler 就收不到；要同時回報，在這裡自己呼叫回報函式。
 
-### 建置時產生 hidden source map
-
-```js
-// vite.config.js
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-
-export default defineConfig({
-  plugins: [vue()],
-  build: {
-    sourcemap: 'hidden',   // 產生 .map，但 JS 檔尾不加 sourceMappingURL
-  },
-})
-```
-
-建置後 `dist/assets/` 裡每個 `.js` 旁邊多一個 `.js.map`。上傳給錯誤監控服務之後，從部署的檔案裡移除（或設定伺服器不提供 `.map`）。
-
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 訊息 | 原因 | 怎麼查、怎麼修 |
 |---|---|---|
-| `TypeError: Cannot read properties of undefined (reading 'name')` | 某個值是 `undefined` | 停在那一行看 Scope，往回找值從哪裡來；資料可能缺欄位就用 `?.` |
 | `TypeError: Cannot read properties of null (reading 'focus')` | 值是 `null`，常見於 template ref 在掛載前、`querySelector` 找不到 | 改到 `onMounted` 之後，或先判斷 |
 | `TypeError: data.map is not a function` | 不是陣列：少了 `await`，或 API 多包了一層 | 印出 `typeof data` 或看 Network 的 Response |
 | `ReferenceError: patientName is not defined` | 變數名打錯、沒有 import，或在 `<script setup>` 外面用到 | 對照宣告與 import |
-| `SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON` | `res.json()` 拿到 HTML：API 路徑錯，伺服器回了 `index.html` | Network 分頁看那一筆的網址與 Response |
 | `SyntaxError: Unexpected end of JSON input` | 回應是空的（例如 `204`）卻呼叫了 `res.json()` | 先看狀態碼與 `Content-Length` |
 | `RangeError: Maximum call stack size exceeded` | 遞迴沒有停，或兩個函式互相呼叫 | 看 stack trace 裡重複出現的那幾行 |
 | `[Vue warn]: Unhandled error during execution of mounted hook` | 生命週期裡丟出錯誤，而且沒有 errorHandler | 展開警告下面的元件名稱與錯誤；補上 errorHandler |

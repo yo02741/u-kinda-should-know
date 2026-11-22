@@ -1,4 +1,4 @@
-## 從一個具體問題開始：改成 React 之後，請求停不下來
+## 具體問題：改成 React 之後，請求停不下來
 
 合作的院所用 React，要把 Vue 寫的時段選擇元件 `SlotPicker` 搬過去。原本的 Vue 版本：
 
@@ -29,11 +29,9 @@ useEffect(() => {
 
 一打開頁面，Network 分頁的 `/api/slots` 一直增加。第一個 effect 沒有依賴陣列，每次渲染後都執行；請求回來 `setSlots` 觸發重新渲染，effect 又送一次請求，停不下來。第二個 effect 讓畫面先用舊的 `available` 渲染一次，再更新一次。
 
-兩個錯誤都來自同一個差別：Vue 的 `<script setup>` 只執行一次，`watch` 只在指定的來源改變時觸發；React 的元件函式每次渲染都整個重新執行，effect 預設每次渲染後都跑。
+## React 每次渲染都重跑整個元件函式
 
-## 運作原理
-
-### 重跑的範圍
+Vue 的 `<script setup>` 只執行一次，`watch` 只在指定的來源改變時觸發。React 的元件函式每次渲染都整個重新執行，effect 預設每次渲染後都跑。
 
 ```
 Vue 3.5                                  React 19
@@ -53,7 +51,7 @@ React 的很多規則由這一點推出來：
 
 Vue 的依賴由執行時自動追蹤，這些規則都不需要。
 
-### 對照表
+## 常用寫法的 Vue 與 React 對照
 
 | 需求 | Vue 3.5 | React 19 |
 |---|---|---|
@@ -63,59 +61,12 @@ Vue 的依賴由執行時自動追蹤，這些規則都不需要。
 | 狀態改變時做事 | `watch(source, cb)` | `useEffect(() => { … }, [deps])` |
 | 第一次掛載後 | `onMounted` | `useEffect(() => { … }, [])` |
 | 卸載時清理 | `onUnmounted`、`onWatcherCleanup` | effect 回傳的函式 |
-| 讀 DOM 元素 | `useTemplateRef('el')` | `useRef(null)` 加 `ref={el}` |
 | 父傳子 | `defineProps` | 函式參數 |
 | 子通知父 | `emit('confirm', d)` | 呼叫 callback prop：`onConfirm(d)` |
 | 雙向綁定 | `v-model`、`defineModel` | `value` 加 `onChange`（受控元件） |
-| 預設 slot | `<slot />` | `children` |
-| 作用域 slot | `<slot :row="row">` | 回傳 JSX 的函式 prop |
-| 跨層共用 | `provide`／`inject` | `createContext`、`<Context value>`（React 19）、`useContext` |
-| 重用邏輯 | composable `useXxx` | 自訂 hook `useXxx` |
-| 條件渲染 | `v-if`、`v-show` | `{cond && <X />}`、三元運算子；沒有 `v-show`，用 `style`／`hidden` |
 | 列表 | `v-for` 加 `:key` | `items.map((x) => <li key={x.id}>…</li>)` |
-| 全域狀態 | Pinia | Zustand、Redux Toolkit 等第三方套件 |
-| 路由 | Vue Router | React Router 等第三方套件 |
 
-### 狀態更新與舊的閉包
-
-Vue 的 `ref` 是一個物件，任何時候讀 `.value` 都是最新的值。React 的 `count` 是那一次渲染時拿到的數字，存進 callback 之後就固定了：
-
-```jsx
-// React：每秒加一，畫面卻停在 1
-function Counter() {
-  const [count, setCount] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => setCount(count + 1), 1000)   // count 永遠是第一次渲染的 0
-    return () => clearInterval(id)
-  }, [])
-  return <p>{count}</p>
-}
-```
-
-修法是改用更新函式 `setCount((c) => c + 1)`，由 React 傳入目前的值。同樣的事 Vue 寫成 `setInterval(() => count.value++, 1000)` 就正確，因為每次執行都重新讀 `.value`。
-
-React 的 setter 也不會改變這一次渲染裡的變數：`setDate('2026-11-21'); console.log(date)` 印出的還是舊日期，新值要到下一次渲染才看得到。
-
-### hooks 規則
-
-React 文件的兩條規則：
-
-1. 只在元件或自訂 hook 的最上層呼叫 hook，不放在條件、迴圈、巢狀函式、`try`／`catch`／`finally` 裡，也不放在提早 `return` 之後。
-2. 只在 React 的函式元件或自訂 hook 裡呼叫。
-
-`eslint-plugin-react-hooks` 的 `rules-of-hooks` 會報 `React Hook "useEffect" is called conditionally. React Hooks must be called in the exact same order in every component render.`；`exhaustive-deps` 會報 `React Hook useEffect has a missing dependency: 'dept'. Either include it or remove the dependency array.`。執行時違反規則，React 會丟出 `Rendered more hooks than during the previous render.`。
-
-Vue 的 composable 沒有呼叫順序的限制，但要在 setup 期間呼叫（見 [composables](#/skill/composables)）。
-
-### effect 的開發模式行為
-
-React 18 起，`<StrictMode>` 在開發模式會讓每個 effect 多跑一輪 setup 加 cleanup，用來檢查清理有沒有寫好。所以開發時同一個請求出現兩次、第一個被取消，是正常的；兩個都成功回來，代表 effect 沒有清理。Vue 沒有這個機制。
-
-### React Compiler
-
-React Compiler 1.0（2025-10 發布）是建置時的工具，自動替元件與 hook 加上 memo，減少手寫 `useMemo`、`useCallback` 的需要。它不改變上面的規則：依賴陣列與 hooks 規則仍然要遵守，effect 的清理仍然要自己寫。
-
-## 實際程式：同一個 SlotPicker，兩種寫法
+## 最小範例：同一個 SlotPicker，兩種寫法
 
 ```vue
 <!-- SlotPicker.vue（Vue 3.5） -->
@@ -186,7 +137,57 @@ export function SlotPicker({ dept, selected, onSelectedChange, renderOption }) {
 
 逐項對照：`defineModel('selected')` 拆成 `selected` 與 `onSelectedChange`；`computed` 變成一行直接計算；`watch` 加 `immediate` 變成依賴 `[dept]` 的 effect（React 的 effect 第一次渲染後一定會執行，相當於 `immediate`）；`onWatcherCleanup` 變成 effect 回傳的函式；作用域 slot `#option="{ item }"` 變成 `renderOption` 函式 prop。
 
-:::stop 讀到這裡可以先停：說得出 React 每次渲染重跑整個元件、閉包會留住舊值，會把 Vue 的 computed、watch 與 v-model 對到 React 的寫法。後面的錯誤訊息表，在 React 的 Console 出現 hooks 警告時再回來查。
+:::stop 讀到這裡可以先停：說得出 React 每次渲染重跑整個元件，會把 Vue 的 computed、watch 與 v-model 對到 React 的寫法。後面的舊閉包、hooks 規則、StrictMode、其餘對照與錯誤訊息表，在計時器讀到舊值或 Console 出現 hooks 警告時再回來查。
+
+## 狀態更新與舊的閉包
+
+Vue 的 `ref` 是一個物件，任何時候讀 `.value` 都是最新的值。React 的 `count` 是那一次渲染時拿到的數字，存進 callback 之後就固定了：
+
+```jsx
+// React：每秒加一，畫面卻停在 1
+function Counter() {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setCount(count + 1), 1000)   // count 永遠是第一次渲染的 0
+    return () => clearInterval(id)
+  }, [])
+  return <p>{count}</p>
+}
+```
+
+修法是改用更新函式 `setCount((c) => c + 1)`，由 React 傳入目前的值。同樣的事 Vue 寫成 `setInterval(() => count.value++, 1000)` 就正確，因為每次執行都重新讀 `.value`。
+
+React 的 setter 也不會改變這一次渲染裡的變數：`setDate('2026-11-21'); console.log(date)` 印出的還是舊日期，新值要到下一次渲染才看得到。
+
+## hooks 規則與 lint 訊息
+
+React 文件的兩條規則：
+
+1. 只在元件或自訂 hook 的最上層呼叫 hook，不放在條件、迴圈、巢狀函式、`try`／`catch`／`finally` 裡，也不放在提早 `return` 之後。
+2. 只在 React 的函式元件或自訂 hook 裡呼叫。
+
+`eslint-plugin-react-hooks` 的 `rules-of-hooks` 會報 `React Hook "useEffect" is called conditionally. React Hooks must be called in the exact same order in every component render.`；`exhaustive-deps` 會報 `React Hook useEffect has a missing dependency: 'dept'. Either include it or remove the dependency array.`。執行時違反規則，React 會丟出 `Rendered more hooks than during the previous render.`。
+
+Vue 的 composable 沒有呼叫順序的限制，但要在 setup 期間呼叫（見 [composables](#/skill/composables)）。
+
+## StrictMode 與 React Compiler
+
+React 18 起，`<StrictMode>` 在開發模式會讓每個 effect 多跑一輪 setup 加 cleanup，用來檢查清理有沒有寫好。所以開發時同一個請求出現兩次、第一個被取消，是正常的；兩個都成功回來，代表 effect 沒有清理。Vue 沒有這個機制。
+
+React Compiler 1.0（2025-10 發布）是建置時的工具，自動替元件與 hook 加上 memo，減少手寫 `useMemo`、`useCallback` 的需要。它不改變上面的規則：依賴陣列與 hooks 規則仍然要遵守，effect 的清理仍然要自己寫。
+
+## 其餘對照：DOM、slot、跨層共用、路由
+
+| 需求 | Vue 3.5 | React 19 |
+|---|---|---|
+| 讀 DOM 元素 | `useTemplateRef('el')` | `useRef(null)` 加 `ref={el}` |
+| 預設 slot | `<slot />` | `children` |
+| 作用域 slot | `<slot :row="row">` | 回傳 JSX 的函式 prop |
+| 跨層共用 | `provide`／`inject` | `createContext`、`<Context value>`（React 19）、`useContext` |
+| 重用邏輯 | composable `useXxx` | 自訂 hook `useXxx` |
+| 條件渲染 | `v-if`、`v-show` | `{cond && <X />}`、三元運算子；沒有 `v-show`，用 `style`／`hidden` |
+| 全域狀態 | Pinia | Zustand、Redux Toolkit 等第三方套件 |
+| 路由 | Vue Router | React Router 等第三方套件 |
 
 ## 常見錯誤與錯誤訊息
 

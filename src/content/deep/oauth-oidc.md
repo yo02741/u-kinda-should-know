@@ -1,38 +1,30 @@
 ## 從一個具體問題開始：拿到 access token，就算登入了嗎
 
-一個網站要做「用 Example 帳號登入」。工程師照著某篇教學做：使用者授權後，網站拿到一張 access token，呼叫 Example 的 `/me` API 取得 email，用 email 找到本地帳號，登入完成。
+一個網站要做「用 Example 帳號登入」：使用者授權後，網站拿到一張 access token，呼叫 Example 的 `/me` API 取得 email，用 email 找到本地帳號。上線後發現兩個問題：
 
-上線幾週後發現兩個問題：
+1. 有人把**別的 App** 拿到的、屬於受害者的 access token 送到這個網站的登入端點，網站照樣讓他以受害者身分登入。access token 不說明「這張 token 是發給我這個網站、為了這一次登入」。
+2. 某個身分提供者不驗證使用者自己填的 email，有人註冊時填了別人的 email，登入後拿到對方在本站的帳號。
 
-1. 有人把**別的 App** 拿到的 access token（同一個身分提供者發的、屬於受害者的）送到這個網站的登入端點，網站照樣呼叫 `/me`、照樣拿到受害者的 email，讓他以受害者身分登入。access token 只說明「持有者可以呼叫這個 API」，不說明「這張 token 是發給我這個網站、為了這一次登入」。
-2. 某個身分提供者允許使用者自己填 email 而且不驗證，有人註冊一個帳號填了別人的 email，用它「登入」後拿到了對方在本站的帳號。
+**OAuth 2.0 是授權協定，不是驗證協定**：它回答「使用者是否同意讓這個 client 存取某些資源」，沒有回答「這位使用者是誰、這個答案是給誰的」。OpenID Connect（OIDC）在 OAuth 上加一張 ID token 回答後者。
 
-這兩個問題的根源是同一個：**OAuth 2.0 是授權協定，不是驗證協定**。它回答的是「使用者是否同意讓這個 client 存取某些資源」，沒有回答「現在這位使用者是誰、這個答案是給誰的」。OpenID Connect（OIDC）在 OAuth 上加了一層，專門回答後者：ID token 裡有 `aud`（是發給哪個 client 的）、`nonce`（是哪一次登入請求）、`iss` + `sub`（穩定的使用者識別碼）。
+## 四個角色
 
-## 運作原理：四個角色與一次授權
+OAuth 2.0（RFC 6749）定義：
 
-OAuth 2.0（RFC 6749）定義四個角色：
-
-| 角色 | 是誰 | 「用 Example 登入」的例子 |
+| 角色 | 是誰 | 例子 |
 |---|---|---|
 | Resource Owner | 擁有資料、能做授權決定的人 | 使用者 alice |
 | Client | 想存取資料的應用程式 | 你的網站 `shop.example.com`（後端） |
 | Authorization Server | 驗證使用者、詢問同意、發 token | `accounts.example.com` |
 | Resource Server | 存放資料、檢查 token 的 API | `api.example.com` |
 
-Client 分兩種：**機密型**（confidential，有後端能保管 `client_secret`）與**公開型**（public，SPA、手機 App、CLI，程式碼在使用者手上，藏不住 secret）。下面以機密型的網站後端為例；公開型的差別在換 token 時不帶 secret、只靠 PKCE，見 [Device Code 與 PKCE](#/skill/oauth-device-pkce)。
+## 授權碼流程：八步往返
 
-授權伺服器通常在 `/.well-known/openid-configuration` 公布自己的設定（授權端點、token 端點、JWKS 網址、支援的 scope），client 可以從這裡讀，不用寫死每一個網址。
-
-### 授權碼流程：逐步往返
-
-**① 使用者點「用 Example 登入」**。網站後端產生三個隨機值存進這位使用者的 session（登入前的暫時 session）：
+**① 使用者點「用 Example 登入」**。網站後端產生三個隨機值存進登入前的暫時 session，再把瀏覽器導去授權伺服器：
 
 - `state`：防 CSRF，回來時比對。
-- `nonce`：OIDC 用，會被寫進 ID token，防 ID token 被重放。
+- `nonce`：OIDC 用，寫進 ID token，防重放。
 - `code_verifier`：PKCE 用，算出 `code_challenge` 放進請求。
-
-然後把瀏覽器導去授權伺服器：
 
 ```http
 HTTP/1.1 302 Found
@@ -40,7 +32,7 @@ Location: https://accounts.example.com/authorize?response_type=code&client_id=sh
 Set-Cookie: __Host-pre=…; Path=/; Secure; HttpOnly; SameSite=Lax
 ```
 
-**② 授權伺服器驗證使用者並詢問同意**。使用者在 `accounts.example.com` 登入（密碼、passkey、MFA 都在這裡發生，你的網站完全看不到密碼），畫面列出「shop-web 想取得你的 email 與基本資料」。
+**② 授權伺服器驗證使用者並詢問同意**。密碼、passkey、MFA 都在授權伺服器發生，你的網站看不到密碼。
 
 **③ 導回 client，帶著授權碼**：
 
@@ -49,11 +41,11 @@ HTTP/1.1 302 Found
 Location: https://shop.example.com/auth/callback?code=4/P7q9Lm2Xz…&state=Zk3pQ8vL2mWx
 ```
 
-`code` 是短命、一次性的憑證。RFC 6749 建議最長 10 分鐘，實務上常見更短。它會出現在網址列、瀏覽器歷史、可能的 log 裡，所以本身不能直接拿來存取資料。
+`code` 短命、只能用一次（RFC 6749 建議最長 10 分鐘）。它會出現在網址列與 log 裡，不能直接拿來存取資料。
 
-**④ client 後端比對 state**。網址的 `state` 必須等於 session 裡存的那個；不符就中止，不要繼續換 token。
+**④ client 後端比對 state**。網址的 `state` 必須等於 session 裡存的那個，不符就中止。
 
-**⑤ 後端拿 code 換 token**（這一步在伺服器對伺服器之間，不經過瀏覽器）：
+**⑤ 後端拿 code 換 token**（伺服器對伺服器，不經過瀏覽器）：
 
 ```http
 POST /token HTTP/1.1
@@ -64,7 +56,7 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=authorization_code&code=4/P7q9Lm2Xz…&redirect_uri=https%3A%2F%2Fshop.example.com%2Fauth%2Fcallback&code_verifier=Jt8sQ1fV…
 ```
 
-`Authorization: Basic` 是 `client_id:client_secret` 的 Base64（這叫 `client_secret_basic`；也有把它們放在表單裡的 `client_secret_post`，以及用私鑰簽一個 JWT 的 `private_key_jwt`）。`redirect_uri` 必須和步驟 ① 送出的完全相同。
+`redirect_uri` 必須和步驟 ① 送出的完全相同。
 
 **⑥ 授權伺服器回傳 token**：
 
@@ -83,17 +75,31 @@ Cache-Control: no-store
 }
 ```
 
-**⑦ client 驗證 ID token、建立自己的 session**（見下一段）。到這裡「登入」才算完成。之後網站對瀏覽器用自己的 session cookie，和授權伺服器的 token 是兩回事（見 [驗證基礎](#/skill/authn-basics)）。
+**⑦ client 驗證 ID token、建立自己的 session**。到這裡「登入」才算完成，之後網站用自己的 session cookie（見 [驗證基礎](#/skill/authn-basics)）。
 
-**⑧ 需要時用 access token 呼叫 API**：
+[OAuth 授權碼流程](#/lab/OAuthLab) 實驗室可以逐步看這八步。
 
-```http
-GET /v1/contacts HTTP/1.1
-Host: api.example.com
-Authorization: Bearer ya29.a0Af…
-```
+**⑧ 需要時用 access token 呼叫 API**，放在 `Authorization: Bearer` 標頭。
 
-[OAuth 授權碼流程](#/lab/OAuthLab) 實驗室把這八步畫成時序圖，可以逐步看每一步的請求與回應。
+## ID token 要驗什麼
+
+依 OIDC Core，client 至少要檢查這張簽章的 JWT：
+
+| 檢查 | 失敗代表什麼 |
+|---|---|
+| 簽章正確，`alg` 是預期的（常見 RS256），金鑰來自 `jwks_uri` 且 `kid` 對得上 | 內容被竄改，或不是這個提供者簽的 |
+| `iss` 完全等於提供者的 issuer | 別的提供者簽的 |
+| `aud` 包含自己的 `client_id` | 這是發給別的 client 的 ID token |
+| `exp` 還沒到 | 過期 |
+| `nonce` 等於登入請求時存在 session 裡的值 | 舊的 ID token 被重放 |
+
+開頭的第一個問題靠 `aud` 擋下，第二個靠識別碼：本地帳號綁 **`iss` + `sub`**，不綁 email。
+
+最常見的兩個錯誤：`redirect_uri` 和註冊的字串不完全相同，授權伺服器顯示錯誤頁（Google 是 `redirect_uri_mismatch`）；code 過期或被兌換第二次，token 端點回 `invalid_grant`。
+
+:::stop 讀到這裡可以先停：會走一次授權碼流程，知道 state、nonce、code_verifier 各在哪一步產生與比對，也會驗 ID token 並用 `iss` + `sub` 綁帳號。後面的 state、scope、refresh token 與 OIDC 的其他部分在接真實的身分提供者時回來讀；程式模擬與錯誤訊息，在要自己寫 callback 或除錯登入失敗時再讀。
+
+## state、scope 與 refresh token
 
 ### state：防的是把攻擊者的帳號塞給你
 
@@ -108,9 +114,11 @@ Authorization: Bearer ya29.a0Af…
 - 只要求現在需要的，之後需要更多再要（incremental authorization），同意畫面越短，使用者越願意按同意。
 - Resource Server 要檢查 token 的 scope 涵蓋這個操作，不足時回 `403`，並在 `WWW-Authenticate` 帶 `error="insufficient_scope"`（RFC 6750）。
 
-### refresh token
+### refresh token 與 client 驗證方式
 
-access token 效期短（上例約一小時）。到期後，client 用 refresh token 換新的，不用再讓使用者走一次流程：
+步驟 ⑤ 的 `Authorization: Basic` 是 `client_id:client_secret` 的 Base64，這叫 `client_secret_basic`；也有把它們放在表單裡的 `client_secret_post`，以及用私鑰簽一個 JWT 的 `private_key_jwt`。
+
+access token 效期短（步驟 ⑥ 的例子約一小時）。到期後，client 用 refresh token 換新的，不用再讓使用者走一次流程：
 
 ```http
 POST /token HTTP/1.1
@@ -122,6 +130,20 @@ grant_type=refresh_token&refresh_token=1//0gK…
 ```
 
 refresh token 效期長、能力大，存在後端（資料庫要加密），不要送到瀏覽器。有些授權伺服器每次換發都回一張新的 refresh token 並作廢舊的（rotation），舊的被再次使用就代表外洩，整串作廢。要不要發 refresh token、要什麼 scope 才發（OIDC 定義了 `offline_access`），每家授權伺服器規則不同，看它的文件。
+
+### 用 access token 呼叫 API
+
+```http
+GET /v1/contacts HTTP/1.1
+Host: api.example.com
+Authorization: Bearer ya29.a0Af…
+```
+
+### Client 類型與 discovery
+
+Client 分兩種：**機密型**（confidential，有後端能保管 `client_secret`）與**公開型**（public，SPA、手機 App、CLI，程式碼在使用者手上，藏不住 secret）。本課的流程以機密型的網站後端為例；公開型的差別在換 token 時不帶 secret、只靠 PKCE，見 [Device Code 與 PKCE](#/skill/oauth-device-pkce)。
+
+授權伺服器通常在 `/.well-known/openid-configuration` 公布自己的設定（授權端點、token 端點、JWKS 網址、支援的 scope），client 可以從這裡讀，不用寫死每一個網址。
 
 ## OIDC 多了什麼
 
@@ -168,25 +190,13 @@ Content-Type: application/json
 
 規格要求 client 確認 UserInfo 回應的 `sub` 和 ID token 的 `sub` 相同，不同就不能用。
 
-### ID token 要驗什麼
+ID token 另外三項檢查：`aud` 有多個值時，`azp` 要等於自己的 `client_id`；`iat` 不要太舊（依自己的政策），否則是很久以前簽的 token；有要求 `max_age` 時檢查 `auth_time`，確認使用者上次輸入憑證的時間沒有太久。
 
-依 OIDC Core 的規定，client 收到 ID token 時至少要檢查：
-
-| 檢查 | 失敗代表什麼 |
-|---|---|
-| 簽章正確，`alg` 是預期的（常見 RS256），金鑰來自 `jwks_uri` 且 `kid` 對得上 | 內容被竄改，或根本不是這個提供者簽的 |
-| `iss` 完全等於提供者的 issuer | 別的提供者簽的 |
-| `aud` 包含自己的 `client_id`；若有多個 aud，`azp` 要等於自己的 `client_id` | 這是發給別的 client 的 ID token（開頭第一個問題的變形） |
-| `exp` 還沒到 | 過期 |
-| `nonce` 等於這次登入請求時存在 session 裡的值 | 舊的 ID token 被重放 |
-| `iat` 不要太舊（依自己的政策） | 很久以前簽的 token |
-| 有要求 `max_age` 時檢查 `auth_time` | 使用者上次真正輸入憑證的時間太久 |
-
-用 OIDC 時開頭的第一個問題就解了：別的 App 拿到的 ID token，`aud` 是那個 App 的 client_id，驗證時會被拒絕。授權碼流程中，ID token 是後端直接從 token 端點經 TLS 拿到的，OIDC Core 允許這種情況用 TLS 伺服器驗證取代簽章驗證；但多數函式庫一律驗簽章，照做即可。
+授權碼流程中，ID token 是後端直接從 token 端點經 TLS 拿到的，OIDC Core 允許這種情況用 TLS 伺服器驗證取代簽章驗證；但多數函式庫一律驗簽章，照做即可。
 
 ### 用什麼當使用者識別碼
 
-本地帳號要綁 **`iss` + `sub`**，不是 email。`sub` 在同一個提供者內唯一且不會重新指派；email 會改、可能被別人註冊、不同提供者之間更沒有保證。開頭的第二個問題就是用 email 當識別碼造成的。要用 email 做「既有帳號連結」時，至少要求 `email_verified` 為 `true`，而且只信任你確定會驗證 email 的提供者；更保守的做法是要求使用者先用原本的方式登入，再手動連結。
+`sub` 在同一個提供者內唯一且不會重新指派；email 會改、可能被別人註冊、不同提供者之間更沒有保證。開頭的第二個問題就是用 email 當識別碼造成的。要用 email 做「既有帳號連結」時，至少要求 `email_verified` 為 `true`，而且只信任你確定會驗證 email 的提供者；更保守的做法是要求使用者先用原本的方式登入，再手動連結。
 
 ### access token 和 ID token 不要混用
 
@@ -196,8 +206,6 @@ Content-Type: application/json
 | 回答什麼 | 持有者可以做哪些操作 | 誰登入了、何時、發給哪個 client |
 | 格式 | 規格不規定；可能是 JWT 也可能是 opaque 字串，client 不應該解析它 | 一定是 JWT |
 | 送到 API | 是，`Authorization: Bearer` | 否；API 不應該接受 ID token 當存取憑證 |
-
-:::stop 讀到這裡可以先停：會走一次授權碼流程，說得出 state、PKCE、scope 各防什麼，也分得出 access token 與 ID token。後面的程式模擬與錯誤訊息，在要自己寫 callback 或除錯登入失敗時再回來讀。
 
 ## 實際程式：模擬授權伺服器與 client 的 callback
 

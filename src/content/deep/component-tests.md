@@ -1,4 +1,4 @@
-## 從一個具體問題開始：改了 class 名稱，測試全紅；送錯欄位，測試全綠
+## 具體問題：改了 class 名稱，測試全紅；送錯欄位，測試全綠
 
 掛號表單 `BookingForm` 的測試是請 AI 補的，一共 12 個，寫法像這樣：
 
@@ -13,42 +13,13 @@ expect(api.createAppointment).toHaveBeenCalled()
 
 兩週後發生兩件事。設計師把按鈕的 class 從 `btn-primary` 改成 `btn btn--primary`，畫面與功能完全沒變，12 個測試紅了 9 個。同一週，後端把欄位從 `slot` 改名為 `time`，前端照著改 `api.js` 時打錯成 `tiem`，掛號一律回 422，測試卻全綠：API 模組整個被 `vi.mock` 換掉，斷言只檢查「有呼叫」，不檢查送出了什麼，也不檢查使用者看到了什麼。
 
-這組測試綁住了實作（class、DOM 結構、內部變數），卻沒有綁住行為（送出的請求、畫面上的結果）。這一課的寫法反過來：用角色與名稱找元素，像使用者一樣操作，API 在網路層 mock，斷言落在畫面與 emit 的事件上。
+這組測試綁住了實作（class、DOM 結構、內部變數），卻沒有綁住行為（送出的請求、畫面上的結果）。
 
-## 運作原理
+## 找元素、操作、等待：照使用者的方式寫
 
-### 掛載：`mount` 與 `render`
-
-Vue Test Utils（VTU）的 `mount(元件, 選項)` 建立一個 Vue app，把元件掛進 DOM，回傳一個 wrapper。常用的選項：
-
-| 選項 | 用途 |
-|---|---|
-| `props` | 傳給元件的 props |
-| `slots` | slot 的內容，字串或元件 |
-| `global.plugins` | 裝 Pinia、Vue Router、i18n 這類 plugin |
-| `global.stubs` | 把某些子元件換成替身，例如 `{ RouterLink: RouterLinkStub }` |
-| `global.provide` | 給 `inject` 用的值 |
-| `attachTo` | 掛到 `document.body` 底下的某個元素；預設掛在一個沒有接上文件的 `div` |
-
-`@testing-library/vue` 的 `render` 底層就是 VTU 的 `mount`（`@testing-library/vue` 8.1 依賴 `@vue/test-utils` ^2.4），選項相同。差別在回傳值與找元素的方式：Testing Library 不給 wrapper，改用 `screen.getByRole(...)` 這類查詢，從 `document.body` 找使用者看得到的東西。兩者可以混用，本課的主要寫法用 Testing Library，VTU 的寫法放在後面對照。
-
-### 找元素：查詢的優先順序
-
-Testing Library 的文件「Which query should I use?」排出的順序：
-
-| 順序 | 查詢 | 用在哪裡 |
-|---|---|---|
-| 1 | `getByRole('button', { name: '送出掛號' })` | 幾乎所有互動元素：按鈕、連結、欄位、radio、tab、dialog |
-| 2 | `getByLabelText('手機')` | 有 `label` 的表單欄位 |
-| 3 | `getByPlaceholderText` | 沒有 label、只有 placeholder 的欄位（本身就是無障礙問題） |
-| 4 | `getByText('這天沒有預約')` | 非互動的文字 |
-| 5 | `getByDisplayValue` | 找目前值是某個字的欄位 |
-| 6 | `getByAltText`、`getByTitle` | 圖片、有 title 的元素 |
-| 7 | `getByTestId('slot-chart')` | 沒有任何可見文字或角色可以描述的元素 |
+優先用 `getByRole('button', { name: '送出掛號' })`，非互動的文字用 `getByText`，`getByTestId` 留到最後。
 
 `getByRole` 的名稱就是 accessibility tree 裡的 accessible name，和螢幕閱讀器念的是同一個。按鈕只有圖示沒有 `aria-label`、欄位沒有 `label` 時，查詢會失敗，測試順便擋下了無障礙問題。名稱的比對預設是完整字串（去掉前後空白後相等），只想比一部分就用正規表示式：`{ name: /09:00/ }`。
-
-每種查詢都有三個版本，差在找不到時怎麼辦：
 
 | 前綴 | 找不到 | 找到多個 | 用途 |
 |---|---|---|---|
@@ -56,33 +27,9 @@ Testing Library 的文件「Which query should I use?」排出的順序：
 | `queryBy` | 回傳 `null` | 丟錯 | 斷言元素不存在：`expect(screen.queryByRole('alert')).not.toBeInTheDocument()` |
 | `findBy` | 重試到逾時（預設 1000 毫秒）後丟錯 | 丟錯 | 等一段時間才會出現，例如 API 回來之後 |
 
-複數版本 `getAllBy`、`queryAllBy`、`findAllBy` 回傳陣列。
+操作用 `@testing-library/user-event`：先 `const user = userEvent.setup()`（每個測試各建一個），再 `await user.click(el)`、`await user.type(el, '0912')`。
 
-### 操作：user-event、`fireEvent` 與 `trigger`
-
-使用者點一下按鈕，瀏覽器依序發出 `pointerdown`、`mousedown`、`focus`、`pointerup`、`mouseup`、`click`；打一個字會有 `keydown`、`keypress`、`input`、`keyup`。三種工具模擬的程度不同：
-
-| 工具 | 送出的事件 | 適合 |
-|---|---|---|
-| `@testing-library/user-event` 14：`await user.click(el)`、`user.type(el, '0912')`、`user.keyboard('{ArrowDown}')`、`user.tab()` | 照真實順序的一整串，會移動焦點、檢查元素是否停用 | 預設用這個 |
-| Testing Library 的 `fireEvent.click(el)` | 只有一個 `click` | user-event 模擬不了的特殊事件 |
-| VTU 的 `wrapper.trigger('click')`、`setValue('0912')` | 只有指定的事件（`setValue` 會設值並觸發 `input` 或 `change`） | VTU 風格的測試 |
-
-`user.click()` 點停用的按鈕不會觸發 `click`，和瀏覽器一樣；`trigger('click')` 遇到停用的元素同樣不觸發。user-event 要先 `const user = userEvent.setup()`，每個測試各建一個。
-
-### 等：Vue 的 DOM 更新是非同步的
-
-一次點擊到畫面更新，中間有好幾個非同步的步驟：
-
-```text
-await user.click(送出)
-  └─ click 事件 → submit() 執行，submitting.value = true
-       └─ Vue 把 DOM 更新排進下一個 microtask（nextTick）
-  fetch('/api/appointments') ── MSW 攔截 → handler 回 201 ── Promise resolve
-       └─ message.value = '已完成掛號，號碼 A012'
-            └─ 下一個 nextTick：<p role="status"> 的文字改變
-expect(await screen.findByRole('status')).toHaveTextContent(...)   ← 一直重試到文字出現
-```
+Vue 的 DOM 更新是非同步的，斷言前要等：
 
 | 要等的東西 | 怎麼等 |
 |---|---|
@@ -92,38 +39,7 @@ expect(await screen.findByRole('status')).toHaveTextContent(...)   ← 一直重
 
 不要用 `setTimeout` 等固定時間：太短會在慢的 CI 機器上失敗，太長讓每個測試都變慢。
 
-:::stop 讀到這裡可以先停：會用 `getByRole` 找元素、用 user-event 操作、用 `findBy` 等非同步的結果。後面的 MSW、Pinia 與 Router 的替身和完整測試檔，在元件會呼叫 API 或依賴 store 時再回來讀。
-
-### mock API：MSW 在網路層攔截
-
-Mock Service Worker（MSW）在 Node 裡攔截 `fetch` 與 `XMLHttpRequest`，交給 handler 決定回應：
-
-```text
-BookingForm ──fetch('/api/sessions/s-1120-am/slots')──▶ MSW 攔截
-                                                           │ 依序比對 handler
-                                                           ▼
-                           http.get('/api/sessions/:id/slots', resolver) → HttpResponse.json([...])
-```
-
-元件的程式不用改，網址怎麼組、body 送什麼、回應怎麼解析都在測試範圍內。一個測試要換回應時用 `server.use(...)` 把新的 handler 加在最前面，`afterEach` 呼叫 `server.resetHandlers()` 回到預設。
-
-沒有對應 handler 的請求怎麼處理，是 MSW 3 改名的選項：
-
-| 版本 | 選項 | 預設 |
-|---|---|---|
-| MSW 2.x（2.15.0） | `server.listen({ onUnhandledRequest: 'error' })` | `'warn'` |
-| MSW 3.x（3.0.7） | `server.listen({ onUnhandledFrame: 'error' })` | `'warn'` |
-
-MSW 3 的套件裡已經沒有 `onUnhandledRequest`。照 2.x 的寫法傳進去，MSW 3 不會報錯，只是忽略它、維持預設的 `'warn'`：沒有 handler 的請求印一行警告，然後照常送到網路上。Vitest 的 jsdom 環境預設網址是 `http://localhost:3000`，`fetch('/api/doctors')` 會去連 `127.0.0.1:3000`。
-
-### plugin 與替身：Pinia、Router
-
-- **Pinia**：`@pinia/testing` 的 `createTestingPinia()` 建一個測試用的 Pinia，`initialState` 指定 store 的初始狀態，預設把所有 action 換成 spy（`stubActions: true`）。spy 函式要由 `createSpy` 提供；沒開 Vitest 的 `globals` 時，找不到全域的 `vi`，要明確傳 `createSpy: vi.fn`。
-- **Vue Router**：只需要 `<RouterLink>` 顯示出來時，用 VTU 的 `RouterLinkStub` 換掉，再用 `findComponent(RouterLinkStub).props('to')` 檢查連到哪裡；要測導航行為時，建一個用 `createMemoryHistory()` 的真 router 放進 `global.plugins`，`await router.isReady()` 之後再掛載。
-
-## 實際程式碼
-
-### 被測的元件
+## 最小範例：BookingForm 的元件測試
 
 ```vue
 <!-- src/components/BookingForm.vue -->
@@ -185,49 +101,7 @@ async function submit() {
 </template>
 ```
 
-### 共用的 setup：MSW、jest-dom、清理
-
-```js
-// src/mocks/handlers.js：預設的回應，每個測試都從這裡開始
-import { http, HttpResponse } from 'msw'
-
-export const handlers = [
-  http.get('/api/sessions/:id/slots', () =>
-    HttpResponse.json([{ time: '09:00', left: 3 }, { time: '09:30', left: 0 }])),
-  http.post('/api/appointments', async ({ request }) => {
-    const body = await request.json()
-    if (!body.time) return HttpResponse.json({ title: '缺少時段', status: 422 }, { status: 422 })
-    return HttpResponse.json({ id: 'A012', ...body }, { status: 201 })
-  }),
-]
-```
-
-```js
-// src/mocks/server.js：測試檔要用 server.use() 時從這裡 import
-import { setupServer } from 'msw/node'
-import { handlers } from './handlers.js'
-
-export const server = setupServer(...handlers)
-```
-
-```js
-// src/test-setup.js（vitest.config.js 的 setupFiles 指向這裡）
-import '@testing-library/jest-dom/vitest'          // toBeDisabled、toHaveTextContent、toHaveFocus…
-import { afterAll, afterEach, beforeAll } from 'vitest'
-import { cleanup } from '@testing-library/vue'
-import { server } from './mocks/server.js'
-
-beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))   // MSW 3：沒有 handler 的請求讓測試失敗
-afterEach(() => {
-  cleanup()                     // Vitest 預設 globals: false，Testing Library 不會自動清理
-  server.resetHandlers()        // 拿掉這個測試用 server.use() 加的 handler
-})
-afterAll(() => server.close())
-```
-
-handler 檢查 body 裡有沒有 `time`：前端把欄位打錯時，假後端回 422，畫面不會出現號碼，測試就會失敗。這正是開頭那組測試漏掉的。
-
-### 元件測試：Testing Library 加 user-event
+`/api/…` 的請求由 MSW 的預設 handler 回應（設定在選讀的「共用的 setup」）。
 
 ```js
 // src/components/__tests__/BookingForm.spec.js
@@ -273,9 +147,142 @@ describe('BookingForm', () => {
 })
 ```
 
+## 最常見的兩個錯誤
+
+- **`TestingLibraryElementError: Found multiple elements with the role "button" and name "送出掛號"`，而且只有第二個以後的測試失敗**：上一個測試掛的元件還在 DOM 裡。Vitest 預設 `globals: false`，Testing Library 不會自動清理。setup 檔寫 `afterEach(() => cleanup())`，或開 `globals: true`。
+- **`TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "送出"`**：名稱寫錯（實際是「送出掛號」），或元素沒有名稱。訊息底下的 `Here are the accessible roles:` 列出每個角色的 `Name`，照它改查詢；`Name ""` 代表元件少了 label。
+
+:::stop 讀到這裡可以先停：會用 `getByRole` 找元素、用 user-event 操作、用 `findBy` 等非同步的結果，寫出檢查畫面與 emit 的元件測試。後面的掛載選項、事件工具對照、MSW、Pinia 與 Router 的替身，在元件會呼叫 API 或依賴 store 時再回來讀。
+
+## 查詢的完整優先順序
+
+Testing Library 的文件「Which query should I use?」排出的順序：
+
+| 順序 | 查詢 | 用在哪裡 |
+|---|---|---|
+| 1 | `getByRole('button', { name: '送出掛號' })` | 幾乎所有互動元素：按鈕、連結、欄位、radio、tab、dialog |
+| 2 | `getByLabelText('手機')` | 有 `label` 的表單欄位 |
+| 3 | `getByPlaceholderText` | 沒有 label、只有 placeholder 的欄位（本身就是無障礙問題） |
+| 4 | `getByText('這天沒有預約')` | 非互動的文字 |
+| 5 | `getByDisplayValue` | 找目前值是某個字的欄位 |
+| 6 | `getByAltText`、`getByTitle` | 圖片、有 title 的元素 |
+| 7 | `getByTestId('slot-chart')` | 沒有任何可見文字或角色可以描述的元素 |
+
+每種查詢另有複數版本 `getAllBy`、`queryAllBy`、`findAllBy`，回傳陣列。
+
+## 掛載：`mount` 與 `render` 的選項
+
+Vue Test Utils（VTU）的 `mount(元件, 選項)` 建立一個 Vue app，把元件掛進 DOM，回傳一個 wrapper。常用的選項：
+
+| 選項 | 用途 |
+|---|---|
+| `props` | 傳給元件的 props |
+| `slots` | slot 的內容，字串或元件 |
+| `global.plugins` | 裝 Pinia、Vue Router、i18n 這類 plugin |
+| `global.stubs` | 把某些子元件換成替身，例如 `{ RouterLink: RouterLinkStub }` |
+| `global.provide` | 給 `inject` 用的值 |
+| `attachTo` | 掛到 `document.body` 底下的某個元素；預設掛在一個沒有接上文件的 `div` |
+
+`@testing-library/vue` 的 `render` 底層就是 VTU 的 `mount`（`@testing-library/vue` 8.1 依賴 `@vue/test-utils` ^2.4），選項相同。差別在回傳值與找元素的方式：Testing Library 不給 wrapper，改用 `screen.getByRole(...)` 這類查詢，從 `document.body` 找使用者看得到的東西。兩者可以混用，本課的主要寫法用 Testing Library，VTU 的寫法放在後面對照。
+
+## 操作：user-event、`fireEvent` 與 `trigger`
+
+使用者點一下按鈕，瀏覽器依序發出 `pointerdown`、`mousedown`、`focus`、`pointerup`、`mouseup`、`click`；打一個字會有 `keydown`、`keypress`、`input`、`keyup`。三種工具模擬的程度不同：
+
+| 工具 | 送出的事件 | 適合 |
+|---|---|---|
+| `@testing-library/user-event` 14：`await user.click(el)`、`user.type(el, '0912')`、`user.keyboard('{ArrowDown}')`、`user.tab()` | 照真實順序的一整串，會移動焦點、檢查元素是否停用 | 預設用這個 |
+| Testing Library 的 `fireEvent.click(el)` | 只有一個 `click` | user-event 模擬不了的特殊事件 |
+| VTU 的 `wrapper.trigger('click')`、`setValue('0912')` | 只有指定的事件（`setValue` 會設值並觸發 `input` 或 `change`） | VTU 風格的測試 |
+
+`user.click()` 點停用的按鈕不會觸發 `click`，和瀏覽器一樣；`trigger('click')` 遇到停用的元素同樣不觸發。
+
+## 一次點擊到畫面更新的時間線
+
+一次點擊到畫面更新，中間有好幾個非同步的步驟：
+
+```text
+await user.click(送出)
+  └─ click 事件 → submit() 執行，submitting.value = true
+       └─ Vue 把 DOM 更新排進下一個 microtask（nextTick）
+  fetch('/api/appointments') ── MSW 攔截 → handler 回 201 ── Promise resolve
+       └─ message.value = '已完成掛號，號碼 A012'
+            └─ 下一個 nextTick：<p role="status"> 的文字改變
+expect(await screen.findByRole('status')).toHaveTextContent(...)   ← 一直重試到文字出現
+```
+
+## mock API：MSW 在網路層攔截
+
+Mock Service Worker（MSW）在 Node 裡攔截 `fetch` 與 `XMLHttpRequest`，交給 handler 決定回應：
+
+```text
+BookingForm ──fetch('/api/sessions/s-1120-am/slots')──▶ MSW 攔截
+                                                           │ 依序比對 handler
+                                                           ▼
+                           http.get('/api/sessions/:id/slots', resolver) → HttpResponse.json([...])
+```
+
+元件的程式不用改，網址怎麼組、body 送什麼、回應怎麼解析都在測試範圍內。一個測試要換回應時用 `server.use(...)` 把新的 handler 加在最前面，`afterEach` 呼叫 `server.resetHandlers()` 回到預設。
+
+沒有對應 handler 的請求怎麼處理，是 MSW 3 改名的選項：
+
+| 版本 | 選項 | 預設 |
+|---|---|---|
+| MSW 2.x（2.15.0） | `server.listen({ onUnhandledRequest: 'error' })` | `'warn'` |
+| MSW 3.x（3.0.7） | `server.listen({ onUnhandledFrame: 'error' })` | `'warn'` |
+
+MSW 3 的套件裡已經沒有 `onUnhandledRequest`。照 2.x 的寫法傳進去，MSW 3 不會報錯，只是忽略它、維持預設的 `'warn'`：沒有 handler 的請求印一行警告，然後照常送到網路上。Vitest 的 jsdom 環境預設網址是 `http://localhost:3000`，`fetch('/api/doctors')` 會去連 `127.0.0.1:3000`。
+
+## plugin 與替身：Pinia、Router
+
+- **Pinia**：`@pinia/testing` 的 `createTestingPinia()` 建一個測試用的 Pinia，`initialState` 指定 store 的初始狀態，預設把所有 action 換成 spy（`stubActions: true`）。spy 函式要由 `createSpy` 提供；沒開 Vitest 的 `globals` 時，找不到全域的 `vi`，要明確傳 `createSpy: vi.fn`。
+- **Vue Router**：只需要 `<RouterLink>` 顯示出來時，用 VTU 的 `RouterLinkStub` 換掉，再用 `findComponent(RouterLinkStub).props('to')` 檢查連到哪裡；要測導航行為時，建一個用 `createMemoryHistory()` 的真 router 放進 `global.plugins`，`await router.isReady()` 之後再掛載。
+
+## 共用的 setup：MSW、jest-dom、清理
+
+```js
+// src/mocks/handlers.js：預設的回應，每個測試都從這裡開始
+import { http, HttpResponse } from 'msw'
+
+export const handlers = [
+  http.get('/api/sessions/:id/slots', () =>
+    HttpResponse.json([{ time: '09:00', left: 3 }, { time: '09:30', left: 0 }])),
+  http.post('/api/appointments', async ({ request }) => {
+    const body = await request.json()
+    if (!body.time) return HttpResponse.json({ title: '缺少時段', status: 422 }, { status: 422 })
+    return HttpResponse.json({ id: 'A012', ...body }, { status: 201 })
+  }),
+]
+```
+
+```js
+// src/mocks/server.js：測試檔要用 server.use() 時從這裡 import
+import { setupServer } from 'msw/node'
+import { handlers } from './handlers.js'
+
+export const server = setupServer(...handlers)
+```
+
+```js
+// src/test-setup.js（vitest.config.js 的 setupFiles 指向這裡）
+import '@testing-library/jest-dom/vitest'          // toBeDisabled、toHaveTextContent、toHaveFocus…
+import { afterAll, afterEach, beforeAll } from 'vitest'
+import { cleanup } from '@testing-library/vue'
+import { server } from './mocks/server.js'
+
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))   // MSW 3：沒有 handler 的請求讓測試失敗
+afterEach(() => {
+  cleanup()                     // Vitest 預設 globals: false，Testing Library 不會自動清理
+  server.resetHandlers()        // 拿掉這個測試用 server.use() 加的 handler
+})
+afterAll(() => server.close())
+```
+
+handler 檢查 body 裡有沒有 `time`：前端把欄位打錯時，假後端回 422，畫面不會出現號碼，測試就會失敗。這正是開頭那組測試漏掉的。
+
 這三個測試在 Vitest 5.1.1、`@testing-library/vue` 8.1.0、user-event 14.6.13、MSW 3.0.7、jsdom 31.0.1 上實測通過。改按鈕的 class、把 `<label>` 換成別的排版，測試都不受影響；把 `:disabled="s.left === 0"` 刪掉，第一個測試會紅。
 
-### 對照：同一個測試用 VTU 寫
+## 對照：同一個測試用 VTU 寫
 
 ```js
 import { mount, flushPromises } from '@vue/test-utils'
@@ -293,7 +300,7 @@ it('送出後 emit booked（VTU）', async () => {
 
 VTU 用 CSS 選擇器找元素，等待要自己 `flushPromises()`；適合需要 `findComponent`、檢查子元件 props 的情況。
 
-### 裝 Pinia 與替換 RouterLink
+## 裝 Pinia 與替換 RouterLink
 
 ```js
 import { mount, RouterLinkStub } from '@vue/test-utils'
@@ -313,14 +320,12 @@ it('顯示 store 裡的掛號數', () => {
 })
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤與錯誤訊息
 
 以下訊息都是在上面的版本組合上實際跑出來的：
 
 | 訊息 | 原因 | 修法 |
 |---|---|---|
-| `TestingLibraryElementError: Found multiple elements with the role "button" and name "送出掛號"`，而且只有第二個以後的測試失敗 | 上一個測試掛的元件還在 DOM 裡：Testing Library 只在全域有 `afterEach` 時自動清理，Vitest 預設 `globals: false` | setup 檔寫 `afterEach(() => cleanup())`，或在 Vitest 設定開 `globals: true` |
-| `TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "送出"`，底下是 `Here are the accessible roles:` 與每個角色的 `Name` | 名稱寫錯（實際是「送出掛號」），或元素沒有名稱 | 照清單裡的名稱改查詢；清單裡的 `Name ""` 代表元件少了 label |
 | `Unable to find an element with the text: 已完成掛號. This could be because the text is broken up by multiple elements.` | 預設是完整字串比對，畫面上是「已完成掛號，號碼 A012」；或文字根本還沒出現 | 用 `/已完成掛號/`；確認前面的操作有送出 |
 | `Error: Cannot call trigger on an empty DOMWrapper.` | VTU 的 `find()` 沒找到元素，回傳空的 wrapper | 改用 `get()`，找不到時直接報 `Unable to get [data-test="submit"] within: <form>…`，連同目前的 HTML |
 | `AssertionError: expected [] to have a length of 2 but got +0` | `onMounted` 的 `fetch` 還沒回來就斷言 | `await flushPromises()`，或改用 `findAllByRole` |

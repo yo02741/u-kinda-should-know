@@ -1,8 +1,8 @@
-## 從一個具體問題開始：報表 PDF 不見了，掛上 PVC 又有兩個 Pod 起不來
+## 報表 PDF 不見了，掛上 PVC 又有兩個 Pod 起不來
 
 門診的報表服務 `clinic-report` 每天凌晨產生前一天的門診統計 PDF，寫到容器裡的 `/srv/reports`，醫事室白天從網頁下載。上線第二週做了一次節點維護，之後醫事室回報：前幾天的報表全部下載不到。
 
-容器的檔案系統跟著容器走。節點維護時 Pod 被趕到別的節點重建，新的容器從映像重新開始，`/srv/reports` 是空的。滾動更新、容器被 OOMKilled 重啟，也都會讓這些檔案消失。
+容器的檔案系統跟著容器走。節點維護時 Pod 被趕到別的節點重建，新的容器從映像重新開始，`/srv/reports` 是空的。滾動更新、容器被 OOMKilled 重啟也一樣。
 
 團隊替它加了一個 PVC，副本數 1 時一切正常。月初報表量大，副本改成 3：
 
@@ -19,7 +19,7 @@ Events:
   Warning  FailedAttachVolume  6m  attachdetach-controller  Multi-Attach error for volume "pvc-3f1c9a7e-…" Volume is already used by pod(s) clinic-report-7d9f8c6b5-4xk2p
 ```
 
-PVC 的存取模式是 `ReadWriteOnce`，後端是區塊儲存：volume 同一時間只能 attach 到一個節點。三個 Pod 被排到三個節點，只有 node-1 上的那個拿得到。
+PVC 的存取模式是 `ReadWriteOnce`，後端是區塊儲存。三個 Pod 被排到三個節點，只有 node-1 上的那個拿得到 volume。
 
 ## volume 的種類：資料跟著誰走
 
@@ -33,11 +33,7 @@ Pod 的 `volumes` 宣告有哪些 volume，容器的 `volumeMounts` 決定掛到
 | `hostPath` | 節點上的某個目錄 | 不會自動清，但 Pod 換節點就讀不到 | 系統層的元件（log 收集、監控代理） |
 | `persistentVolumeClaim` | PV 背後的儲存：NAS、分散式儲存、本機磁碟 | 依 reclaimPolicy 決定，與 Pod 無關 | 要保留的資料 |
 
-`emptyDir` 用 `medium: Memory` 時，寫進去的量算在容器的記憶體用量裡；`sizeLimit` 限制大小，超過時 Pod 會被驅逐。
-
-`hostPath` 不適合一般服務：Pod 換節點就看到另一台機器的目錄；可以掛節點上的任何路徑（例如容器執行環境的 socket），等於拿到整個節點，Pod Security Standards 的 baseline 層級就禁止它（見 [Kubernetes 權限與多租戶](#/skill/k8s-rbac-tenancy)）；寫滿的是節點的磁碟，同節點的 Pod 一起受影響。
-
-報表服務的 Pod 裡三種 volume 各有用途：
+報表服務的 Pod 用了三種：
 
 ```yaml
     spec:
@@ -126,7 +122,38 @@ spec:
       storage: 20Gi
 ```
 
-### 綁定流程
+綁不到 PV 的 PVC 停在 `Pending`，原因寫在 `kubectl describe pvc` 的 Events，例如 class 名稱打錯：
+
+```text
+storageclass.storage.k8s.io "nfs" not found
+```
+
+## 存取模式：ReadWriteOnce 限制的是節點
+
+| 模式 | 縮寫 | 意思 | 常見後端 |
+|---|---|---|---|
+| ReadWriteOnce | RWO | 單一節點可讀寫；同一個節點上的多個 Pod 可以一起用 | 區塊儲存：Longhorn、Ceph RBD、SAN 的 LUN、local PV |
+| ReadOnlyMany | ROX | 多個節點唯讀 | NFS、CephFS；區塊儲存依 driver 而定 |
+| ReadWriteMany | RWX | 多個節點同時讀寫 | 檔案儲存：NFS、CephFS、NAS 廠商的 driver；Longhorn 透過內建的 NFS |
+| ReadWriteOncePod | RWOP | 整個叢集只有一個 Pod 能用 | 只支援 CSI volume |
+
+需要 attach 的區塊儲存，同一時間只 attach 到一個節點。排程器不會因為 PVC 是 RWO 就把 Pod 排在一起，其他節點上的 Pod 停在 `ContainerCreating`，Events 是開頭的 `Multi-Attach error`。多副本改用 RWX 的 PVC 或改存物件儲存；維持單副本時 Deployment 要改成 `strategy.type: Recreate`。
+
+:::stop 讀到這裡可以先停：會選 volume 的種類、寫出 PVC 並從 Events 判斷它為什麼 Pending，說得出 ReadWriteOnce 限制的是節點。後面的綁定流程、靜態佈建、volumeBindingMode、reclaimPolicy、擴充與兩段模擬，在 PVC 行為和預期不同或要刪 PVC 前回來讀；CSI 選型、StatefulSet、資料庫放不放進叢集與備份，在要跑有狀態服務或挑地端儲存時再讀。
+
+## 存取模式的其他行為：防寫、NFS 與 RWOP
+
+- 存取模式是 PVC 與 PV 的**配對條件**，掛載之後 Kubernetes 不負責防寫。ROX 的 volume 要唯讀，`volumeMounts` 要寫 `readOnly: true`。
+- 不需要 attach 的後端（NFS），RWO 的 PVC 被多個節點掛載時通常沒有東西擋。
+- 要保證只有一個 Pod 寫入就用 RWOP（1.22 alpha、1.27 beta、1.29 GA）：第二個 Pod 停在 `Pending`，由排程器擋下。
+
+## emptyDir 與 hostPath 的限制
+
+`emptyDir` 用 `medium: Memory` 時，寫進去的量算在容器的記憶體用量裡；`sizeLimit` 限制大小，超過時 Pod 會被驅逐。
+
+`hostPath` 不適合一般服務：Pod 換節點就看到另一台機器的目錄；可以掛節點上的任何路徑（例如容器執行環境的 socket），等於拿到整個節點，Pod Security Standards 的 baseline 層級就禁止它（見 [Kubernetes 權限與多租戶](#/skill/k8s-rbac-tenancy)）；寫滿的是節點的磁碟，同節點的 Pod 一起受影響。
+
+## PVC 的綁定流程
 
 1. PVC 建立。沒寫 `storageClassName` 時，API server 補上預設的 StorageClass。
 2. PV controller 找現有的 PV：class 相同、存取模式包含 PVC 要的每一種、容量不小於申請量；多個符合時挑最小的。PVC 拿到的是整個 PV，申請 100Gi 綁到 200Gi 的 PV，容量就顯示 200Gi。
@@ -136,7 +163,7 @@ spec:
 
 PVC 建立後，`storageClassName` 與存取模式都不能改，寫錯要刪掉重建。
 
-### 動態佈建與靜態佈建
+## 動態佈建與靜態佈建：接既有的資料
 
 動態佈建由 driver 依 StorageClass 建 PV，是一般的做法。靜態佈建由管理者手寫 PV，用在接既有的資料、local PV、沒有 provisioner 的儲存。例如把 NAS 上歷年的舊報表唯讀掛給新服務：
 
@@ -172,7 +199,7 @@ spec:
       storage: 200Gi
 ```
 
-### volumeBindingMode：什麼時候建立 PV
+## volumeBindingMode：什麼時候建立 PV
 
 `Immediate` 在 PVC 建立時就綁定或建立 PV，這時還不知道 Pod 會被排到哪裡。`WaitForFirstConsumer` 等第一個用它的 Pod 被排程：排程器把 Pod 的 requests、nodeSelector、affinity 與儲存的位置限制一起考慮，選好節點後才建立 PV。
 
@@ -180,7 +207,7 @@ spec:
 
 等待期間 PVC 是 `Pending`，Events 是 `waiting for first consumer to be created before binding`，屬於正常狀態。
 
-### reclaimPolicy：刪 PVC 會不會連資料一起刪
+## reclaimPolicy：刪 PVC 會不會連資料一起刪
 
 | | Delete | Retain |
 |---|---|---|
@@ -196,7 +223,7 @@ kubectl patch pv <PV 名稱> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retai
 
 還有 Pod 在用的 PVC 被刪除時，會停在 `Terminating`，等 Pod 都結束才刪除（`kubernetes.io/pvc-protection` 這個 finalizer 的作用）。
 
-### 擴充容量
+## 擴充 PVC 的容量
 
 StorageClass 有 `allowVolumeExpansion: true`、driver 也支援時，把 PVC 的 `spec.resources.requests.storage` 改大就會擴充（Kubernetes 1.24 起 GA）：
 
@@ -207,7 +234,7 @@ kubectl get pvc data-clinic-queue-0 -n clinic -w      # CAPACITY 變成 20Gi 才
 
 多數 CSI driver 可以在 Pod 執行中擴充，少數要重啟 Pod，以 driver 的文件為準。容量只能加、不能減；擴充失敗後改回較小值的做法，1.34 起 GA，更早的版本要管理者手動處理。
 
-### 模擬：PVC 綁到哪裡
+## 模擬：PVC 綁到哪裡
 
 ```python run
 # 模擬 PV controller 的配對：class、存取模式、容量；找不到再看能不能動態建立
@@ -287,21 +314,7 @@ for pvc in waiting:
 
 `report-archive` 申請 100Gi，拿到整個 200Gi 的 PV。`huge-archive` 沒有夠大的 PV，class 又是 `""`，沒有人會替它建立。`report-pdfs` 與 `pg-data` 等到 Pod 排好節點才綁定；如果 Pod 被排到 node-1，`pg-data` 會繼續等，因為 node-1 沒有 local PV。
 
-## 存取模式：ReadWriteOnce 限制的是節點
-
-| 模式 | 縮寫 | 意思 | 常見後端 |
-|---|---|---|---|
-| ReadWriteOnce | RWO | 單一節點可讀寫；同一個節點上的多個 Pod 可以一起用 | 區塊儲存：Longhorn、Ceph RBD、SAN 的 LUN、local PV |
-| ReadOnlyMany | ROX | 多個節點唯讀 | NFS、CephFS；區塊儲存依 driver 而定 |
-| ReadWriteMany | RWX | 多個節點同時讀寫 | 檔案儲存：NFS、CephFS、NAS 廠商的 driver；Longhorn 透過內建的 NFS |
-| ReadWriteOncePod | RWOP | 整個叢集只有一個 Pod 能用 | 只支援 CSI volume；1.22 alpha、1.27 beta、1.29 GA |
-
-實際的行為：
-
-- 存取模式是 PVC 與 PV 的**配對條件**，掛載之後 Kubernetes 不負責防寫。ROX 的 volume 要唯讀，`volumeMounts` 要寫 `readOnly: true`。
-- 需要 attach 的區塊儲存，同一時間只 attach 到一個節點。排程器不會因為 PVC 是 RWO 就把 Pod 排在一起，其他節點上的 Pod 停在 `ContainerCreating`。
-- 不需要 attach 的後端（NFS），RWO 的 PVC 被多個節點掛載時通常沒有東西擋。
-- 要保證只有一個 Pod 寫入就用 RWOP：第二個 Pod 停在 `Pending`，由排程器擋下。
+## RWO 的 Deployment 怎麼更新、多副本的三種改法
 
 Deployment 掛 RWO 的 PVC 時，`replicas` 只能是 1，而且要改成 `strategy.type: Recreate`。預設的 RollingUpdate 先開新 Pod 再關舊的；新 Pod 被排到別的節點就卡在 Multi-Attach，`maxUnavailable` 是 0 時舊的也不會先關，更新停住。Recreate 先刪舊 Pod 再建新的，更新期間有一段時間沒有服務。
 
@@ -313,7 +326,7 @@ Deployment 掛 RWO 的 PVC 時，`replicas` 只能是 1，而且要改成 `strat
 | 改存物件儲存（S3 相容的服務，例如 Ceph 的 RGW 或儲存設備內建的 S3 介面） | 程式改成上傳物件，下載時給有效期限的網址 | Pod 完全無狀態，擴展最簡單；要多維運一套物件儲存 |
 | 維持 1 個副本、RWO、Recreate | Deployment 的 strategy | 不用改程式；不能擴展，更新與節點故障時中斷 |
 
-### 模擬：幾個 Pod 掛同一個 PVC
+## 模擬：幾個 Pod 掛同一個 PVC
 
 ```python run
 # 多個 Pod 掛同一個 PVC，依建立順序決定誰起得來
@@ -355,8 +368,6 @@ start("F. RWO，但後端是 NFS", spread, "RWO", attach_required=False)
 ```
 
 A 是開頭的狀況。B 看起來正常，只是三個 Pod 剛好在同一個節點，哪天其中一個被排到別處就會壞；單節點的測試叢集永遠重現不了 A。F 能跑，但三個節點同時寫同一份資料，衝突要程式自己處理。
-
-:::stop 讀到這裡可以先停：會選 volume 的種類、從 Events 判斷 PVC 為什麼 Pending，說得出 reclaimPolicy 與 ReadWriteOnce 的限制。後面的 CSI 選型、StatefulSet、資料庫放不放進叢集與備份，在要跑有狀態服務或挑地端儲存時再回來讀。
 
 ## CSI 與地端的儲存選項
 
