@@ -1,4 +1,4 @@
-## 從一個具體問題開始：伺服器回 422，畫面說「掛號成功」
+## 伺服器回 422，畫面說「掛號成功」
 
 掛號按鈕的程式是這樣寫的：
 
@@ -18,9 +18,7 @@ async function book(sessionId) {
 1. `body` 直接放了物件。fetch 把它轉成字串 `[object Object]`，`Content-Type` 是 `text/plain;charset=UTF-8`，後端解析不出 `sessionId`，回 422。
 2. fetch 收到 422 不會 reject。`await` 拿到一個 `Response`，程式繼續往下跑到「掛號成功」；`catch` 只會在網路層失敗時執行。
 
-## 運作原理
-
-### fetch 在哪裡 reject、在哪裡 resolve
+## 運作原理：fetch 在哪裡 reject、在哪裡 resolve
 
 ```
 fetch(url, options)
@@ -45,75 +43,30 @@ fetch(url, options)
 
 `res.ok` 在狀態碼 200–299 時為 `true`。狀態碼的意思與每個類別該怎麼反應，見 [一個 HTTP 請求的一生](#/skill/http-basics)。
 
-### 請求：方法、標頭、body
+## 改好的掛號請求：送 JSON、檢查 res.ok、設逾時
 
 ```js
-fetch('/api/appointments', {
-  method: 'POST',                                   // 預設 GET
-  headers: { 'Content-Type': 'application/json' },  // body 是 JSON 時要自己設
-  body: JSON.stringify({ sessionId: 42 }),          // 物件要先轉成字串
-  credentials: 'same-origin',                       // 預設值：只有同源請求帶 cookie
-  signal: AbortSignal.timeout(8000),                // 8 秒逾時
-})
-```
-
-`body` 的型別決定瀏覽器自動帶的 `Content-Type`：
-
-| `body` 的值 | 自動帶的 `Content-Type` | 備註 |
-|---|---|---|
-| 字串（包含 `JSON.stringify` 的結果） | `text/plain;charset=UTF-8` | 送 JSON 要自己改成 `application/json` |
-| `URLSearchParams` | `application/x-www-form-urlencoded;charset=UTF-8` | 傳統表單格式 |
-| `FormData` | `multipart/form-data; boundary=…` | 上傳檔案；不要自己設 `Content-Type`，會少了 boundary |
-| 一般物件 | `text/plain;charset=UTF-8`，內容是 `[object Object]` | 開頭那個錯 |
-
-`GET` 與 `HEAD` 不能帶 body。跨網域請求帶了 `Content-Type: application/json`，瀏覽器會先送一個 `OPTIONS` preflight，伺服器要回應對的 CORS 標頭，正式請求才會送出；伺服器那一側怎麼設定見 [CORS、Cookie 與同源](#/skill/cors-cookies)。
-
-### query string 要編碼
-
-網址裡的中文會被自動轉成 `%E7%8E%8B…`，但 `&`、`#`、`+` 這類有特殊意義的字元不會被當成值的一部分。搜尋字串是 `2#診間` 時，`/api/appointments?q=${q}` 送出去的 `q` 只剩 `2`，`#` 之後被當成網址的 fragment。用 `URLSearchParams` 組 query string：
-
-```js
-const params = new URLSearchParams({ date: '2026-11-20', q: '2#診間' })
-fetch(`/api/appointments?${params}`)   // q=2%23%E8%A8%BA%E9%96%93
-```
-
-### 回應：狀態、標頭、body
-
-- `res.status`：數字狀態碼。`res.statusText` 在 HTTP/2 與 HTTP/3 是空字串，不要拿來判斷。
-- `res.headers.get('Content-Type')`：決定怎麼讀 body。錯誤回應用 Problem Details 時是 `application/problem+json`。
-- `res.json()`、`res.text()`、`res.blob()`：讀 body，回傳 Promise。body 是一個串流，只能讀一次；要讀兩次先 `res.clone()`。
-- 204 No Content 沒有 body，呼叫 `res.json()` 會丟 `SyntaxError`。
-
-### Problem Details
-
-RFC 9457 定義的錯誤格式，`Content-Type` 是 `application/problem+json`：
-
-```json
-{
-  "type": "https://clinic.example/problems/session-full",
-  "title": "這個診次已額滿",
-  "status": 409,
-  "detail": "11/20 上午 陳醫師的門診已額滿，可以改掛其他時段。"
+async function book(sessionId) {
+  try {
+    const res = await fetch('/api/appointments', {
+      method: 'POST',                                   // 預設 GET
+      headers: { 'Content-Type': 'application/json' },  // body 是 JSON 時要自己設
+      body: JSON.stringify({ sessionId }),              // 物件要先轉成字串
+      signal: AbortSignal.timeout(8000),                // 8 秒逾時；fetch 沒有 timeout 選項
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)  // 4xx、5xx 自己丟
+    toast('掛號成功')
+  } catch {
+    toast('掛號沒有送出，請再試一次')
+  }
 }
 ```
 
-`title` 是這類錯誤的簡短說明，`detail` 是這一次的具體說明。規格允許加擴充欄位，例如欄位驗證錯誤放 `errors: { phone: ['請輸入 10 碼手機號碼'] }`；這個欄位名不是標準的一部分，要和後端約定。後端怎麼設計錯誤格式見 [錯誤設計](#/skill/error-design)。
+讀回應時要記得三件事，下面這段不需要連網，可以直接看到結果：
 
-### 逾時與取消
-
-fetch 沒有 `timeout` 選項。請求卡住時，瀏覽器的等待時間依瀏覽器與網路狀況而定，使用者只看到一直在轉。逾時與取消都靠 `signal`：
-
-- `AbortSignal.timeout(8000)`：8 秒後自動取消，錯誤的 `name` 是 `TimeoutError`。2024 年 4 月進入 Baseline。
-- `new AbortController()`：自己呼叫 `controller.abort()` 取消，錯誤的 `name` 是 `AbortError`。用在使用者離開頁面、換了搜尋條件時。
-- `AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])`：任一個觸發就取消，錯誤的 `name` 跟著觸發的那一個。2024 年 3 月進入 Baseline。
-
-被取消的請求在 Network 分頁顯示 `(canceled)`。
-
-## 實際程式
-
-### 先看 Response 的行為
-
-下面這段在 Worker 裡建立 `Response` 與 `Request` 物件，不需要連網，可以直接看到 `res.ok`、204、HTML 錯誤頁、重複讀 body、物件當 body 各自的結果：
+- 204 No Content 沒有 body，呼叫 `res.json()` 會丟 `SyntaxError`。
+- body 是一個串流，只能讀一次；要讀兩次先 `res.clone()`。
+- 錯誤回應可能是 HTML（反向代理的錯誤頁），先看 `Content-Type` 再解析。
 
 ```js run
 // fetch 對 4xx、5xx 不會 reject：Response 照樣回來，要看 res.ok
@@ -136,9 +89,77 @@ const req = new Request('https://api.example.com/appointments', { method: 'POST'
 console.log('物件當 body →', req.headers.get('Content-Type'), await req.text())
 ```
 
-:::stop 讀到這裡可以先停：會判斷 fetch 什麼時候 reject、送 JSON 要設什麼、怎麼讀回應與設逾時。後面的 apiFetch 把錯誤分成三類，在專案要統一處理所有請求時再回來讀。
+| Console 的訊息（Chrome） | 原因 | 修法 |
+|---|---|---|
+| `TypeError: Failed to fetch` | 離線、DNS 失敗、連線被拒，或被 CORS 擋下 | 看 Console 有沒有 CORS 訊息、Network 分頁的狀態是不是 `(failed)` |
+| `SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON` | 回應是 HTML：反向代理的錯誤頁、SPA fallback 回了 `index.html`、路徑打錯 | Network 的 Response 分頁看實際內容；先檢查 `Content-Type` 再解析 |
 
-### 一個分類清楚的 apiFetch
+:::stop 讀到這裡可以先停：會判斷 fetch 什麼時候 reject，送 JSON、檢查 `res.ok`、讀回應與設逾時。後面是 body 與 `Content-Type` 的對照、query string 編碼、Problem Details、取消的三種寫法、把錯誤分成三類的 `apiFetch` 與其餘錯誤訊息，專案要統一處理所有請求或 Console 出現 fetch 的錯誤時再回來讀。
+
+## 請求的選項，與 body 決定的 Content-Type
+
+```js
+fetch('/api/appointments', {
+  method: 'POST',                                   // 預設 GET
+  headers: { 'Content-Type': 'application/json' },  // body 是 JSON 時要自己設
+  body: JSON.stringify({ sessionId: 42 }),          // 物件要先轉成字串
+  credentials: 'same-origin',                       // 預設值：只有同源請求帶 cookie
+  signal: AbortSignal.timeout(8000),                // 8 秒逾時
+})
+```
+
+`body` 的型別決定瀏覽器自動帶的 `Content-Type`：
+
+| `body` 的值 | 自動帶的 `Content-Type` | 備註 |
+|---|---|---|
+| 字串（包含 `JSON.stringify` 的結果） | `text/plain;charset=UTF-8` | 送 JSON 要自己改成 `application/json` |
+| `URLSearchParams` | `application/x-www-form-urlencoded;charset=UTF-8` | 傳統表單格式 |
+| `FormData` | `multipart/form-data; boundary=…` | 上傳檔案；不要自己設 `Content-Type`，會少了 boundary |
+| 一般物件 | `text/plain;charset=UTF-8`，內容是 `[object Object]` | 開頭那個錯 |
+
+`GET` 與 `HEAD` 不能帶 body。跨網域請求帶了 `Content-Type: application/json`，瀏覽器會先送一個 `OPTIONS` preflight，伺服器要回應對的 CORS 標頭，正式請求才會送出；伺服器那一側怎麼設定見 [CORS、Cookie 與同源](#/skill/cors-cookies)。
+
+## query string 要編碼
+
+網址裡的中文會被自動轉成 `%E7%8E%8B…`，但 `&`、`#`、`+` 這類有特殊意義的字元不會被當成值的一部分。搜尋字串是 `2#診間` 時，`/api/appointments?q=${q}` 送出去的 `q` 只剩 `2`，`#` 之後被當成網址的 fragment。用 `URLSearchParams` 組 query string：
+
+```js
+const params = new URLSearchParams({ date: '2026-11-20', q: '2#診間' })
+fetch(`/api/appointments?${params}`)   // q=2%23%E8%A8%BA%E9%96%93
+```
+
+## 回應：狀態、標頭、body
+
+- `res.status`：數字狀態碼。`res.statusText` 在 HTTP/2 與 HTTP/3 是空字串，不要拿來判斷。
+- `res.headers.get('Content-Type')`：決定怎麼讀 body。錯誤回應用 Problem Details 時是 `application/problem+json`。
+- `res.json()`、`res.text()`、`res.blob()`：讀 body，回傳 Promise。body 是一個串流，只能讀一次；要讀兩次先 `res.clone()`。
+
+## Problem Details：RFC 9457 的錯誤格式
+
+`Content-Type` 是 `application/problem+json`：
+
+```json
+{
+  "type": "https://clinic.example/problems/session-full",
+  "title": "這個診次已額滿",
+  "status": 409,
+  "detail": "11/20 上午 陳醫師的門診已額滿，可以改掛其他時段。"
+}
+```
+
+`title` 是這類錯誤的簡短說明，`detail` 是這一次的具體說明。規格允許加擴充欄位，例如欄位驗證錯誤放 `errors: { phone: ['請輸入 10 碼手機號碼'] }`；這個欄位名不是標準的一部分，要和後端約定。後端怎麼設計錯誤格式見 [錯誤設計](#/skill/error-design)。
+
+## 逾時與取消的三種 signal
+
+請求卡住時，瀏覽器的等待時間依瀏覽器與網路狀況而定，使用者只看到一直在轉。逾時與取消都靠 `signal`：
+
+- `AbortSignal.timeout(8000)`：8 秒後自動取消，錯誤的 `name` 是 `TimeoutError`。2024 年 4 月進入 Baseline。
+- `new AbortController()`：自己呼叫 `controller.abort()` 取消，錯誤的 `name` 是 `AbortError`。用在使用者離開頁面、換了搜尋條件時。
+- `AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])`：任一個觸發就取消，錯誤的 `name` 跟著觸發的那一個。2024 年 3 月進入 Baseline。
+
+被取消的請求在 Network 分頁顯示 `(canceled)`。
+
+## 一個分類清楚的 apiFetch
 
 專案裡所有請求都經過同一個函式，畫面只需要處理三類錯誤：回應不是 2xx（`ApiError`，帶狀態碼與 Problem Details）、逾時、網路錯誤。下面用假的 fetch 模擬六種回應，`apiFetch` 本身的寫法和真的專案相同（把 `fakeFetch` 換成 `fetch`）：
 
@@ -210,13 +231,11 @@ async function book(sessionId) {
 }
 ```
 
-## 常見錯誤與錯誤訊息
+## 其餘錯誤訊息
 
 | Console 的訊息（Chrome） | 原因 | 修法 |
 |---|---|---|
-| `TypeError: Failed to fetch` | 離線、DNS 失敗、連線被拒，或被 CORS 擋下 | 看 Console 有沒有 CORS 訊息、Network 分頁的狀態是不是 `(failed)` |
 | `Access to fetch at '…' from origin '…' has been blocked by CORS policy: …` | 跨網域請求，伺服器沒回對的 CORS 標頭 | 伺服器設定，或開發時用同網域的 `/api` 代理 |
-| `SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON` | 回應是 HTML：反向代理的錯誤頁、SPA fallback 回了 `index.html`、路徑打錯 | Network 的 Response 分頁看實際內容；先檢查 `Content-Type` 再解析 |
 | `SyntaxError: Unexpected end of JSON input` | body 是空的（204，或後端沒寫 body） | 204 不呼叫 `res.json()` |
 | `TypeError: Failed to execute 'json' on 'Response': body stream already read` | 同一個 Response 讀了兩次 body | 讀一次存起來，或先 `res.clone()` |
 | `TypeError: Failed to execute 'fetch' on 'Window': Request with GET/HEAD method cannot have body.` | GET 帶了 body | 條件放 query string |

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：600 行的 App.vue
+## 具體問題：600 行的 App.vue
 
 門診預約頁一開始只有一個 `App.vue`：抓今天的預約、日期篩選、表格、每列的「取消」按鈕、確認對話框、成功後的 Toast，全部寫在同一個檔裡。三個月後這個檔有 600 行，出現了幾個狀況：
 
@@ -6,11 +6,7 @@
 - 抓預約的 `fetch` 被複製到三個地方（初次載入、改日期、取消後重新整理），其中一處少了錯誤處理。
 - 請 AI 修「取消後清單沒更新」，它改了其中一處的 `fetch`，另外兩處照舊。
 
-把畫面拆成元件之後，每個檔只管一件事：一個元件抓資料並持有清單，一個元件排版，一個元件顯示一筆並在按下按鈕時通知上層。描述需求、讀產出、找 bug 時都能指著某個檔說「問題在這裡」。
-
-## 運作原理：元件樹、props 與事件
-
-### 元件樹
+## 元件樹：props 往下傳，事件往上送
 
 ```
 AppointmentPage            持有 appointments、date；呼叫 API
@@ -28,9 +24,7 @@ AppointmentPage            持有 appointments、date；呼叫 API
 | 清單元件（`AppointmentList`） | 排版、空狀態、把事件往上傳 | 呼叫 API |
 | 列元件（`AppointmentRow`） | 顯示一筆、按鈕的狀態、發出事件 | 呼叫 API、改 props |
 
-這是常見的分法，不是規定。判斷的方式：同一份資料只在一個地方被抓、被改。
-
-### 一個 .vue 檔的三段
+## 一個 .vue 檔的三段：template、script setup、style scoped
 
 單檔元件（Single-File Component，SFC）把一個元件的模板、邏輯、樣式放在同一個 `.vue` 檔：
 
@@ -38,29 +32,9 @@ AppointmentPage            持有 appointments、date；呼叫 API
 - `<script setup>`：Composition API 的簡寫。頂層宣告的變數、函式、import 進來的元件，模板裡直接能用，不必 `return`，也不必在 `components` 裡註冊。
 - `<style scoped>`：只套到這個元件的樣式。
 
-一個 `.vue` 檔最多一個 `<template>`、一個 `<script setup>`（可以再加一個普通的 `<script>`），`<style>` 可以有好幾個。瀏覽器看不懂 `.vue`，由 Vite 的 `@vitejs/plugin-vue` 在開發與建置時呼叫 `@vue/compiler-sfc` 編譯：模板變成 render 函式，`<script setup>` 變成元件的 `setup()`，樣式抽出成 CSS。
+scoped 的做法：編譯器替這個元件產生一個 id（例如 `7ba5bd90`），模板裡每個元素加上屬性 `data-v-7ba5bd90`，樣式的選擇器也加上它，`.row { … }` 變成 `.row[data-v-7ba5bd90] { … }`。別的元件的 `.row` 沒有這個屬性，選不到。
 
-`defineProps`、`defineEmits`、`defineModel` 是編譯器巨集：只在 `<script setup>` 的頂層有意義，編譯時被換成元件選項，不用 import。寫了 `import { defineProps } from 'vue'`，編譯器會提示「defineProps is a compiler macro and no longer needs to be imported.」（訊息裡的 defineProps 前後有反引號）。
-
-### scoped 樣式怎麼做到「只套到自己」
-
-編譯器替這個元件產生一個 id（例如 `7ba5bd90`），做兩件事：
-
-1. 模板裡每個元素加上屬性 `data-v-7ba5bd90`。
-2. 樣式的選擇器加上同一個屬性：`.row { … }` 變成 `.row[data-v-7ba5bd90] { … }`。
-
-別的元件的 `.row` 沒有這個屬性，選不到。有兩個邊界要知道：
-
-- 子元件的根元素同時帶父元件與子元件的 id，所以父元件的 scoped 樣式選得到子元件的根元素，選不到子元件內部。
-- 要改子元件內部（例如元件庫的某個元素），用 `:deep(.badge)`，編譯成 `[data-v-7ba5bd90] .badge`。舊的 `>>>`、`/deep/`、`::v-deep` 寫法在 Vue 3 已棄用，編譯器會警告。
-
-scoped 管的是「這段 CSS 選得到誰」，CSS 的權重與繼承規則照舊：字型、顏色這類會繼承的屬性，照樣從父元素傳到子元件裡。
-
-### 屬性透傳
-
-父元件寫 `<AppointmentRow class="highlight" :item="a" />`，`item` 是宣告過的 prop，`class` 不是。沒宣告的屬性（`class`、`style`、`id`、沒宣告的事件監聽）會自動加到子元件的根元素上。子元件的模板有好幾個根元素時，Vue 不知道要加在哪個上面，會發出警告，這時要自己在某個元素上寫 `v-bind="$attrs"`。
-
-## 實際程式：拆成三個元件
+## 最小範例與常見錯誤：拆成三個元件
 
 型別定義放在一處，三個元件共用：
 
@@ -171,9 +145,37 @@ onMounted(load)
 </template>
 ```
 
-`AppointmentList` 的根層是 `v-if`／`v-else`，一次只渲染其中一個元素，算單一根元素，父元件傳的 `class` 會套到出現的那個元素上；如果在 `<ul>` 前面再加一個 `<h2>`，就變成兩個根元素，要自己寫 `v-bind="$attrs"`。prop 在 script 裡叫 `busyId`，在模板屬性裡寫 `busy-id` 或 `busyId` 都可以。錯誤與載入中的畫面在 [API 的四種狀態](#/skill/api-states) 補上。
+prop 在 script 裡叫 `busyId`，在模板屬性裡寫 `busy-id` 或 `busyId` 都可以。錯誤與載入中的畫面在 [API 的四種狀態](#/skill/api-states) 補上。
 
-:::stop 讀到這裡可以先停：會把一個畫面拆成父子元件，用 props 往下傳、事件往上送，知道 scoped 樣式管到哪裡。後面的 React 對照與錯誤訊息表，在讀 React 程式或 Console 出現 props 警告時再回來讀。
+### 最常見的兩個錯誤
+
+| Console 的訊息 | 原因 | 修法 |
+|---|---|---|
+| `[Vue warn]: Failed to resolve component: AppointmentRow` | 模板用了元件，但 `<script setup>` 沒有 import（或拼錯） | 補 `import AppointmentRow from './AppointmentRow.vue'` |
+| `[Vue warn]: Invalid prop: type check failed for prop "item". Expected Object, got String with value "a".` | 寫成 `item="a"`，少了冒號，傳進去的是字串 `"a"` | 改成 `:item="a"` |
+
+:::stop 讀到這裡可以先停：會把一個畫面拆成父子元件，用 props 往下傳、事件往上送，知道 scoped 樣式管到哪裡。後面是 SFC 的編譯與巨集、scoped 的邊界、屬性透傳、React 對照與錯誤訊息表，在讀 React 程式或 Console 出現 props 警告時再回來讀。
+
+## SFC 怎麼編譯，以及編譯器巨集
+
+必讀的三層是常見的分法，不是規定。判斷的方式：同一份資料只在一個地方被抓、被改。
+
+一個 `.vue` 檔最多一個 `<template>`、一個 `<script setup>`（可以再加一個普通的 `<script>`），`<style>` 可以有好幾個。瀏覽器看不懂 `.vue`，由 Vite 的 `@vitejs/plugin-vue` 在開發與建置時呼叫 `@vue/compiler-sfc` 編譯：模板變成 render 函式，`<script setup>` 變成元件的 `setup()`，樣式抽出成 CSS。
+
+`defineProps`、`defineEmits`、`defineModel` 是編譯器巨集：只在 `<script setup>` 的頂層有意義，編譯時被換成元件選項，不用 import。寫了 `import { defineProps } from 'vue'`，編譯器會提示「defineProps is a compiler macro and no longer needs to be imported.」（訊息裡的 defineProps 前後有反引號）。
+
+## scoped 樣式的邊界
+
+- 子元件的根元素同時帶父元件與子元件的 id，所以父元件的 scoped 樣式選得到子元件的根元素，選不到子元件內部。
+- 要改子元件內部（例如元件庫的某個元素），用 `:deep(.badge)`，編譯成 `[data-v-7ba5bd90] .badge`。舊的 `>>>`、`/deep/`、`::v-deep` 寫法在 Vue 3 已棄用，編譯器會警告。
+
+scoped 管的是「這段 CSS 選得到誰」，CSS 的權重與繼承規則照舊：字型、顏色這類會繼承的屬性，照樣從父元素傳到子元件裡。
+
+## 屬性透傳：沒宣告的屬性加到根元素
+
+父元件寫 `<AppointmentRow class="highlight" :item="a" />`，`item` 是宣告過的 prop，`class` 不是。沒宣告的屬性（`class`、`style`、`id`、沒宣告的事件監聽）會自動加到子元件的根元素上。子元件的模板有好幾個根元素時，Vue 不知道要加在哪個上面，會發出警告，這時要自己在某個元素上寫 `v-bind="$attrs"`。
+
+`AppointmentList` 的根層是 `v-if`／`v-else`，一次只渲染其中一個元素，算單一根元素，父元件傳的 `class` 會套到出現的那個元素上。在 `<ul>` 前面再加一個 `<h2>`，就變成兩個根元素，要自己寫 `v-bind="$attrs"`。
 
 ## React 對照
 
@@ -208,13 +210,11 @@ export function AppointmentRow({ item, busy, onCancel }) {
 
 React 的事件是 props 裡的函式；Vue 的事件是另一個管道，要用 `defineEmits` 宣告，父元件用 `@cancel` 監聽。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | Console 或終端機的訊息 | 原因 | 修法 |
 |---|---|---|
-| `[Vue warn]: Failed to resolve component: AppointmentRow` | 模板用了元件，但 `<script setup>` 沒有 import（或拼錯） | 補 `import AppointmentRow from './AppointmentRow.vue'` |
 | `[Vue warn]: Missing required prop: "item"` | 必填的 prop 沒傳 | 檢查父元件的屬性名稱與大小寫 |
-| `[Vue warn]: Invalid prop: type check failed for prop "item". Expected Object, got String with value "a".` | 寫成 `item="a"`，少了冒號，傳進去的是字串 `"a"` | 改成 `:item="a"` |
 | `[Vue warn]: Extraneous non-props attributes (class) were passed to component but could not be automatically inherited because component renders fragment or text or teleport root nodes.` | 子元件有多個根元素 | 在要接收的元素上寫 `v-bind="$attrs"` |
 | `[Vue warn]: Component emitted event "cancel" but it is neither declared in the emits option nor as an "onCancel" prop.` | 發出事件但沒有宣告 | 補 `defineEmits` |
 | 編譯器提示「defineProps is a compiler macro and no longer needs to be imported.」 | import 了編譯器巨集 | 刪掉 import |

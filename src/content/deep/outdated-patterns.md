@@ -1,6 +1,6 @@
-## 從一個具體問題開始：能動的確認視窗，鍵盤一按就漏
+## 問題：能動的確認視窗，鍵盤一按就漏
 
-門診系統要在「我的掛號」加一個「看診須知」視窗。請 AI 產生之後，畫面看起來沒問題，點按鈕會跳出視窗，按「我知道了」會關掉。程式碼長這樣：
+門診系統要在「我的掛號」加一個「看診須知」視窗。AI 產生的程式點按鈕會跳出視窗，按「我知道了」會關掉：
 
 ```html
 <button id="open">看診須知</button>
@@ -38,7 +38,7 @@
 </script>
 ```
 
-測試也寫了，「點按鈕出現視窗、點關閉視窗消失」兩條都通過。換成只用鍵盤與螢幕閱讀器操作，問題一個一個出來：
+「點按鈕出現視窗、點關閉視窗消失」兩條測試都通過。換成只用鍵盤與螢幕閱讀器操作：
 
 1. 關掉視窗後焦點留在已經隱藏的按鈕上，下一次按 Tab 從頁首重新開始。
 2. 視窗裡之後加了第二顆按鈕，focus trap 只認得「我知道了」，Tab 永遠停在同一顆。
@@ -46,15 +46,9 @@
 4. `overflow: hidden` 讓捲軸消失，整頁往右跳了 15px；手機 Safari 上背景照樣捲得動。
 5. 另一個頁面也開了同樣的視窗，兩份 `keydown` 監聽互相搶 Esc。
 
-這段程式每一行都能跑，問題在它重做了一個瀏覽器早就內建的元件。原生的 `<dialog>` 用 `showModal()` 開啟時，背景自動 inert（點不到、Tab 不到、輔助科技也讀不到）、Esc 關閉、關閉後焦點回到開啟前的元素。`<dialog>` 在 2022 年 3 月就已經是主要瀏覽器都支援的功能，到 2024 年 9 月變成 Baseline Widely available。
+這段程式重做了一個瀏覽器內建的元件。原生的 `<dialog>` 用 `showModal()` 開啟時，背景自動 inert（點不到、Tab 不到、輔助科技也讀不到）、Esc 關閉、關閉後焦點回到開啟前的元素。
 
-AI 給這種寫法的原因很單純：模型從大量既有程式學習，網路上的 modal 教學與元件庫原始碼，多數寫在 `<dialog>` 普及之前。Modern Web Guidance 的 README 也直接寫明這一點：訓練資料裡舊寫法的量遠多於新寫法，模型就算知道某個 API 存在，也常常用錯或不用。
-
-## 運作原理
-
-### 過時寫法的三種樣子
-
-審 AI 產出時，過時寫法大致分成三類，處理方式不同：
+## 過時寫法的三類，用 Baseline 判斷能不能直接用
 
 | 類型 | 例子 | 怎麼處理 |
 |---|---|---|
@@ -62,11 +56,7 @@ AI 給這種寫法的原因很單純：模型從大量既有程式學習，網�
 | 有原生替代，但還是 Newly available | `popover`、`light-dark()`、`fetchpriority`、`content-visibility` | 對照專案的瀏覽器目標；在目標內就用，不在就功能偵測加退路 |
 | 「新寫法」仍是 Limited availability | `scheduler.yield()`、`fetchLater()`、`focusgroup`、`<dialog closedby>`、`Temporal` | 只能當加分寫法，舊寫法要留著當退路 |
 
-第三類要特別小心。AI 被要求「用新的寫法」時，可能把只有 Chrome 支援的 API 當成唯一的寫法，結果在 Safari 上直接 `TypeError`。過時與太新是同一個問題的兩面：程式沒有對照專案實際要支援的瀏覽器。
-
-### Baseline：判斷能不能直接用
-
-Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，MDN 每個功能頁上方都有，web-features 的 `data.json` 可以直接查：
+Baseline 標示在 MDN 每個功能頁上方：
 
 | 狀態 | 意思 | web-features 的欄位 |
 |---|---|---|
@@ -74,9 +64,58 @@ Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，MDN 每
 | Newly available | 上面這些瀏覽器的最新版都支援了，以年份稱呼，例如「Baseline 2024」 | `baseline: 'low'`、`baseline_low_date` |
 | Limited availability | 還有核心瀏覽器不支援 | `baseline: false` |
 
+## 開頭的視窗改成原生 `<dialog>`
+
+```html
+<button id="open" type="button">看診須知</button>
+
+<!-- 不寫 role="dialog" 與 aria-modal：showModal() 開的 <dialog> 本身就是 modal 的 dialog -->
+<dialog id="notice" aria-labelledby="notice-title">
+  <h2 id="notice-title">看診須知</h2>
+  <p>請攜帶健保卡，報到時間為看診前 30 分鐘。</p>
+  <form method="dialog">
+    <button>我知道了</button>
+  </form>
+</dialog>
+
+<style>
+  /* 加分寫法：支援的瀏覽器上，在 backdrop 或 dialog 裡捲動不會帶動背景；不改 body 的 overflow */
+  dialog:modal { overscroll-behavior: contain; }
+  dialog::backdrop { overflow: hidden; overscroll-behavior: contain; background: rgb(0 0 0 / 0.4); }
+</style>
+
+<script type="module">
+  const dialog = document.querySelector('#notice')
+  // 背景 inert、Esc 關閉、關閉後焦點回到 #open，都由瀏覽器處理
+  document.querySelector('#open').addEventListener('click', () => dialog.showModal())
+</script>
+```
+
+刪掉的程式：focus trap、Esc 監聽、`body` 的 `overflow`、手動把焦點還回去。
+
+## 最常見的兩個錯誤
+
+| 現象或訊息 | 原因 | 修法 |
+|---|---|---|
+| `<dialog>` 開了，背景還點得到、Esc 沒反應 | 用 `dialog.show()` 或 `open` 屬性開啟，不是 modal | 改用 `showModal()`；Console 執行 `$0.matches(':modal')` 確認 |
+
+| `TypeError: scheduler.yield is not a function`，只在 Safari | 把 Limited availability 的 API 當成唯一寫法 | 功能偵測，退回 `setTimeout` |
+
+:::stop 讀到這裡可以先停：會用 Baseline 判斷一個功能能不能直接用，把自己拼的 modal 換成原生 `<dialog>`。後面是舊寫法與現在寫法的完整對照表、讓 agent 先查再寫的設定、`structuredClone` 與錯誤訊息表，審 AI 產出或替 coding agent 定規範時再回來查。
+
+## AI 為什麼給舊寫法，又為什麼會給太新的寫法
+
+`<dialog>` 在 2022 年 3 月就已經是主要瀏覽器都支援的功能，到 2024 年 9 月變成 Baseline Widely available。模型從大量既有程式學習，網路上的 modal 教學與元件庫原始碼，多數寫在 `<dialog>` 普及之前。Modern Web Guidance 的 README 也直接寫明這一點：訓練資料裡舊寫法的量遠多於新寫法，模型就算知道某個 API 存在，也常常用錯或不用。
+
+AI 被要求「用新的寫法」時，可能把只有 Chrome 支援的 API 當成唯一的寫法，結果在 Safari 上直接 `TypeError`。過時與太新是同一個問題的兩面：程式沒有對照專案實際要支援的瀏覽器。
+
+## Baseline 的來源與專案的瀏覽器目標
+
+Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，web-features 的 `data.json` 可以直接查。
+
 專案規範寫「瀏覽器目標：Baseline Widely available」時，Widely available 的功能直接用；寫「Baseline 2024」時，2024 年以前變成 Newly available 的功能都在範圍內。院內有舊電腦時，Baseline 不夠，要寫出具體版本（見 [瀏覽器支援與 Baseline](#/skill/browser-support)）。
 
-### 對照表：舊寫法與現在的寫法
+## 對照表：舊寫法與現在的寫法
 
 下表的 Baseline 狀態與日期取自 web-features 3.46.0（2026-11 核對），出處是 Modern Web Guidance 1.0.1 的指南 id。
 
@@ -136,15 +175,15 @@ Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，MDN 每
 
 表裡的「現在的寫法」不一定比較短，但都把行為交給瀏覽器：焦點、inert、捲動、排程由瀏覽器處理，自己的程式少了一批要維護、要測的分支。
 
-### 指南和標準不一樣時
+Invoker Commands（`<button command="show-modal" commandfor="notice">`）連必讀範例裡那一行 JavaScript 都可以省，但它是 Newly available（2025-12），目標是 Widely available 時要功能偵測並載入 polyfill，或維持 `showModal()`。
+
+## Modern Web Guidance 的指南和標準不一樣時
 
 Modern Web Guidance 由 GoogleChrome 在 npm 發布（README 寫明由 Chrome、Edge、Firefox 與 MDN 團隊共同維護），內容是建議，不是 WHATWG 或 W3C 的規範。幾個要自己判斷的地方：
 
 - 指南推薦的功能可能只有 Chromium 支援：送分析資料的指南要求自己的程式只呼叫 `fetchLater()`，退路交給它附的 polyfill；選單的指南用 `focusgroup`（Chrome、Edge 150 起）推導角色，不在標記裡寫 `role="menu"`。專案要支援 Safari 時，這些都只能當加分寫法。
 - 和 WAI-ARIA APG 的細節不同：選單指南說用滑鼠點開選單時焦點留在按鈕，APG 的 Menu Button 範例則是開選單時把焦點移到第一項。無障礙的行為以 APG 與 WCAG 為準，再看指南有沒有更好的實作方式。
 - 指南寫的支援狀態跟著它的資料版本，可能和最新的 web-features 不同；真正決定能不能用的是查證當天的資料與專案的瀏覽器目標。
-
-:::stop 讀到這裡可以先停：會用 Baseline 判斷一個功能能不能直接用，照對照表換掉常見的舊寫法。後面讓 agent 先查再寫的設定與完整程式，在要替 coding agent 定規範時再回來讀。
 
 ## 讓 AI 先查再寫
 
@@ -202,38 +241,7 @@ git diff main...HEAD | grep -nE "JSON\.parse\(JSON\.stringify|role=\"dialog\"|ar
 
 每一筆都問兩個問題：有沒有原生替代？那個替代在不在專案的瀏覽器目標內？第二個問題也要反過來問：AI 用到的每個新功能，都要查得到 Baseline 狀態。
 
-## 實際程式
-
-### 開頭的確認視窗改成原生 `<dialog>`
-
-```html
-<button id="open" type="button">看診須知</button>
-
-<!-- 不寫 role="dialog" 與 aria-modal：showModal() 開的 <dialog> 本身就是 modal 的 dialog -->
-<dialog id="notice" aria-labelledby="notice-title">
-  <h2 id="notice-title">看診須知</h2>
-  <p>請攜帶健保卡，報到時間為看診前 30 分鐘。</p>
-  <form method="dialog">
-    <button>我知道了</button>
-  </form>
-</dialog>
-
-<style>
-  /* 加分寫法：支援的瀏覽器上，在 backdrop 或 dialog 裡捲動不會帶動背景；不改 body 的 overflow */
-  dialog:modal { overscroll-behavior: contain; }
-  dialog::backdrop { overflow: hidden; overscroll-behavior: contain; background: rgb(0 0 0 / 0.4); }
-</style>
-
-<script type="module">
-  const dialog = document.querySelector('#notice')
-  // 背景 inert、Esc 關閉、關閉後焦點回到 #open，都由瀏覽器處理
-  document.querySelector('#open').addEventListener('click', () => dialog.showModal())
-</script>
-```
-
-刪掉的程式：focus trap、Esc 監聽、`body` 的 `overflow`、手動把焦點還回去。Invoker Commands（`<button command="show-modal" commandfor="notice">`）連那一行 JavaScript 都可以省，但它是 Newly available（2025-12），目標是 Widely available 時要功能偵測並載入 polyfill，或維持 `showModal()`。
-
-### 深拷貝：`structuredClone` 與 JSON 的差別
+## 深拷貝：`structuredClone` 與 JSON 的差別
 
 ```js run
 const appt = {
@@ -255,14 +263,14 @@ console.log('改了副本，原本的醫師還是', appt.doctor.name)
 
 JSON 的版本把 `Date` 變成字串、`Set` 變成空物件；`structuredClone` 保留型別，也是深拷貝。例外是函式與 DOM 節點：`structuredClone` 遇到它們會丟 `DataCloneError`，而 JSON 會靜靜地把函式丟掉。程式要的是「送出去的 JSON 長什麼樣」（例如要把 `Date` 轉成字串）時，留著 JSON 的寫法，指南也提醒這種情況不要換。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-| `<dialog>` 開了，背景還點得到、Esc 沒反應 | 用 `dialog.show()` 或 `open` 屬性開啟，不是 modal | 改用 `showModal()`；Console 執行 `$0.matches(':modal')` 確認 |
+
 | `<dialog>` 開著時 axe 或 DevTools 顯示重複的 dialog 角色 | AI 在原生 `<dialog>` 上又加了 `role="dialog"`、`aria-modal="true"` | 拿掉兩個屬性 |
 | 開關 Dialog 時整頁左右跳一下 | 開啟時把 `body` 設成 `overflow: hidden`，捲軸消失 | 拿掉；用 `overscroll-behavior` 當加分寫法 |
-| `TypeError: scheduler.yield is not a function`，只在 Safari | 把 Limited availability 的 API 當成唯一寫法 | 功能偵測，退回 `setTimeout` |
+
 | `TypeError: Object.groupBy is not a function`，只在舊電腦 | 功能是 Widely available，但院內電腦的版本比 Baseline 舊 | 規範寫出具體版本；改寫或 polyfill（見 [瀏覽器支援與 Baseline](#/skill/browser-support)） |
 | `DataCloneError: … could not be cloned.` | `structuredClone` 的對象裡有函式、DOM 節點或 Vue 的 Proxy | 只拷貝資料；Vue 的響應式物件先用 `toRaw()` |
 | `npx modern-web-guidance` 一直沒有回應 | 沙箱沒放行網路，套件下載不到 | 先放行該指令的網路存取；離線時改查 MDN |
@@ -271,7 +279,7 @@ JSON 的版本把 `Date` 變成字串、`Set` 變成空物件；`structuredClone
 ## 動手
 
 1. 做這一課的程式題「把 AI 的舊式 modal 改成原生 `<dialog>`」：測試會檢查 `:modal`、背景 inert、關閉後焦點回到按鈕，以及沒有 `role="dialog"` 與 `body` 的 `overflow: hidden`。
-2. 按上面 `js run` 區塊的「在 Playground 開啟」，在 `appt` 裡加一個函式欄位，看 `structuredClone` 丟出的錯誤，再和 JSON 的結果比較。
-3. 在自己的專案執行上面的 `grep`，對每一筆查 MDN 的 Baseline 標示，分成「直接換」「加退路後換」「維持」三類。
+2. 按深拷貝那段 `js run` 區塊的「在 Playground 開啟」，在 `appt` 裡加一個函式欄位，看 `structuredClone` 丟出的錯誤，再和 JSON 的結果比較。
+3. 在自己的專案執行「審查清單加一條」那段的 `grep`，對每一筆查 MDN 的 Baseline 標示，分成「直接換」「加退路後換」「維持」三類。
 4. 照「瀏覽器目標」那段改寫自己專案的 `AGENTS.md`，交給 AI 一個 Dialog 或表單驗證的小任務，檢查它有沒有先查指南、交付的表裡出處查不查得到。
 5. 回頭讀 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes)（Vue 寫法的錯）與 [審 AI 的改動](#/skill/ai-review-diff)，把這一課的搜尋訊號加進審查順序。

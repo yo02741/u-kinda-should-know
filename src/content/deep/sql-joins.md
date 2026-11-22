@@ -1,4 +1,4 @@
-## 從一個具體問題開始：營收多算了 3,290 元
+## 營收多算了 3,290 元：JOIN 之後直接 sum
 
 財務要一張「每位客戶的訂單總額，以及買了幾件商品」。有人寫了這句：
 
@@ -10,17 +10,11 @@ JOIN order_items oi ON oi.order_id = o.id
 GROUP BY u.name;
 ```
 
-Bob 的 `total` 是 14,570。但 Bob 只有兩張訂單：103 號 7,990 元、106 號 3,290 元，加起來應該是 11,280。多出來的 3,290 正好是 106 號訂單的金額：這張訂單有兩個品項（滑鼠和鍵盤），JOIN `order_items` 之後它變成兩列，`sum(o.amount)` 就把它加了兩次。
+Bob 的 `total` 是 14,570。但 Bob 只有兩張訂單：103 號 7,990 元、106 號 3,290 元，加起來應該是 11,280。106 號訂單有兩個品項（滑鼠和鍵盤），JOIN `order_items` 之後變成兩列，`sum(o.amount)` 把它加了兩次。查詢沒有報錯。
 
-查詢沒有報錯，數字看起來也很合理。這種錯在報表上線很久之後才會被對帳發現。要避開它，得先把 JOIN 的本質想清楚：**JOIN 是在配對列，配對結果有幾列，後面的聚合就看到幾列**。
+## JOIN 是配對列：配出幾列，聚合就看到幾列
 
-## 運作原理：JOIN 是配對列
-
-### 先想成「全部配一遍，再用 ON 篩」
-
-邏輯上，`A JOIN B ON 條件` 等於：把 A 的每一列和 B 的每一列都配一次（笛卡兒積，`CROSS JOIN`），再只留下 ON 條件為 true 的組合。資料庫實際上不會產生笛卡兒積（它會用 Nested Loop、Hash Join、Merge Join 這些演算法），但結果和這個定義一致。
-
-範例資料庫有 5 位使用者、6 張訂單：
+邏輯上，`A JOIN B ON 條件` 等於把 A 的每一列和 B 的每一列都配一次（`CROSS JOIN`），再只留下 ON 條件為 true 的組合。範例資料庫有 5 位使用者、6 張訂單：
 
 | 寫法 | 結果列數 | 說明 |
 |---|---|---|
@@ -30,25 +24,9 @@ Bob 的 `total` 是 14,570。但 Bob 只有兩張訂單：103 號 7,990 元、10
 | `users RIGHT JOIN orders …` | 6 | 5 筆配對，加上配不到使用者的 105 號訂單 |
 | `users FULL JOIN orders …` | 8 | 5 筆配對 + Dave + Eve + 105 號訂單 |
 
-從列數就能看出每種 JOIN 在做什麼：
+七種 JOIN 的文氏圖在 [JOIN 七兄弟實驗室](#/lab/SqlJoinLab)。
 
-- **INNER JOIN**：只留兩邊都配得上的組合。
-- **LEFT JOIN**：左表每一列至少出現一次；配不到就用一列 NULL 補右邊。
-- **RIGHT JOIN**：反過來，保右表。幾乎都可以把兩張表對調改寫成 LEFT JOIN，多數團隊統一只用 LEFT。
-- **FULL JOIN**：兩邊配不到的都留。PostgreSQL 支援；MySQL 不支援 FULL JOIN，要用 LEFT 和 RIGHT 的結果 `UNION` 起來。
-- 三種**排除式**：LEFT JOIN 再 `WHERE 右.鍵 IS NULL`（只留左邊配不到的）、RIGHT 對稱版、FULL JOIN 再 `WHERE 左.鍵 IS NULL OR 右.鍵 IS NULL`（只留兩邊配不到的）。這七種的文氏圖可以在 [JOIN 七兄弟實驗室](#/lab/SqlJoinLab) 切換對照。
-
-### 一對多會讓列變多
-
-配對的列數取決於關係的基數：
-
-| 關係 | 例子 | JOIN 之後左表每一列變成 |
-|---|---|---|
-| 一對一 | users ↔ user_profiles | 0 或 1 列 |
-| 一對多 | users → orders | 0 到 N 列（看這個人有幾張訂單） |
-| 多對多（經過中介表） | orders → order_items → products | 每張訂單變成品項數那麼多列 |
-
-把 users、orders、order_items 串起來時，每一列代表的是「**一個品項**」，不再是「一張訂單」。在這個粒度上 `sum(o.amount)` 就是錯的：同一張訂單的金額被每個品項重複了一次。
+一對多的 JOIN 會讓左表的列變多：一位使用者有幾張訂單就變成幾列，一張訂單有幾個品項就變成幾列。把 users、orders、order_items 串起來，每一列代表的是**一個品項**，不再是一張訂單：
 
 ```sql run
 -- 看清楚 JOIN 之後每一列代表什麼：106 號訂單出現了兩次
@@ -60,9 +38,9 @@ WHERE u.name = 'Bob'
 ORDER BY o.id;
 ```
 
-## 先聚合再 JOIN
+## 先聚合再 JOIN：每個聚合在自己的粒度上算
 
-修法的原則是：**每個聚合要在它自己的粒度上算**。訂單金額在訂單的粒度上加總，品項數量在品項的粒度上加總，算完再接起來。
+訂單金額在訂單的粒度上加總，品項數量在品項的粒度上加總，算完再接起來：
 
 ```sql run
 -- 錯的寫法：amount 被品項數放大
@@ -86,18 +64,16 @@ GROUP BY u.name
 ORDER BY u.name;
 ```
 
-第二句裡，子查詢 `i` 每張訂單只有一列，JOIN 之後不會讓訂單變多，`sum(o.amount)` 回到正確的 11,280。
+子查詢 `i` 每張訂單只有一列，JOIN 之後訂單不會變多，`sum(o.amount)` 回到 11,280。
 
-有人會改用 `sum(DISTINCT o.amount)` 救急。這是錯的：同一個人兩張金額相同的訂單，會被當成一張。`count(DISTINCT o.id)` 可以正確數出訂單數，但金額的加總沒有對應的 DISTINCT 救法，還是要先聚合。
+寫完 FROM / JOIN 後先 `SELECT count(*)`，和預期的粒度（幾張訂單、幾位使用者）比對。數字不一樣，就有某段 JOIN 是一對多。
 
-> 判斷 JOIN 有沒有放大列數的簡單方法：寫完 FROM / JOIN 後先 `SELECT count(*)`，和你預期的粒度（幾張訂單、幾位使用者）比對。數字不一樣就代表某段 JOIN 是一對多。
+## LEFT JOIN 的條件放 ON 還是 WHERE，以及最常見的錯誤訊息
 
-## LEFT JOIN 的條件：放 ON 還是 WHERE
+INNER JOIN 時，條件放 ON 或 WHERE 結果一樣。LEFT JOIN 不一樣：
 
-INNER JOIN 時，條件放 ON 或 WHERE 結果一樣。LEFT JOIN 不一樣，因為兩者發生的時間不同：
-
-- **ON** 決定「右表哪些列可以跟左表配對」。配不到時，左表那一列仍然保留，右邊填 NULL。
-- **WHERE** 在配對**完成之後**才過濾。右邊被填成 NULL 的列，`o.status = 'paid'` 的結果是 NULL，不是 true，於是整列被丟掉。
+- **ON** 決定右表哪些列可以配對。配不到時，左表那一列仍然保留，右邊填 NULL。
+- **WHERE** 在配對完成之後才過濾。右邊是 NULL 的列，`o.status = 'paid'` 的結果是 NULL，整列被丟掉。
 
 需求：「列出所有使用者，以及他們已付款的訂單數（沒有就是 0）」。
 
@@ -126,9 +102,36 @@ ORDER BY u.id;
 | Dave（沒有訂單） | 0 | 不見了 |
 | Eve（沒有訂單） | 0 | 不見了 |
 
+LEFT JOIN 時，**限制右表的條件放 ON，限制左表的條件放 WHERE**。
+
+| 錯誤訊息（PostgreSQL） | 觸發的寫法 | 怎麼修 |
+|---|---|---|
+| `column reference "id" is ambiguous` | `SELECT id FROM users JOIN orders ON …`：兩張表都有 id | 每個欄位都加表別名（`u.id`、`o.id`） |
+| `missing FROM-clause entry for table "o"` | 用了別名 `o`，但 FROM / JOIN 裡沒有 | 檢查別名拼寫、補上 JOIN |
+
+:::stop 讀到這裡可以先停：會從列數判斷 JOIN 有沒有放大資料、先聚合再 JOIN、決定條件放 ON 還是 WHERE。後面是七種 JOIN 的差別、用 NOT EXISTS 找沒有對應的資料（NOT IN 遇到 NULL 會變空）、自連接、LATERAL 與完整的錯誤訊息表，要找「沒有訂單的人」、比較同一張表的兩列或取每組前幾筆時再回來讀。
+
+## 七種 JOIN 與關係的基數
+
+資料庫實際上不會產生笛卡兒積（它用 Nested Loop、Hash Join、Merge Join 這些演算法），但結果和「全部配一遍再用 ON 篩」的定義一致。
+
+- **INNER JOIN**：只留兩邊都配得上的組合。
+- **LEFT JOIN**：左表每一列至少出現一次；配不到就用一列 NULL 補右邊。
+- **RIGHT JOIN**：反過來，保右表。幾乎都可以把兩張表對調改寫成 LEFT JOIN，多數團隊統一只用 LEFT。
+- **FULL JOIN**：兩邊配不到的都留。PostgreSQL 支援；MySQL 不支援 FULL JOIN，要用 LEFT 和 RIGHT 的結果 `UNION` 起來。
+- 三種**排除式**：LEFT JOIN 再 `WHERE 右.鍵 IS NULL`（只留左邊配不到的）、RIGHT 對稱版、FULL JOIN 再 `WHERE 左.鍵 IS NULL OR 右.鍵 IS NULL`（只留兩邊配不到的）。
+
+| 關係 | 例子 | JOIN 之後左表每一列變成 |
+|---|---|---|
+| 一對一 | users ↔ user_profiles | 0 或 1 列 |
+| 一對多 | users → orders | 0 到 N 列（看這個人有幾張訂單） |
+| 多對多（經過中介表） | orders → order_items → products | 每張訂單變成品項數那麼多列 |
+
+有人會改用 `sum(DISTINCT o.amount)` 救急。這是錯的：同一個人兩張金額相同的訂單，會被當成一張。`count(DISTINCT o.id)` 可以正確數出訂單數，但金額的加總沒有對應的 DISTINCT 救法，還是要先聚合。
+
 反過來也有一個容易誤會的地方：把**左表**的條件放進 ON（例如 `ON o.user_id = u.id AND u.city = '台北'`），並不會過濾掉其他城市的使用者。它們仍然全部出現，只是右邊都配不到。要過濾左表就放 WHERE。
 
-整理成規則：LEFT JOIN 時，**限制右表的條件放 ON，限制左表的條件放 WHERE**。只有在 WHERE 裡寫 `右.鍵 IS NULL` 是刻意的（那就是 anti-join）。
+在 WHERE 裡寫 `右.鍵 IS NULL` 是刻意的做法，那就是 anti-join。
 
 ## Anti-join：找「沒有對應」的資料
 
@@ -185,8 +188,6 @@ ORDER BY u.id;
 計畫會隨資料量和版本變，表格只是這份範例資料上 `EXPLAIN` 的結果，可以自己在 Playground 對三句加上 `EXPLAIN` 看。結論不受計畫影響：`NOT EXISTS` 語意最清楚、對 NULL 安全，是預設的選擇。
 
 「存在」的版本（semi-join）也有同樣的選擇：「有已付款訂單的使用者」用 `EXISTS` 寫，每位使用者只出現一次；用 JOIN 寫，Bob 有兩張 paid 訂單就會出現兩次，還得加 DISTINCT。
-
-:::stop 讀到這裡可以先停：會選 INNER 或 LEFT、判斷條件放 ON 還是 WHERE、先聚合再 JOIN，也會用 NOT EXISTS 找沒有對應的資料。後面的自連接與 LATERAL，在要比較同一張表的兩列或取每組前幾筆時再回來讀。
 
 ## 自連接：同一張表 JOIN 自己
 

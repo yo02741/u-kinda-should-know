@@ -1,4 +1,4 @@
-## 從一個具體問題開始：二十分鐘的紅燈，大家按「重新執行」
+## 二十分鐘的紅燈，大家按「重新執行」
 
 一個 Python API 的 CI 長這樣：一個 job 從頭跑到尾，每個分支、每次 push 都跑完整一輪。
 
@@ -9,11 +9,9 @@
 | lint | 20 秒 | 排在測試後面：少一個 import，要等 13 分鐘才知道 |
 | build image 並推送 `latest` | 5 分鐘 | 每個分支都推，功能分支的 image 會蓋掉 main 的 |
 
-三個月後，團隊養成了一個習慣：CI 紅了先按「重新執行」，綠了就合併。某天一個真正的錯誤（依賴 PostgreSQL 交易行為的扣庫存邏輯）在 SQLite 上剛好通過、在偶發失敗的掩護下被重跑成綠燈，合進了 main；而 main 的部署腳本拉的是 `latest`，那一刻的 `latest` 還是某個功能分支推上去的。
+團隊習慣 CI 紅了先按「重新執行」，綠了就合併。某天一個依賴 PostgreSQL 交易行為的扣庫存錯誤在 SQLite 上通過，又被重跑成綠燈，合進了 main。main 的部署腳本拉的是 `latest`，當時的 `latest` 是某個功能分支推上去的。
 
-這一課把它拆成一條結構清楚的管線：快的檢查先跑、依賴有快取、測試接真的資料庫、image 只在 main 建置並用 commit SHA 標記，以及怎麼對付不穩定的測試。
-
-## 管線的階段
+## 管線的階段：便宜的檢查先跑
 
 | 階段 | 做什麼 | 典型時間 | 失敗代表 |
 |---|---|---|---|
@@ -26,81 +24,9 @@
 | build image | `docker build`，tag 用 commit SHA | 分鐘級 | Dockerfile 錯誤、依賴在 image 裡裝不起來 |
 | 推到 registry | 只在 main（或 tag） | 分鐘級 | 權限、登入 |
 
-部署到各環境是下一課的內容，見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
+lint 幾秒就能擋下的錯誤，不該等測試跑完才知道。GitHub Actions 的 job 預設平行執行，`test` 寫 `needs: lint` 之後 lint 失敗測試就不跑。build image 要在 lint 與測試**都通過**之後。同一個 job 裡的 step 依序執行，一步失敗，後面的 step 預設不執行（除非寫了 `if: always()` 或 `if: failure()`）。
 
-### 快速失敗：便宜的檢查先跑
-
-lint 幾秒就能擋下的錯誤，不該等測試跑完才知道。兩種排法：
-
-- **串列**：`test` 寫 `needs: lint`。lint 失敗時測試根本不跑，省下 runner 時間；代價是總時間是兩者相加。
-- **平行**：lint 與測試同時開始，總時間取決於最慢的那個；lint 失敗時測試還是會跑完（除非取消）。
-
-runner 時間有限、或測試很重時用串列；在意回饋速度時用平行。build image 一定要在兩者**都通過**之後。
-
-GitHub Actions 的 job 預設平行執行，用 `needs` 建立先後；同一個 job 裡的 step 依序執行，任何一步失敗，後面的 step 預設不執行（除非該步寫了 `if: always()` 或 `if: failure()`）。GitLab 用 `stages` 當柵欄、`needs` 建立 DAG，見 [GitLab CI/CD](#/skill/gitlab-cicd)。
-
-## 快取：key 怎麼選
-
-cache 與 artifact 常被混用：
-
-| | cache | artifact |
-|---|---|---|
-| 用途 | 加速：下載過的套件、編譯中間檔 | 傳遞：這次管線的產出（測試報告、建好的檔案） |
-| 保證 | 不保證存在，沒有就重新下載 | 這次 run 裡保證存在 |
-| 範圍 | 跨多次 run 重用 | 屬於某一次 run |
-| 錯誤用法 | 拿來傳 build 結果給下一個 job | 拿來存依賴下載快取 |
-
-快取的 key 決定什麼時候要換新的快取。用 **lock 檔的雜湊**：lock 檔沒變，依賴就沒變，可以直接用舊的；lock 檔一變，key 就變，產生新的快取。
-
-```yaml
-- uses: actions/cache@v6
-  with:
-    path: ~/.cache/uv
-    # 主 key：作業系統 + lock 檔雜湊。lock 檔一變，key 就變
-    key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-    # 主 key 沒命中時，退而求其次用最近一份同前綴的快取（只需要補下載差異）
-    restore-keys: |
-      uv-${{ runner.os }}-
-```
-
-幾個錯誤的 key：
-
-- **固定字串**（`key: deps`）：第一次存了之後永遠命中，依賴改了也不會更新。`actions/cache` 的同一個 key 存過就不會被覆寫。
-- **包含 commit SHA**：每次都不命中，等於沒有快取。
-- **用 `pyproject.toml` 而不是 lock 檔**：宣告沒變、但 lock 檔更新了版本時，快取不會換。
-
-快取有容量上限與過期規則，分支之間的可見範圍也有限制（GitHub 上一般是目前分支與預設分支的快取可以讀；細節以官方文件為準）。快取壞掉或被清掉時，管線要照樣能跑完，只是比較慢。
-
-uv 的文件建議在 CI 結束前執行 `uv cache prune --ci`，把可以很快從本地重建的部分清掉，讓快取只留下載過的檔案，體積比較小。
-
-## 測試要接真的資料庫
-
-開頭的事故，根本原因是測試用 SQLite、正式環境用 PostgreSQL：兩者的型別、交易隔離、`ON CONFLICT`、時間函式行為都不同。CI 用 `services` 起一個跟正式環境同大版本的 PostgreSQL 容器：
-
-```yaml
-test:
-  runs-on: ubuntu-latest
-  services:
-    postgres:
-      image: postgres:16
-      env:
-        POSTGRES_USER: app
-        POSTGRES_PASSWORD: test-only     # job 結束就銷毀的測試資料庫，不是機密
-        POSTGRES_DB: app_test
-      ports:
-        - 5432:5432                      # job 直接跑在 runner 上：用 localhost:5432 連
-      options: >-
-        --health-cmd pg_isready
-        --health-interval 10s
-        --health-timeout 5s
-        --health-retries 5
-  env:
-    DATABASE_URL: postgresql://app:test-only@localhost:5432/app_test
-```
-
-- **主機名稱取決於 job 在哪裡跑**：job 直接跑在 runner 上時，service 透過 `ports` 對應到 runner 的 `localhost`；job 本身跑在容器裡（寫了 `container:`）時，用 service 的名字（這裡是 `postgres`）當主機名稱，不需要 `ports`。GitLab 的 docker executor 則是用 service 名稱或 alias。
-- **health check**：容器啟動不等於 PostgreSQL 已經能接連線。`--health-cmd pg_isready` 讓 runner 等到資料庫就緒才開始跑 step。
-- **每個測試互不污染**：每個測試在交易裡跑、結束時 rollback，或每個測試前清空資料表。見 [測試金字塔與 pytest](#/skill/testing)。
+部署到各環境見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
 
 ## 完整範例：GitHub Actions
 
@@ -197,16 +123,101 @@ jobs:
           tags: ghcr.io/example-org/shop-api:${{ github.sha }}
 ```
 
-幾個設計上的選擇：
-
 - **兩種觸發**：`pull_request` 讓 PR 上顯示檢查結果，`push` 到 main 才建 image。`build` 的 `if` 再擋一次，確保只有 main 會推。
+- **快取 key 用 lock 檔的雜湊**：`uv.lock` 沒變就命中，一變就換新的快取。
+- **測試接真的資料庫**：`services` 起一個跟正式環境同大版本的 PostgreSQL，health check 通過才開始跑 step；job 直接跑在 runner 上，用 `localhost:5432` 連。
+- **image tag 用 `github.sha`**，只在 main 推。
+
+## 最先遇到的兩個錯誤訊息
+
+| 訊息 | 原因 | 怎麼處理 |
+|---|---|---|
+| `Error: Process completed with exit code 1.` | 某一步的指令結束碼不是 0；這行本身沒有資訊 | 往上找那一步真正的輸出，例如 pytest 的失敗摘要 |
+| `connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused` | 沒有 service、沒有 `ports` 對應，或資料庫還沒就緒 | 加上 `ports` 與 health check；job 跑在容器裡時改用 service 名稱 |
+
+:::stop 讀到這裡可以先停：會排 lint、test、build 的先後，寫出一份有快取、接 PostgreSQL、只在 main 推 image 的 workflow。後面是快取 key 與 service 的細節、action 版本、平行化、flaky test、兩個平台的對照與其他錯誤訊息，在快取不命中、管線變慢、紅燈開始被重跑或要換平台時再回來讀。
+
+## 快取：key 怎麼選
+
+cache 與 artifact 常被混用：
+
+| | cache | artifact |
+|---|---|---|
+| 用途 | 加速：下載過的套件、編譯中間檔 | 傳遞：這次管線的產出（測試報告、建好的檔案） |
+| 保證 | 不保證存在，沒有就重新下載 | 這次 run 裡保證存在 |
+| 範圍 | 跨多次 run 重用 | 屬於某一次 run |
+| 錯誤用法 | 拿來傳 build 結果給下一個 job | 拿來存依賴下載快取 |
+
+key 決定什麼時候換新的快取。用 **lock 檔的雜湊**：lock 檔沒變，依賴就沒變，直接用舊的；lock 檔一變，key 就變，產生新的快取。
+
+```yaml
+- uses: actions/cache@v6
+  with:
+    path: ~/.cache/uv
+    # 主 key：作業系統 + lock 檔雜湊。lock 檔一變，key 就變
+    key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+    # 主 key 沒命中時，退而求其次用最近一份同前綴的快取（只需要補下載差異）
+    restore-keys: |
+      uv-${{ runner.os }}-
+```
+
+幾個錯誤的 key：
+
+- **固定字串**（`key: deps`）：第一次存了之後永遠命中，依賴改了也不會更新。`actions/cache` 的同一個 key 存過就不會被覆寫。
+- **包含 commit SHA**：每次都不命中，等於沒有快取。
+- **用 `pyproject.toml` 而不是 lock 檔**：宣告沒變、但 lock 檔更新了版本時，快取不會換。
+
+快取有容量上限與過期規則，分支之間的可見範圍也有限制（GitHub 上一般是目前分支與預設分支的快取可以讀；細節以官方文件為準）。快取壞掉或被清掉時，管線要照樣能跑完，只是比較慢。
+
+uv 的文件建議在 CI 結束前執行 `uv cache prune --ci`，把可以很快從本地重建的部分清掉，讓快取只留下載過的檔案，體積比較小。
+
+## 測試接真的資料庫：主機名稱與 health check
+
+開頭的事故，根本原因是測試用 SQLite、正式環境用 PostgreSQL：兩者的型別、交易隔離、`ON CONFLICT`、時間函式行為都不同。`services` 的寫法：
+
+```yaml
+test:
+  runs-on: ubuntu-latest
+  services:
+    postgres:
+      image: postgres:16
+      env:
+        POSTGRES_USER: app
+        POSTGRES_PASSWORD: test-only     # job 結束就銷毀的測試資料庫，不是機密
+        POSTGRES_DB: app_test
+      ports:
+        - 5432:5432                      # job 直接跑在 runner 上：用 localhost:5432 連
+      options: >-
+        --health-cmd pg_isready
+        --health-interval 10s
+        --health-timeout 5s
+        --health-retries 5
+  env:
+    DATABASE_URL: postgresql://app:test-only@localhost:5432/app_test
+```
+
+- **主機名稱取決於 job 在哪裡跑**：job 直接跑在 runner 上時，service 透過 `ports` 對應到 runner 的 `localhost`；job 本身跑在容器裡（寫了 `container:`）時，用 service 的名字（這裡是 `postgres`）當主機名稱，不需要 `ports`。GitLab 的 docker executor 則是用 service 名稱或 alias。
+- **health check**：容器啟動不等於 PostgreSQL 已經能接連線。`--health-cmd pg_isready` 讓 runner 等到資料庫就緒才開始跑 step。
+- **每個測試互不污染**：每個測試在交易裡跑、結束時 rollback，或每個測試前清空資料表。見 [測試金字塔與 pytest](#/skill/testing)。
+
+## 權限、image tag 與 action 的版本
+
 - **`permissions` 最小化**：`GITHUB_TOKEN` 的權限在 workflow 層設成只讀，只有 `build` 加上 `packages: write`。
 - **image tag 用 `github.sha`**：每個 image 能對回一個 commit；`latest` 會被覆蓋，也說不出正式環境跑的是哪一版。
-- **action 的版本**：範例寫的是主版本 tag（`@v7`），主版本號是 2026 年 11 月對照各 action repo 的 tag 填的，之後會再往上升，用之前到該 repo 的 Releases 看目前是哪一版。tag 可以被移動，對安全要求高的專案會釘到完整的 commit SHA，並用 Dependabot 之類的工具更新，見 [依賴與供應鏈安全](#/skill/supply-chain)。也有 action 不再提供主版本 tag，例如 `astral-sh/setup-uv` 從 v8 起只有完整版本號（`@v10.3.3`）或 SHA 可以用，寫 `@v10` 會找不到。
+- 範例寫的是主版本 tag（`@v7`），主版本號是 2026 年 11 月對照各 action repo 的 tag 填的，之後會再往上升，用之前到該 repo 的 Releases 看目前是哪一版。
+- tag 可以被移動，對安全要求高的專案會釘到完整的 commit SHA，並用 Dependabot 之類的工具更新，見 [依賴與供應鏈安全](#/skill/supply-chain)。
+- 也有 action 不再提供主版本 tag，例如 `astral-sh/setup-uv` 從 v8 起只有完整版本號（`@v10.3.3`）或 SHA 可以用，寫 `@v10` 會找不到。
 
-:::stop 讀到這裡可以先停：會排 lint、test、build 的先後，用 lock 檔雜湊當快取 key，讓測試接上同版本的 PostgreSQL。後面的平行化、flaky test 與兩個平台的對照，在管線變慢、紅燈開始被重跑或要換平台時再回來讀。
+## 平行化：串列或平行、矩陣、切片
 
-## 平行化
+lint 與測試的兩種排法：
+
+| 排法 | 寫法 | 總時間 | lint 失敗時 |
+|---|---|---|---|
+| 串列 | `test` 寫 `needs: lint` | 兩者相加 | 測試不跑，省 runner 時間 |
+| 平行 | 不寫 `needs` | 取決於最慢的那個 | 測試照樣跑完（除非取消） |
+
+runner 時間有限或測試很重時用串列，在意回饋速度時用平行。
 
 測試很多時，三種加速方式：
 
@@ -228,7 +239,7 @@ test:
 
 ## 不穩定的測試（flaky test）
 
-同一個 commit，有時過、有時不過的測試。它的傷害不在單一次失敗，而在**讓所有人不再相信紅燈**。算一下就知道為什麼：
+同一個 commit，有時過、有時不過的測試。它讓所有人不再相信紅燈：
 
 ```python run
 # 每個不穩定測試獨立地有 p 的機率失敗；n 個這種測試，整條管線紅燈的機率是 1 - (1-p)^n
@@ -266,6 +277,8 @@ print(f"30% 會觸發的競態錯誤，重試後被看見的機率：{race * rac
 
 ## GitHub Actions 與 GitLab CI 對照
 
+GitLab 用 `stages` 當柵欄、`needs` 建立 DAG。
+
 | 概念 | GitHub Actions | GitLab CI |
 |---|---|---|
 | 檔案 | `.github/workflows/*.yml`（可多份） | `.gitlab-ci.yml` |
@@ -282,12 +295,10 @@ print(f"30% 會觸發的競態錯誤，重試後被看見的機率：{race * rac
 
 GitLab 的完整範例、Runner 與 protected 變數見 [GitLab CI/CD](#/skill/gitlab-cicd)。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 訊息 | 原因 | 怎麼處理 |
 |---|---|---|
-| `Error: Process completed with exit code 1.` | 某一步的指令結束碼不是 0；這行本身沒有資訊 | 往上找那一步真正的輸出，例如 pytest 的失敗摘要 |
-| `connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused` | 沒有 service、沒有 `ports` 對應，或資料庫還沒就緒 | 加上 `ports` 與 health check；job 跑在容器裡時改用 service 名稱 |
 | `Cache not found for input keys: ...` | 第一次執行、lock 檔改了、或快取過期被清掉 | 正常現象；每次都出現才要檢查 key 是否包含會變動的東西 |
 | `uv sync --locked` 失敗，說 lock 檔需要更新 | 改了 `pyproject.toml` 卻沒有重新產生 `uv.lock` | 本機執行 `uv lock` 後一起 commit |
 | `invalid reference format: repository name must be lowercase` | image 名稱有大寫，例如直接用了含大寫的 `github.repository` | image 名稱寫成全小寫 |

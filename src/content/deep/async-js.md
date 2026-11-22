@@ -1,4 +1,4 @@
-## 從一個具體問題開始：病患首頁要等 1 秒多才出現
+## 具體問題：病患首頁要等 1 秒多才出現
 
 病患首頁 `PatientHome` 進頁時要三份資料：病患本人（`/api/me`）、已預約的掛號（`/api/appointments?status=booked`）、醫院公告（`/api/notices`）。AI 產生的程式是這樣：
 
@@ -14,11 +14,9 @@ async function load() {
 
 三支 API 各要 300、500、200 ms，畫面卻要等 1 秒才出現。打開 Network 分頁，三個請求在 Waterfall 欄排成階梯：第二個等第一個回來才送，第三個等第二個。這三份資料互不相依，同時送出的話，等最慢的 500 ms 就夠了。
 
-這段程式還有兩個問題。公告服務掛掉時，`await` 在第三行丟出錯誤，`loading.value = false` 永遠不會執行，整頁停在轉圈；而且錯誤沒人接，Console 出現 `Uncaught (in promise)`。要寫對，得知道 Promise 的狀態怎麼變、`await` 暫停的是什麼，以及幾個組合多個 Promise 的函式各自在什麼條件下成功或失敗。
+這段程式還有兩個問題。公告服務掛掉時，`await` 在第三行丟出錯誤，`loading.value = false` 不會執行，整頁停在轉圈。錯誤也沒人接，Console 出現 `Uncaught (in promise)`。
 
-## 運作原理
-
-### Promise 的三種狀態
+## Promise 的狀態、`await` 暫停什麼、依序與平行
 
 ```
             ┌── 成功 ──→ fulfilled（有 value）
@@ -63,11 +61,9 @@ Promise 建立時是 pending，之後變成 fulfilled 或 rejected 其中之一�
 
 `Promise.all` 失敗時，其他還在進行的請求**不會被取消**，它們照樣跑完，只是結果沒人拿。要停掉請求，得在送出時帶 `AbortController` 的 `signal`（見下面的程式）。`allSettled` 是 ES2020、`any` 是 ES2021，主要瀏覽器都已支援。
 
-## 實際程式碼
+## 最小範例：平行送出、各自處理失敗、loading 一定會關
 
-下面幾段在本站的 JavaScript 執行環境（Web Worker）裡跑，沒有網路，用 `setTimeout` 模擬 API 的延遲。按「在 Playground 開啟」可以改數字再跑。
-
-### 依序與平行
+沒有網路的執行環境裡，用 `setTimeout` 模擬三支 API 的延遲：
 
 ```js run
 // 用 setTimeout 模擬三支 API，各自延遲不同的毫秒數
@@ -90,7 +86,41 @@ console.log('平行', Date.now() - t0, 'ms')   // 約 500 ms，等於最慢的�
 console.log(me2.name, '有', list2.length, '筆掛號；公告：', notices2[0])
 ```
 
-### 一個失敗時：`all` 與 `allSettled`
+開頭的 `load` 改成：
+
+```js
+// PatientHome 的載入：三支平行、各自處理失敗、loading 一定會關
+async function load() {
+  loading.value = true
+  try {
+    const [meRes, apptRes, noticeRes] = await Promise.allSettled([
+      api.get('/api/me'),
+      api.get('/api/appointments?status=booked'),
+      api.get('/api/notices'),
+    ])
+    if (meRes.status === 'rejected') throw meRes.reason   // 本人資料缺一不可：整頁錯誤
+    me.value = meRes.value
+    appointments.value = apptRes.status === 'fulfilled' ? apptRes.value : null
+    apptError.value = apptRes.status === 'rejected'        // 只有這個區塊顯示錯誤
+    notices.value = noticeRes.status === 'fulfilled' ? noticeRes.value : []
+  } catch (err) {
+    pageError.value = err
+  } finally {
+    loading.value = false
+  }
+}
+```
+
+## 最常見的兩個錯誤
+
+| 訊息或現象 | 原因 | 修法 |
+|---|---|---|
+| Console：`Uncaught (in promise) Error: …` | Promise 失敗沒有人處理：沒有 `try`/`catch`、`.then()` 後面沒有 `.catch()`、或在 `forEach` 的 `async` 回呼裡丟出錯誤 | 在 `await` 外包 `try`/`catch`，或在呼叫端接住 |
+| 畫面一直轉圈 | 關 loading 的程式寫在成功分支，失敗時跳過了 | 移到 `finally` |
+
+:::stop 讀到這裡可以先停：會判斷請求是依序還是平行，部分失敗時選對 `all` 或 `allSettled`，把關 loading 寫在 `finally`。後面是 `all` 與 `allSettled` 的實測、`forEach` 不等 `await`、逾時與取消，在要批次送出或請求太久時再回來讀。
+
+## 一個失敗時：`all` 與 `allSettled` 的實測
 
 ```js run
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -119,7 +149,7 @@ for (const r of results) {
 }
 ```
 
-### `forEach` 不會等 `await`
+## `forEach` 不會等 `await`
 
 ```js run
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -148,9 +178,7 @@ await Promise.all(ids.map(save))
 console.log('Promise.all', JSON.stringify(saved))    // [1,2,3]，全部完成才往下
 ```
 
-:::stop 讀到這裡可以先停：會判斷請求是依序還是平行，部分失敗時選對 `all` 或 `allSettled`，也知道 `forEach` 不等 `await`。後面的逾時與 Vue 元件寫法，在要處理 loading 與請求太久時再回來讀。
-
-### `finally` 與逾時
+## `finally`、逾時與取消請求
 
 ```js run
 const wait = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms))
@@ -198,52 +226,25 @@ async function search(q) {
 
 `AbortSignal.timeout()` 是 Baseline 2024。取消請求與「舊回應蓋掉新結果」的處理，在呼叫後端的課裡細講。
 
-### 寫成 Vue 元件裡的載入函式
-
-```js
-// PatientHome 的載入：三支平行、各自處理失敗、loading 一定會關
-async function load() {
-  loading.value = true
-  try {
-    const [meRes, apptRes, noticeRes] = await Promise.allSettled([
-      api.get('/api/me'),
-      api.get('/api/appointments?status=booked'),
-      api.get('/api/notices'),
-    ])
-    if (meRes.status === 'rejected') throw meRes.reason   // 本人資料缺一不可：整頁錯誤
-    me.value = meRes.value
-    appointments.value = apptRes.status === 'fulfilled' ? apptRes.value : null
-    apptError.value = apptRes.status === 'rejected'        // 只有這個區塊顯示錯誤
-    notices.value = noticeRes.status === 'fulfilled' ? noticeRes.value : []
-  } catch (err) {
-    pageError.value = err
-  } finally {
-    loading.value = false
-  }
-}
-```
-
 `fetch` 收到 `404`、`500` 這類回應時不會失敗，要自己檢查 `res.ok` 再決定要不要丟出錯誤，見 [fetch 與 HTTP](#/skill/fetch-basics)。上面的 `api.get` 假設已經做了這件事。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-| Console：`Uncaught (in promise) Error: …` | Promise 失敗沒有人處理：沒有 `try`/`catch`、`.then()` 後面沒有 `.catch()`、或在 `forEach` 的 `async` 回呼裡丟出錯誤 | 在 `await` 外包 `try`/`catch`，或在呼叫端接住 |
 | Console：`Uncaught (in promise) TypeError: Failed to fetch` | Chrome 的網路錯誤（斷線、DNS 失敗、被 CORS 擋下）。Firefox 是 `NetworkError when attempting to fetch resource.`，Safari 是 `Load failed` | 網路錯誤要有自己的畫面與重試按鈕 |
 | `SyntaxError: await is only valid in async functions and the top level bodies of modules` | 在一般函式裡寫了 `await` | 把外層函式改成 `async`；回呼也要各自加 `async` |
 | `TypeError: data.map is not a function` | 少了 `await`，`data` 是 Promise 本身 | 呼叫時加 `await` |
 | 畫面上出現 `[object Promise]` | 把 Promise 直接放進模板或字串 | 先 `await` 拿到值，存進狀態再顯示 |
 | `AggregateError: All promises were rejected` | `Promise.any` 的每一個都失敗了 | 讀 `err.errors` 陣列看各自的原因 |
-| 畫面一直轉圈 | 關 loading 的程式寫在成功分支，失敗時跳過了 | 移到 `finally` |
 | 三個請求在 Waterfall 排成階梯 | 每個呼叫前面都寫了 `await` | 先呼叫、再用 `Promise.all` 一起等 |
 
 有一種錯不會出現任何訊息：`try { return api.get(url) } catch {}`。`return` 一個 Promise 時沒有 `await`，函式在 Promise 失敗之前就離開了 `try`，`catch` 永遠接不到。在 `try` 裡回傳 Promise 時寫成 `return await api.get(url)`。
 
 ## 動手
 
-- 按第一段程式的「在 Playground 開啟」，把 `getAppointments` 的延遲改成 2000，看依序與平行的時間差多少。
-- 在第二段把 `Promise.all` 換成 `Promise.any`，再把 `getAppointments` 也改成丟出錯誤，看 `AggregateError` 長什麼樣。
-- 在第四段把 `timeout(500)` 改成 `timeout(1000)`，看 `load(900)` 的結果怎麼變。
+- 按必讀「最小範例」第一段程式的「在 Playground 開啟」，把 `getAppointments` 的延遲改成 2000，看依序與平行的時間差多少。
+- 在「`all` 與 `allSettled` 的實測」把 `Promise.all` 換成 `Promise.any`，再把 `getAppointments` 也改成丟出錯誤，看 `AggregateError` 長什麼樣。
+- 在「`finally`、逾時與取消請求」把 `timeout(500)` 改成 `timeout(1000)`，看 `load(900)` 的結果怎麼變。
 - 在本站任一技能頁打開 Network 分頁、節流切到 `3G`，重新整理後看 Waterfall 欄：哪些請求同時開始、哪些排在別人後面。
 - 呼叫後端時的狀態與畫面，接著讀 [API 的四種狀態](#/skill/api-states)。

@@ -1,21 +1,14 @@
-## 從一個具體問題開始：三份 YAML 都套用成功，網址卻回 503
+## 三份 YAML 都套用成功，網址卻回 503
 
 報到系統要多一個 API 服務 `booking-api`。照著文件寫了三份 YAML，`kubectl apply` 三行都回 `created`，Pod 也是 `Running`、`READY 1/1`。但從外面打 `https://api.booking.example.org/healthz`，拿到的是 503。
 
-Pod 沒壞、映像沒錯、程式也在跑。問題出在 Service 的這一行：
+Pod 沒壞、映像沒錯、程式也在跑。問題出在 Service 的 selector 寫成 `app: booking_api`（底線），Pod 的 label 是 `app: booking-api`（連字號）。
 
-```yaml
-  selector:
-    app: booking_api        # Pod 的 label 是 app: booking-api（連字號）
-```
-
-Service 靠 label 找 Pod。這個 selector 一個 Pod 也選不到，Service 後面沒有任何位址，Ingress controller 找不到後端就回 503。API server 不會擋這種錯：「一個目前選不到任何 Pod 的 Service」是合法的物件，Pod 可能晚一點才建立。
-
-[導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 講過 Pod、Deployment、Service、Ingress 各自的角色，這一課不重複，只講實作：三份 manifest 各自要寫哪些欄位、它們之間靠什麼接起來、套用之後怎麼確認它們接上了。探針、資源與設定注入放在下一課 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
+Service 靠 label 找 Pod。這個 selector 一個 Pod 也選不到，Service 後面沒有任何位址，Ingress controller 找不到後端就回 503。API server 不會擋：「目前選不到任何 Pod 的 Service」是合法的物件，Pod 可能晚一點才建立。
 
 ## 三份 manifest 之間的四條接線
 
-一個對外的 API 服務最少要三個物件。物件之間不是靠「寫在同一個檔案」或「名字長得像」關聯，而是靠下面四條接線：
+一個對外的 API 服務最少要三個物件，靠下面四條接線關聯：
 
 ```text
 Ingress  booking-api
@@ -41,9 +34,102 @@ Deployment  booking-api
 | ③ Service 的 targetPort → 容器監聽的 port | 不會 | 連線被拒絕，經過 Ingress 時多半是 502 |
 | ④ Deployment 的 selector ↔ template 的 label | **會**，套用時直接被拒絕 | 物件建不起來 |
 
-四條裡只有 ④ 會在套用時被擋下來，其他三條都是「套用成功、但不通」。所以套用後不能只看 `created`，要逐條確認，方法在「套用與確認」一節。
+只有 ④ 會在套用時被擋下來，其他三條都是「套用成功、但不通」，套用後要逐條確認。
 
-label 是貼在物件上的鍵值對，本身沒有意義，由使用的人決定。selector 的比對規則很單純：selector 列出的每一組鍵值，Pod 都要有而且值相同；Pod 身上多出來的 label 不影響。下面這段程式實作這個規則：
+selector 的比對規則：selector 列出的每一組鍵值，Pod 都要有而且值相同；Pod 身上多出來的 label 不影響。
+
+## Deployment 與 Service 的最小寫法
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-api
+  namespace: booking
+  labels:
+    app: booking-api              # Deployment 自己的 label，只用來查詢與分類
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5         # 保留幾個舊的 ReplicaSet 供回退（預設 10）
+  selector:
+    matchLabels:
+      app: booking-api            # ④ 這個 Deployment 管哪些 Pod；建立之後不能改
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                 # 更新期間，Pod 總數最多比 replicas 多 1 個
+      maxUnavailable: 0           # 更新期間，可用的 Pod 不能比 replicas 少
+  template:                       # Pod 的範本：這一段有變動才會觸發滾動更新
+    metadata:
+      labels:
+        app: booking-api          # ④ 要包含 selector 的每一組 label；② Service 也靠它選取
+    spec:
+      containers:
+        - name: api
+          image: registry.example.org/booking/api:3f9c2a1b   # 固定 tag（commit SHA）
+          ports:
+            - name: http
+              containerPort: 8000 # ③ 程式實際監聽的 port
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-api               # ① 同時是叢集內的 DNS 名稱
+  namespace: booking
+spec:
+  type: ClusterIP                 # 預設值：只有叢集內連得到
+  selector:
+    app: booking-api              # ② 選取同一個 namespace 裡帶這個 label 的 Pod
+  ports:
+    - name: http
+      port: 80                    # Service 自己開的 port
+      targetPort: http            # ③ 轉給 Pod 的哪個 port：寫數字 8000，或寫容器 port 的名稱
+```
+
+- `port` 與 `targetPort` 是兩個不同的數字：其他服務連 `http://booking-api:80`，Service 轉到 Pod 的 8000。`targetPort` 省略時等於 `port`。
+- Service 只把流量送給 **ready** 的 Pod：② 接上了、但 readiness 沒通過時，後端一樣是空的。
+
+## 套用與確認
+
+`kubectl apply -f k8s/` 套用整個目錄，再用 `kubectl rollout status deployment/booking-api -n booking --timeout=120s` 等更新完成；逾時或失敗時它回傳非零的結束碼。接著逐條確認接線，輸出類似下面的格式：
+
+```bash
+# ④ Deployment 與 Pod：READY 的分子分母要相等
+$ kubectl get deployment,pods -n booking -l app=booking-api
+NAME                          READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/booking-api   3/3     3            3           2m
+
+NAME                               READY   STATUS    RESTARTS   AGE
+pod/booking-api-6b8f7c9d54-4xk2p   1/1     Running   0          2m
+pod/booking-api-6b8f7c9d54-9dw7m   1/1     Running   0          2m
+pod/booking-api-6b8f7c9d54-zq5tn   1/1     Running   0          2m
+
+# ② Service 選到誰：ENDPOINTS 要有 Pod 的 IP
+$ kubectl get endpointslices -n booking -l kubernetes.io/service-name=booking-api
+NAME                ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
+booking-api-x7k2p   IPv4          8000    10.244.1.12,10.244.2.31,10.244.3.8   2m
+
+# ③ 不經過 Ingress，直接從本機連 Service
+$ kubectl port-forward -n booking service/booking-api 8080:80
+$ curl -i http://localhost:8080/healthz
+
+# ① Ingress：ADDRESS 有值，describe 看得到後端
+$ kubectl get ingress -n booking
+$ kubectl describe ingress booking-api -n booking
+```
+
+最常見的兩個錯誤（訊息的確切文字依版本而異）：
+
+| 訊息或現象 | 原因 | 處理 |
+|---|---|---|
+| 套用成功，Service 的 ENDPOINTS 是空的 | 接線 ②，或 Pod 沒有 ready，或不在同一個 namespace | `kubectl get pods --show-labels` 對照 Service 的 selector |
+| `The Deployment "booking-api" is invalid: spec.template.metadata.labels: Invalid value: …: selector does not match template labels` | 接線 ④：selector 與 template 的 label 不一致 | 兩邊改成一致 |
+
+:::stop 讀到這裡可以先停：會寫 Deployment 與 Service，接好 selector、label 與 targetPort，套用後用 `kubectl get endpointslices` 與 `port-forward` 逐條確認。後面是各欄位的行為、maxSurge 與 maxUnavailable、Service 的類型、Ingress 與 Gateway API、namespace、回退與其他錯誤訊息，在要調整更新方式或讓叢集外連進來時再回來讀。
+
+## selector 的比對規則：跑一次看看
 
 ```python run
 # Service 的 selector 比對 Pod 的 label：selector 的每一組鍵值，Pod 都要有而且值相同
@@ -81,50 +167,19 @@ for title, selector in cases:
         print("  注意：選到別的服務的 Pod →", others)
 ```
 
-輸出有四種情況：正確時選到三個、只有 ready 的兩個收流量；打錯字或多寫一組 label 時是空的；selector 太籠統時，Service 會把流量分給不相干的服務。最後一種比空的更難查，因為它「有時候通」。
+輸出有四種情況：正確時選到三個、只有 ready 的兩個收流量；打錯字或多寫一組 label 時是空的；selector 太籠統時選到別的服務的 Pod。最後一種比空的更難查，因為它「有時候通」。
 
-## Deployment：副本、範本與更新方式
+## Deployment 欄位的行為
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: booking-api
-  namespace: booking
-  labels:
-    app: booking-api              # Deployment 自己的 label，只用來查詢與分類
-spec:
-  replicas: 3
-  revisionHistoryLimit: 5         # 保留幾個舊的 ReplicaSet 供回退（預設 10）
-  selector:
-    matchLabels:
-      app: booking-api            # ④ 這個 Deployment 管哪些 Pod；建立之後不能改
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1                 # 更新期間，Pod 總數最多比 replicas 多 1 個
-      maxUnavailable: 0           # 更新期間，可用的 Pod 不能比 replicas 少
-  template:                       # Pod 的範本：這一段有變動才會觸發滾動更新
-    metadata:
-      labels:
-        app: booking-api          # ④ 要包含 selector 的每一組 label；② Service 也靠它選取
-    spec:
-      containers:
-        - name: api
-          image: registry.example.org/booking/api:3f9c2a1b   # 固定 tag（commit SHA）
-          ports:
-            - name: http
-              containerPort: 8000 # ③ 程式實際監聽的 port
-```
+[導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 講過各物件的角色；探針、資源與設定注入在 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
 
-幾個欄位的行為：
-
+- **label**：貼在物件上的鍵值對，本身沒有意義，由使用的人決定。
 - **`selector` 與 `template.metadata.labels`**：`apps/v1` 要求 selector 必填，而且 template 的 label 必須符合 selector，否則套用時被拒絕。selector 建立後不可變更；要改只能刪掉 Deployment 重建。
 - **`template`**：只有這一段的內容變了（image、環境變數、label、資源設定等），Deployment 才會建立新的 ReplicaSet 開始滾動更新。只改 `replicas` 是擴縮，不是更新。
-- **`image` 用固定 tag**：`latest` 有兩個實際的問題。第一，registry 上的 `latest` 換了內容，manifest 一個字都沒變，`kubectl apply` 回 `unchanged`，不會有任何更新；之後某個 Pod 因故重建才拉到新內容，於是同一個 Deployment 裡跑著不同版本。第二，回退時沒有「上一個 tag」可以指。用 commit SHA 或版本號當 tag，叢集裡跑的是哪一版就寫在 manifest 裡。tag 與 digest 的差別見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
+- **`image` 用固定 tag**：`latest` 有兩個問題。第一，registry 上的 `latest` 換了內容，manifest 一個字都沒變，`kubectl apply` 回 `unchanged`，不會有任何更新；之後某個 Pod 因故重建才拉到新內容，同一個 Deployment 裡就跑著不同版本。第二，回退時沒有「上一個 tag」可以指。tag 與 digest 的差別見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
 - **`containerPort`**：主要是說明用途，沒寫也不會讓 port 連不到；但寫了並取名字（`name: http`），Service 的 `targetPort` 就可以用名字指過來，之後改 port 號只要改一個地方。
 
-### maxSurge 與 maxUnavailable
+## maxSurge 與 maxUnavailable：更新期間的 Pod 數
 
 滾動更新期間，Deployment controller 守住兩個條件：
 
@@ -190,27 +245,9 @@ rolling_update(4, 1, 0, new_becomes_ready=False)   # 新版的 readiness 永遠�
 
 最後一組是新版壞掉的情況：`maxUnavailable: 0` 時舊的 4 個一個都不會被關，服務不受影響，更新停在那裡等人處理。同樣的行為可以在 [K8sLab 實驗室](#/lab/K8sLab) 用動畫看。
 
-## Service：穩定的名字與 port 對應
+## Service 的類型與 DNS 名稱
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: booking-api               # ① 同時是叢集內的 DNS 名稱
-  namespace: booking
-spec:
-  type: ClusterIP                 # 預設值：只有叢集內連得到
-  selector:
-    app: booking-api              # ② 選取同一個 namespace 裡帶這個 label 的 Pod
-  ports:
-    - name: http
-      port: 80                    # Service 自己開的 port
-      targetPort: http            # ③ 轉給 Pod 的哪個 port：寫數字 8000，或寫容器 port 的名稱
-```
-
-`port` 與 `targetPort` 是兩個不同的數字：其他服務連 `http://booking-api:80`，Service 轉到 Pod 的 8000。`targetPort` 省略時等於 `port`。把這兩個寫反或以為它們要相同，是 ③ 最常見的錯法。
-
-Service 只把流量送給 **ready** 的 Pod，所以 ② 接上了、但 Pod 的 readiness 沒通過時，後端一樣是空的。分配流量的方式見 [負載平衡](#/skill/load-balancing)。
+把 `port` 與 `targetPort` 寫反，或以為它們要相同，是接線 ③ 最常見的錯法。分配流量的方式見 [負載平衡](#/skill/load-balancing)。
 
 | `type` | 誰連得到 | 用途 |
 |---|---|---|
@@ -219,8 +256,6 @@ Service 只把流量送給 **ready** 的 Pod，所以 ② 接上了、但 Pod �
 | `LoadBalancer` | 外部 | 由雲端或 MetalLB 這類元件配一個外部 IP；地端沒有對應元件時會停在 pending |
 
 同一個 namespace 裡用 `booking-api` 就連得到；跨 namespace 要寫 `booking-api.booking`，完整名稱是 `booking-api.booking.svc.cluster.local`（`cluster.local` 是預設的叢集網域）。
-
-:::stop 讀到這裡可以先停：會寫 Deployment 與 Service、接好 selector、label 與 targetPort，並算出滾動更新期間的 Pod 數。後面的 Ingress、namespace 與套用後的確認，在要讓叢集外連進來時再回來讀。
 
 ## Ingress：把外部流量導到 Service
 
@@ -253,7 +288,7 @@ spec:
 - **`pathType: Prefix`** 以路徑的「段」比對：`/api` 符合 `/api` 與 `/api/v1`，不符合 `/apiv2`。`Exact` 要完全相同。
 - **`backend`** 只能指向**同一個 namespace** 的 Service。
 
-Ingress 這個 API（`networking.k8s.io/v1`）是正式版，但官方文件說明它已凍結，新功能加在 Gateway API。另外如 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 所述，社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API；這類資訊變動快，選型前查專案目前的維護狀態。
+Ingress 這個 API（`networking.k8s.io/v1`）是正式版，但官方文件說明它已凍結，新功能加在 Gateway API。社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API；這類資訊變動快，選型前查專案目前的維護狀態。
 
 Gateway API 把 Ingress 拆成兩層：`Gateway`（入口、監聽的 port 與 TLS，通常由平台團隊管理）與 `HTTPRoute`（路由規則，由服務的團隊管理）。對應上面那份 Ingress 的 HTTPRoute：
 
@@ -286,7 +321,7 @@ Deployment、Service、Ingress、Secret、ConfigMap 都屬於某個 namespace。
 - namespace 要先存在：`kubectl create namespace booking`，或寫成一份 `kind: Namespace` 的 manifest 一起套用。
 - 同一份 manifest 要部署到多個 namespace 或多個環境時，不要複製貼上改字，用 [Helm、Kustomize 與 GitOps](#/skill/k8s-helm-gitops) 的做法。
 
-## 套用與確認
+## apply 的行為與回退
 
 ```bash
 kubectl diff -f k8s/                       # 套用前先看會改到什麼
@@ -294,36 +329,9 @@ kubectl apply -f k8s/                      # 套用整個目錄；內容沒變�
 kubectl rollout status deployment/booking-api -n booking --timeout=120s
 ```
 
-`kubectl apply` 是宣告式的：檔案描述「應該長這樣」，同一份檔案套用幾次結果都一樣。要注意它不會刪東西：把某個檔案從目錄裡移除，叢集裡對應的物件還在。
+`kubectl apply` 是宣告式的：檔案描述「應該長這樣」，同一份檔案套用幾次結果都一樣。它不會刪東西：把某個檔案從目錄裡移除，叢集裡對應的物件還在。
 
-`rollout status` 會等到更新完成才結束；逾時或更新失敗時回傳非零的結束碼，所以 CI 的部署 job 用它判斷成敗（見 [GitLab CI/CD 實戰](#/skill/gitlab-cicd)）。接著逐條確認接線，輸出類似下面的格式：
-
-```bash
-# ④ Deployment 與 Pod：READY 的分子分母要相等
-$ kubectl get deployment,pods -n booking -l app=booking-api
-NAME                          READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/booking-api   3/3     3            3           2m
-
-NAME                               READY   STATUS    RESTARTS   AGE
-pod/booking-api-6b8f7c9d54-4xk2p   1/1     Running   0          2m
-pod/booking-api-6b8f7c9d54-9dw7m   1/1     Running   0          2m
-pod/booking-api-6b8f7c9d54-zq5tn   1/1     Running   0          2m
-
-# ② Service 選到誰：ENDPOINTS 要有 Pod 的 IP
-$ kubectl get endpointslices -n booking -l kubernetes.io/service-name=booking-api
-NAME                ADDRESSTYPE   PORTS   ENDPOINTS                             AGE
-booking-api-x7k2p   IPv4          8000    10.244.1.12,10.244.2.31,10.244.3.8   2m
-
-# ③ 不經過 Ingress，直接從本機連 Service
-$ kubectl port-forward -n booking service/booking-api 8080:80
-$ curl -i http://localhost:8080/healthz
-
-# ① Ingress：ADDRESS 有值，describe 看得到後端
-$ kubectl get ingress -n booking
-$ kubectl describe ingress booking-api -n booking
-```
-
-`kubectl describe` 最下面的 Events 是找原因的第一站；完整的排查順序見 [Kubernetes 排錯](#/skill/k8s-troubleshooting)。
+CI 的部署 job 用 `rollout status` 的結束碼判斷成敗（見 [GitLab CI/CD 實戰](#/skill/gitlab-cicd)）。`kubectl describe` 最下面的 Events 是找原因的第一站；完整的排查順序見 [Kubernetes 排錯](#/skill/k8s-troubleshooting)。
 
 新版出問題時回退：
 
@@ -333,21 +341,22 @@ kubectl rollout undo deployment/booking-api -n booking        # 回到上一版
 kubectl rollout undo deployment/booking-api -n booking --to-revision=4
 ```
 
-`rollout undo` 把 Deployment 的 template 換回舊的 ReplicaSet 的內容，再跑一次滾動更新。兩件事要記得：它只改了叢集，Git 裡的 manifest 還是壞的那一版，下一次 `apply` 會把問題帶回來，所以 undo 之後要接著把 manifest 改回去；它也不會還原資料庫的 schema 變更。
+`rollout undo` 把 Deployment 的 template 換回舊的 ReplicaSet 的內容，再跑一次滾動更新。
 
-## 常見錯誤與錯誤訊息
+- 它只改了叢集，Git 裡的 manifest 還是壞的那一版，下一次 `apply` 會把問題帶回來，undo 之後要接著把 manifest 改回去。
+- 它不會還原資料庫的 schema 變更。
+
+## 其他錯誤訊息
 
 訊息的確切文字依 kubectl 與 Kubernetes 版本而異，下面是類似的樣子：
 
 | 訊息或現象 | 原因 | 處理 |
 |---|---|---|
-| `The Deployment "booking-api" is invalid: spec.template.metadata.labels: Invalid value: …: selector does not match template labels` | 接線 ④：selector 與 template 的 label 不一致 | 兩邊改成一致 |
 | `spec.selector: Invalid value: …: field is immutable` | 想修改既有 Deployment 的 selector | selector 不能改；刪除後重建，或換一個名稱建新的 |
 | `no matches for kind "Ingress" in version "extensions/v1beta1"` | 用了已移除的舊 apiVersion（從舊文章複製來的範例） | 改成 `networking.k8s.io/v1`，並補上 `pathType` 與新的 `backend.service` 寫法 |
 | `error converting YAML to JSON: yaml: line 14: mapping values are not allowed in this context` | 縮排錯誤，或冒號後面少了空白 | 看訊息指出的行號與它的上一行 |
 | `namespaces "booking" not found` | namespace 還沒建立 | 先建立 namespace |
 | `unknown field "spec.template.spec.containers[0].imagePullpolicy"` | 欄位名稱拼錯（大小寫也算） | 用 `kubectl explain deployment.spec.template.spec.containers` 查正確的欄位名稱 |
-| 套用成功，Service 的 ENDPOINTS 是空的 | 接線 ②，或 Pod 沒有 ready，或不在同一個 namespace | `kubectl get pods --show-labels` 對照 Service 的 selector |
 | `rollout status` 一直停在 `Waiting for deployment … rollout to finish` | 新版 Pod 起不來或 readiness 不通過 | 看新 Pod 的狀態與 Events；必要時 `rollout undo` |
 | Ingress 的 `ADDRESS` 一直是空的 | 沒有 controller 處理這個 class | 檢查 `ingressClassName` 與叢集裡的 IngressClass |
 

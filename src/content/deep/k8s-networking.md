@@ -1,33 +1,27 @@
-## 從一個具體問題開始：搬上叢集的第一週
+## 搬上叢集的第一週，收到兩張單
 
-門診掛號的 `clinic-api` 照實作路線第 10 階段寫好的 manifest 搬上院內的 Kubernetes 叢集，放在 `clinic` namespace，旁邊有前端 `clinic-web` 與這個環境自己的 PostgreSQL `clinic-db`。上線第一週收到兩張單。
+門診掛號的 `clinic-api` 照實作路線第 10 階段的 manifest 搬上院內的 Kubernetes 叢集，放在 `clinic` namespace，旁邊有 `clinic-web` 與 PostgreSQL `clinic-db`。
 
-第一張是門診櫃台：掛號時查不到病患的基本資料。這段資料要即時查院內舊系統的 Informix（`his-db.example.org`，10.20.5.31，port 9088）。API 的 log 只有一行：
+第一張單是門診櫃台：掛號時查不到病患的基本資料。這段資料要查院內舊系統的 Informix，API 的 log 只有一行 `connect to 10.20.5.31:9088 failed: timed out after 10s`。防火牆丟掉的連線來自 10.20.30.11、10.20.30.12，是叢集的 worker 節點；舊系統只放行舊虛擬機的 10.20.8.15。
 
-```text
-2026-11-09 09:12:41 ERROR his: connect to 10.20.5.31:9088 failed: timed out after 10s
-```
-
-同一支程式在舊的虛擬機（10.20.8.15）上跑了好幾年都正常。網路組查了防火牆紀錄，看到一連串來自 10.20.30.11、10.20.30.12 的連線被丟掉。這兩個位址是叢集的 worker 節點，舊系統的防火牆只放行 10.20.8.15。
-
-第二張是資安稽核：稽核人員在別的 namespace 開了一個測試 Pod，直接連上了 `clinic-db` 的 5432：
+第二張單是資安稽核：別的 namespace 的測試 Pod 連上了 `clinic-db` 的 5432：
 
 ```bash
 $ kubectl run probe -n reports --rm -it --image=busybox:1.36 -- nc -vz -w 3 clinic-db.clinic 5432
 clinic-db.clinic (10.96.212.40:5432) open
 ```
 
-兩張單來自同一個網路模型：每個 Pod 有自己的 IP，叢集內預設全部互通；Pod 連出叢集時，來源位址多半被換成節點的 IP。這一課講這個模型怎麼運作、地端叢集要自己補哪些元件，以及怎麼用 NetworkPolicy 把「全部互通」收成白名單。Deployment、Service 與 selector 怎麼接線在 [Kubernetes 實作：把服務寫成 manifest](#/skill/k8s-manifests)，這裡不重複。
+原因是同一個網路模型：每個 Pod 有自己的 IP，叢集內預設全部互通；Pod 連出叢集時，來源多半被換成節點的 IP。
 
 ## Pod 網路：每個 Pod 一個 IP，預設全部互通
 
-Kubernetes 對網路只訂了幾條要求，實作交給網路外掛：
+Kubernetes 對網路只訂了幾條要求，實作交給網路外掛（CNI）：
 
 - 每個 Pod 有一個整個叢集內唯一的 IP，Pod 裡的容器共用它（所以同一個 Pod 的容器用 `localhost` 互連）。
 - 任何 Pod 可以直接連到任何節點上的任何 Pod，中間**不經過 NAT**：對方看到的來源位址就是你的 Pod IP。
 - 節點上的程式（例如 kubelet）連得到這個節點上的每個 Pod，探針就是這樣打進去的。
 
-Pod 的 IP 每次重建都會變，所以服務之間用下一節的 Service 互連，不直接寫 Pod IP。這個模型也代表「預設全部互通」：沒有任何設定時，`reports` namespace 的 Pod 連得到 `clinic` 的資料庫，稽核那張單就是這樣來的。
+沒有任何設定時，`reports` namespace 的 Pod 連得到 `clinic` 的資料庫，稽核那張單就是這樣來的。
 
 ```text
 節點 10.20.30.11（Pod 網段 10.244.1.0/24）      節點 10.20.30.12（Pod 網段 10.244.2.0/24）
@@ -37,7 +31,33 @@ Pod 的 IP 每次重建都會變，所以服務之間用下一節的 Service 互
 Pod 之間的連線不做 NAT：clinic-db 看到的來源就是 10.244.1.11 或 10.244.2.30
 ```
 
-### CNI：誰負責做這件事
+## Service：固定的名字與 ClusterIP，背後是 EndpointSlice 與 kube-proxy
+
+Pod 的 IP 每次重建都會變，服務之間用 Service 互連。`clinic-api` 連資料庫時寫 `clinic-db:5432`，這個名字對到一個 Service，它有固定的 ClusterIP（稽核輸出裡的 10.96.212.40）。這個 IP 是虛擬的，封包能送到 Pod 靠三個元件：
+
+1. **EndpointSlice controller**：依 Service 的 selector 找出 Pod，把它們的 IP、port 與是否 ready 寫進 EndpointSlice 物件。
+2. **kube-proxy**：在每個節點上監看 Service 與 EndpointSlice，把「連到 10.96.212.40:5432 的封包，改寫成某個 ready 的後端 Pod 的 IP 與 targetPort」寫成節點的封包轉送規則（目的位址轉換，DNAT）。
+3. **CNI**：把改寫後的封包送到那個 Pod 所在的節點。
+
+```bash
+$ kubectl get endpointslices -n clinic -l kubernetes.io/service-name=clinic-db
+NAME              ADDRESSTYPE   PORTS   ENDPOINTS     AGE
+clinic-db-7xk2p   IPv4          5432    10.244.2.12   9d
+```
+
+叢集的 DNS 替每個 Service 建一筆紀錄。同 namespace 寫 `clinic-db` 就好，跨 namespace 寫 `clinic-db.clinic`，完整名稱是 `clinic-db.clinic.svc.cluster.local`（`<service>.<namespace>.svc.cluster.local`）。
+
+## 叢集內連不到時先看什麼
+
+| 現象 | 代表 |
+|---|---|
+| `kubectl get endpointslices` 的 ENDPOINTS 是空的 | Service 的 selector 選不到 Pod，或 Pod 沒有 ready |
+| 用戶端逾時（timed out） | 封包被丟掉：NetworkPolicy 或防火牆 |
+| 連線被拒絕（connection refused） | 封包到了，但那個 port 上沒有程式 |
+
+:::stop 停靠點 1：叢集內的連線。交付一份紀錄：從另一個 Pod 用 `<svc>.<ns>.svc.cluster.local` 連到 api，附上 `kubectl get endpointslices` 列出的 Pod 位址；再把 selector 故意改錯一次，記下 ENDPOINTS 變空與連線失敗的樣子。做到這裡，叢集內連不到的問題就能自己查。後面是 CNI、Service 的類型與 DNS 細節、從院內連進叢集與 NetworkPolicy，在要建叢集或收緊叢集內的連線時再回來讀。
+
+## CNI：誰負責讓 Pod 互通
 
 把 Pod 接上網路、分配 IP、讓不同節點上的 Pod 互通的是 CNI 外掛（Container Network Interface）。kubeadm 這類工具不會替你裝，發行版則各有預設（例如 RKE2 預設是 Canal，也就是 Flannel 加上 Calico 的政策引擎）。常見的三個：
 
@@ -51,23 +71,19 @@ Pod 之間的連線不做 NAT：clinic-db 看到的來源就是 10.244.1.11 或 
 
 建叢集前還要決定兩段位址：Pod 網段（例如 10.244.0.0/16）與 Service 網段（kubeadm 預設 10.96.0.0/12）。這兩段不能和院內任何既有網段重疊，否則 Pod 連到那段院內位址時，封包會被當成叢集內部流量而送不出去。這要先和網路組核對，見 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness)。
 
-## Service：穩定的位址，背後是 EndpointSlice 與 kube-proxy
+## Service 的類型、版本與叢集內的 DNS
 
-`clinic-api` 連資料庫時寫的是 `clinic-db:5432`。這個名字對到一個 Service，Service 有一個固定的 ClusterIP（上面稽核輸出裡的 10.96.212.40）。這個 IP 是虛擬的，不屬於任何 Pod 或節點，封包能送到 Pod 靠的是三個元件：
+| 項目 | 版本狀態 |
+|---|---|
+| EndpointSlice | Kubernetes 1.21 成為正式版 |
+| 舊的 Endpoints API | 1.33 被標為棄用，直接讀它的腳本會收到警告；排查時改用 `kubectl get endpointslices` |
+| kube-proxy 的 iptables 模式 | Linux 上的預設 |
+| kube-proxy 的 nftables 模式 | 1.33 成為正式版（需要較新的核心） |
+| kube-proxy 的 IPVS 模式 | 1.35 被標為棄用 |
 
-1. **EndpointSlice controller**：依 Service 的 selector 找出 Pod，把它們的 IP、port 與是否 ready 寫進 EndpointSlice 物件。
-2. **kube-proxy**：在每個節點上監看 Service 與 EndpointSlice，把「連到 10.96.212.40:5432 的封包，改寫成某個 ready 的後端 Pod 的 IP 與 targetPort」寫成節點的封包轉送規則（目的位址轉換，DNAT）。
-3. **CNI**：把改寫後的封包送到那個 Pod 所在的節點。
+Cilium 這類 CNI 也可以完全取代 kube-proxy。叢集用哪一種是建置時的決定，應用程式這一側看不出差別。
 
-```bash
-$ kubectl get endpointslices -n clinic -l kubernetes.io/service-name=clinic-db
-NAME              ADDRESSTYPE   PORTS   ENDPOINTS     AGE
-clinic-db-7xk2p   IPv4          5432    10.244.2.12   9d
-```
-
-版本相關的幾件事：EndpointSlice 在 Kubernetes 1.21 成為正式版；舊的 Endpoints API 在 1.33 被標為棄用，直接讀它的腳本會收到警告，排查時改用 `kubectl get endpointslices`。kube-proxy 在 Linux 上的預設模式是 iptables；nftables 模式在 1.33 成為正式版（需要較新的核心），IPVS 模式在 1.35 被標為棄用。Cilium 這類 CNI 也可以完全取代 kube-proxy。叢集用哪一種是建置時的決定，應用程式這一側看不出差別。
-
-這個轉換順序有一個直接的後果：NetworkPolicy 比對的是 Pod（label 與容器的 port），不是 Service。規則裡沒有「允許連到 Service X」這種寫法，port 也要寫容器實際監聽的 port。
+kube-proxy 先改寫封包，所以 NetworkPolicy 比對的是 Pod（label 與容器的 port），不是 Service。規則裡沒有「允許連到 Service X」這種寫法，port 也要寫容器實際監聽的 port。
 
 ### 四種類型
 
@@ -82,18 +98,11 @@ clinic-db-7xk2p   IPv4          5432    10.244.2.12   9d
 
 ### 叢集內的 DNS
 
-叢集的 DNS（多半是 CoreDNS，跑在 `kube-system`，前面有一個叫 `kube-dns` 的 Service）替每個 Service 建一筆紀錄，完整名稱是：
+叢集的 DNS 多半是 CoreDNS，跑在 `kube-system`，前面有一個叫 `kube-dns` 的 Service。`cluster.local` 是預設的叢集網域，可以在建叢集時改。
 
-```text
-<service>.<namespace>.svc.cluster.local
-clinic-db.clinic.svc.cluster.local      # cluster.local 是預設的叢集網域，可以在建叢集時改
-```
+Pod 的 `/etc/resolv.conf` 由 kubelet 產生，搜尋清單裡有自己的 namespace。預設的 `ndots:5` 會讓 `his-db.example.org` 這種點數少於 5 的外部名稱先依序套上搜尋清單查一輪，每次解析多出幾次查詢；在名稱最後加一個點（`his-db.example.org.`）或調整 Pod 的 `dnsConfig` 可以避開。
 
-Pod 的 `/etc/resolv.conf` 由 kubelet 產生，搜尋清單裡有自己的 namespace，所以同 namespace 寫 `clinic-db` 就好，跨 namespace 寫 `clinic-db.clinic`。預設的 `ndots:5` 會讓 `his-db.example.org` 這種點數少於 5 的外部名稱先依序套上搜尋清單查一輪，每次解析多出幾次查詢；在名稱最後加一個點（`his-db.example.org.`）或調整 Pod 的 `dnsConfig` 可以避開。
-
-DNS 與下一節的 NetworkPolicy 直接相關：每個用名稱連線的 Pod，第一步都是連到 `kube-system` 的 DNS Pod 的 UDP 53（回應太大時改用 TCP 53）。
-
-:::stop 停靠點 1：叢集內的連線。交付一份紀錄：從另一個 Pod 用 `<svc>.<ns>.svc.cluster.local` 連到 api，附上 `kubectl get endpointslices` 列出的 Pod 位址；再把 selector 故意改錯一次，記下 ENDPOINTS 變空與連線失敗的樣子。做到這裡，叢集內連不到的問題就能自己查。
+每個用名稱連線的 Pod，第一步都是連到 `kube-system` 的 DNS Pod 的 UDP 53（回應太大時改用 TCP 53），寫 NetworkPolicy 時要放行。
 
 ## 從院內連進叢集：地端沒有雲端的負載平衡器
 
@@ -429,13 +438,24 @@ check("api", "informix", 9088, step4)
 check("api", "informix", 9088, step4 + [API_TO_HIS])
 ```
 
-幾個要看的地方：② 的 `job → db` 是「出」放行、「進」擋下，`reports` 沒有任何 policy，擋下它的是 `db` 這一端的 ingress。③ 的 api 連得到 db 的 IP，但實際的程式要先查 DNS，那一行是擋下，所以使用者看到的是名稱解析失敗。⑤ 的除錯 Pod 在 AND 寫法下被擋、在 OR 寫法下放行。⑥ 只代表叢集這一側放行了，封包出了叢集還要過舊系統的防火牆，那是下一節的事。
+幾個要看的地方：
+
+- ② 的 `job → db` 是「出」放行、「進」擋下：`reports` 沒有任何 policy，擋下它的是 `db` 這一端的 ingress。
+- ③ 的 api 連得到 db 的 IP，但實際的程式要先查 DNS，那一行是擋下，使用者看到的是名稱解析失敗。
+- ⑤ 的除錯 Pod 在 AND 寫法下被擋、在 OR 寫法下放行。
+- ⑥ 只代表叢集這一側放行了，封包出了叢集還要過舊系統的防火牆。
 
 :::stop 停靠點 2：叢集的邊界。交付一組 NetworkPolicy（default deny、放行 DNS、放行 api 到 db）與三條連線的結果：api 到 db 通、web 到 db 逾時、名稱解析正常；再拿掉 DNS 那一條，記下程式印出的錯誤。院內要連進叢集時，另外寫下 `EXTERNAL-IP` 由哪個元件配發。
 
 ## 連到叢集外：舊系統看到的是節點的 IP
 
 ### 為什麼舊系統的防火牆擋掉了 API
+
+第一張單的 log 原文：
+
+```text
+2026-11-09 09:12:41 ERROR his: connect to 10.20.5.31:9088 failed: timed out after 10s
+```
 
 前面說 Pod 之間不做 NAT。Pod 連到叢集外的位址時就不一樣了：Pod 網段是叢集自己的位址，院內的路由器不知道 10.244.1.11 在哪裡，回應送不回來。所以多數 CNI 預設在封包離開節點時做來源位址轉換（SNAT，也叫 masquerade），把來源改成節點的 IP：
 

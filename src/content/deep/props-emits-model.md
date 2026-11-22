@@ -1,4 +1,4 @@
-## 從一個具體問題開始：點了日期，清單沒有重抓
+## 點了日期，清單沒有重抓
 
 掛號頁 `AppointmentPage` 持有 `selectedDate`，往下傳給日期選擇元件 `DatePicker`，自己用 `watch(selectedDate, …)` 抓當天的預約。請 AI 寫 `DatePicker`，前後拿到三個版本：
 
@@ -10,8 +10,6 @@
 
 ## 運作原理：資料往下、事件往上
 
-### 單向資料流
-
 ```
 AppointmentPage    selectedDate = '2026-11-20'（擁有者）
    │ :date="selectedDate"              ▲ @update:date="(v) => (selectedDate = v)"
@@ -21,20 +19,7 @@ DatePicker         props.date（唯讀）   emit('update:date', '2026-11-21')
 
 一份資料只有一個擁有者。擁有者把值用 props 傳下去，子元件要改就發出事件，擁有者收到後決定要不要改、改完要不要打 API。父元件的值一改，Vue 重新渲染父元件，新的 props 傳給子元件，子元件跟著更新。
 
-### props 為什麼改不動
-
-`<script setup>` 裡 `defineProps` 回傳的物件，在開發模式是一個淺層唯讀的 Proxy：
-
-| 寫法 | 結果（Vue 3.5） |
-|---|---|
-| `props.date = '2026-11-21'` | 開發模式警告 `Set operation on key "date" failed: target is readonly.`，值不變 |
-| 解構後指定 `date = …`（`const { date } = defineProps(…)`） | 編譯錯誤 `Cannot assign to destructured props as they are readonly.` |
-| 模板裡 `<input v-model="date">`（`date` 是 prop） | 編譯錯誤 `v-model cannot be used on a prop, because local prop bindings are not writable.` |
-| `props.item.status = 'cancelled'` | 沒有警告，父元件的物件被改了 |
-
-最後一列最危險。唯讀只管第一層，物件裡面的屬性仍然是父元件那一份 reactive 物件，改了會觸發父元件與所有用到它的元件更新。lint 規則 `vue/no-mutating-props` 預設也會報這一種，訊息是 `Unexpected mutation of "item" prop.`。
-
-### 事件
+`defineProps` 回傳的物件在開發模式是淺層唯讀的 Proxy，所以版本 1 改不動、版本 3 改得動。事件用 `defineEmits` 宣告，父元件用 `@confirm="onConfirm"` 接：
 
 ```ts
 const emit = defineEmits<{
@@ -45,11 +30,7 @@ const emit = defineEmits<{
 emit('confirm', '2026-11-21')
 ```
 
-- 父元件用 `@confirm="onConfirm"` 接。在 script 裡發 camelCase 的事件（`emit('checkIn', id)`），模板裡可以用 `@check-in` 接，Vue 會自動轉換。
-- 元件事件不會冒泡，只送到直接的父元件。隔好幾層要溝通，用 [provide／inject](#/skill/slots-provide) 或 [Pinia](#/skill/pinia)。
-- 沒宣告就 `emit`，開發模式警告 `Component emitted event "confirm" but it is neither declared in the emits option nor as an "onConfirm" prop.`。宣告過的事件也不會被當成透傳屬性加到根元素上。
-
-### 元件上的 v-model
+元件上的 `v-model` 是「一個 prop 加一個事件」的簡寫：
 
 ```vue
 <DatePicker v-model:date="selectedDate" />
@@ -58,39 +39,9 @@ emit('confirm', '2026-11-21')
 <DatePicker :date="selectedDate" @update:date="(v) => (selectedDate = v)" />
 ```
 
-不寫名稱的 `v-model="x"` 用 `modelValue` 這個 prop 與 `update:modelValue` 事件。一個元件可以有好幾個：`v-model:date`、`v-model:dept`。
+不寫名稱的 `v-model="x"` 用 `modelValue` 與 `update:modelValue`。子元件這一側，Vue 3.4 起用 `defineModel('date')`：它宣告 prop 與事件，回傳一個 ref，寫入 `.value` 就發出 `update:date`。
 
-子元件這一側，Vue 3.4 起用 `defineModel`：
-
-```ts
-const date = defineModel<string>('date', { required: true })
-```
-
-編譯器把這一行換成三樣東西：prop `date`、prop `dateModifiers`（接 `v-model:date.trim` 這類修飾符）、事件 `update:date`，再回傳一個自訂的 ref。這個 ref 的行為：
-
-| 情況 | 讀 `date.value` | 寫 `date.value = x` |
-|---|---|---|
-| 父元件寫 `v-model:date` | 父元件傳的值 | 發出 `update:date`，等父元件更新 prop 後 `date.value` 才變成 `x` |
-| 父元件只寫 `:date`，沒接事件 | 父元件傳的值 | 改子元件自己的本地值並發出事件，父元件的值不變，兩邊從此不一致 |
-| 父元件什麼都沒傳 | 預設值 | 當成子元件自己的狀態 |
-
-第一列的時間差會造成一個不容易看出來的錯：`date.value = d` 之後立刻 `emit('confirm', date.value)`，送出去的是舊日期。要送新值就用參數 `d`。
-
-### props 解構與預設值（Vue 3.5）
-
-```ts
-// Vue 3.5 起：解構保持響應式，預設值直接寫在解構裡
-const { days, closedDays = [] } = defineProps<{ days: string[]; closedDays?: string[] }>()
-
-// Vue 3.4 以前：用 withDefaults，物件與陣列的預設值要寫成函式
-const props = withDefaults(defineProps<{ days: string[]; closedDays?: string[] }>(), {
-  closedDays: () => [],
-})
-```
-
-3.5 的編譯器把同一個 `<script setup>` 裡對 `closedDays` 的讀取改寫成 `props.closedDays`，所以模板與 computed 會跟著更新；陣列預設值也會自動包成工廠函式。要把解構出來的 prop 交給 `watch`，寫成 getter：`watch(() => closedDays, …)`，直接傳 `closedDays` 是編譯錯誤 `"closedDays" is a destructured prop and should not be passed directly to watch(). Pass a getter () => closedDays instead.`。
-
-## 實際程式：日期選擇元件
+## 日期選擇元件，與兩個最常見的錯誤
 
 ```vue
 <!-- DatePicker.vue -->
@@ -146,7 +97,61 @@ function onConfirm(d: string) {
 </template>
 ```
 
-需要「先改草稿、按確定才生效」的元件（例如編輯病患資料的 Dialog），子元件複製一份本地狀態來編輯，按儲存時把整份交給父元件：
+| 訊息或現象 | 原因 | 修法 |
+|---|---|---|
+| `[Vue warn] Set operation on key "date" failed: target is readonly.` | 在 script 裡指定 prop | 改成 `emit('update:date', v)` 或 `defineModel` |
+| 子元件的值變了，父元件沒變 | 父元件寫 `:date` 而不是 `v-model:date` | 補上 `v-model`，或接 `@update:date` |
+
+:::stop 讀到這裡可以先停：會用 props 傳下、emit 傳上，用 `defineModel` 做元件的 `v-model`。後面是唯讀的邊界、`defineModel` 的時間差、props 解構、草稿模式、React 對照與其餘錯誤訊息，Console 出現 props 警告或讀 React 的受控元件時再回來讀。
+
+## props 的唯讀只管第一層
+
+| 寫法 | 結果（Vue 3.5） |
+|---|---|
+| `props.date = '2026-11-21'` | 開發模式警告 `Set operation on key "date" failed: target is readonly.`，值不變 |
+| 解構後指定 `date = …`（`const { date } = defineProps(…)`） | 編譯錯誤 `Cannot assign to destructured props as they are readonly.` |
+| 模板裡 `<input v-model="date">`（`date` 是 prop） | 編譯錯誤 `v-model cannot be used on a prop, because local prop bindings are not writable.` |
+| `props.item.status = 'cancelled'` | 沒有警告，父元件的物件被改了 |
+
+最後一列最危險。唯讀只管第一層，物件裡面的屬性仍然是父元件那一份 reactive 物件，改了會觸發父元件與所有用到它的元件更新。lint 規則 `vue/no-mutating-props` 預設也會報這一種，訊息是 `Unexpected mutation of "item" prop.`。
+
+## 事件的命名、冒泡與宣告
+
+- 父元件用 `@confirm="onConfirm"` 接。在 script 裡發 camelCase 的事件（`emit('checkIn', id)`），模板裡可以用 `@check-in` 接，Vue 會自動轉換。
+- 元件事件不會冒泡，只送到直接的父元件。隔好幾層要溝通，用 [provide／inject](#/skill/slots-provide) 或 [Pinia](#/skill/pinia)。
+- 沒宣告就 `emit`，開發模式警告 `Component emitted event "confirm" but it is neither declared in the emits option nor as an "onConfirm" prop.`。宣告過的事件也不會被當成透傳屬性加到根元素上。
+
+## defineModel 編譯成什麼，寫入後何時讀得到新值
+
+`const date = defineModel<string>('date', { required: true })`
+
+編譯器把這一行換成三樣東西：prop `date`、prop `dateModifiers`（接 `v-model:date.trim` 這類修飾符）、事件 `update:date`，再回傳一個自訂的 ref。這個 ref 的行為：
+
+| 情況 | 讀 `date.value` | 寫 `date.value = x` |
+|---|---|---|
+| 父元件寫 `v-model:date` | 父元件傳的值 | 發出 `update:date`，等父元件更新 prop 後 `date.value` 才變成 `x` |
+| 父元件只寫 `:date`，沒接事件 | 父元件傳的值 | 改子元件自己的本地值並發出事件，父元件的值不變，兩邊從此不一致 |
+| 父元件什麼都沒傳 | 預設值 | 當成子元件自己的狀態 |
+
+第一列的時間差會造成一個不容易看出來的錯：`date.value = d` 之後立刻 `emit('confirm', date.value)`，送出去的是舊日期。要送新值就用參數 `d`。
+
+### props 解構與預設值（Vue 3.5）
+
+```ts
+// Vue 3.5 起：解構保持響應式，預設值直接寫在解構裡
+const { days, closedDays = [] } = defineProps<{ days: string[]; closedDays?: string[] }>()
+
+// Vue 3.4 以前：用 withDefaults，物件與陣列的預設值要寫成函式
+const props = withDefaults(defineProps<{ days: string[]; closedDays?: string[] }>(), {
+  closedDays: () => [],
+})
+```
+
+3.5 的編譯器把同一個 `<script setup>` 裡對 `closedDays` 的讀取改寫成 `props.closedDays`，所以模板與 computed 會跟著更新；陣列預設值也會自動包成工廠函式。要把解構出來的 prop 交給 `watch`，寫成 getter：`watch(() => closedDays, …)`，直接傳 `closedDays` 是編譯錯誤 `"closedDays" is a destructured prop and should not be passed directly to watch(). Pass a getter () => closedDays instead.`。
+
+## 先改草稿、按確定才生效的元件
+
+子元件複製一份本地狀態來編輯（例如編輯病患資料的 Dialog），按儲存時把整份交給父元件：
 
 ```ts
 // PatientEditDialog.vue（script setup 節錄）
@@ -160,8 +165,6 @@ function save() { emit('save', { ...draft.value }) }
 ```
 
 巢狀物件要深拷貝；`structuredClone(props.patient)` 遇到 reactive Proxy 會丟出 `DataCloneError`（`could not be cloned`），先用 `toRaw()` 取出原始物件再複製。
-
-:::stop 讀到這裡可以先停：會用 props 傳下、emit 傳上，用 `defineModel` 做元件的 `v-model`。後面的 React 對照與錯誤訊息表，在讀 React 的受控元件或 Console 出現 props 警告時再回來讀。
 
 ## React 對照
 
@@ -194,15 +197,13 @@ export function DatePicker({ date, onDateChange, days, closedDays = [], onConfir
 
 React 沒有雙向綁定的語法，「值加改值的函式」是 React 版的 `v-model`。兩邊都遵守同一條規則：子元件不改收到的資料。
 
-## 常見錯誤與錯誤訊息
+## 其餘錯誤訊息
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-| `[Vue warn] Set operation on key "date" failed: target is readonly.` | 在 script 裡指定 prop | 改成 `emit('update:date', v)` 或 `defineModel` |
 | 編譯錯誤 `v-model cannot be used on a prop, because local prop bindings are not writable.` | 模板裡對 prop 用 `v-model` | 改用 `defineModel`，或綁本地 ref |
 | 編譯錯誤 `Cannot assign to destructured props as they are readonly.` | 對 3.5 解構出來的 prop 指定值 | 同上 |
 | 沒有訊息，父元件的資料被改了 | 改了物件 prop 的內部屬性 | 複製一份本地狀態，或發事件；開 `vue/no-mutating-props` |
-| 子元件的值變了，父元件沒變 | 父元件寫 `:date` 而不是 `v-model:date` | 補上 `v-model`，或接 `@update:date` |
 | `confirm` 送出的值慢一步 | 寫入 `defineModel` 的 ref 後立刻讀 `.value` | 用參數裡的新值 |
 | `[Vue warn]: Missing required prop: "days"` | 父元件沒傳必填 prop | 補上；跑 `npx vue-tsc --noEmit` 提早抓 |
 | `Component emitted event "confirm" but it is neither declared in the emits option nor as an "onConfirm" prop.` | `emit` 前沒有 `defineEmits` | 補宣告 |

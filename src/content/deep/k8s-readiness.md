@@ -1,8 +1,6 @@
-## 從一個具體問題開始：「上了 Kubernetes 就能零停機、自動擴展」
+## 「上了 Kubernetes 就能零停機、自動擴展」
 
-一家醫院的資訊部規劃明年導入 Kubernetes。廠商簡報說：上了 K8s，系統就能零停機更新、流量大時自動擴展、主機壞了自動搬家。
-
-先看一個準備搬上去的系統現在長什麼樣：
+廠商簡報說：上了 K8s，系統就能零停機更新、流量大時自動擴展、主機壞了自動搬家。準備搬上去的系統現在長這樣：
 
 - 一台 VM 上跑 Python 應用程式，用 systemd 啟動。
 - 資料庫連線密碼寫在 `/srv/app/config.ini`。
@@ -10,9 +8,13 @@
 - 登入狀態存在應用程式的記憶體裡。
 - 更新方式是 SSH 進去 `git pull`、重啟服務。
 
-把這個系統原封不動放進 Kubernetes，三個承諾一個也不會實現：開兩個副本時，使用者的登入狀態只存在其中一個副本，下一個請求被分到另一個副本就變成未登入；上傳的檔案只在某一個容器的檔案系統裡，容器重啟就消失；沒有健康檢查，更新時流量會被送到還沒啟動完成的新版本。
+原封不動放進 Kubernetes，三個承諾一個也不會實現：
 
-Kubernetes 提供的是**機制**：維持副本數、滾動更新、依健康狀態轉送流量、在節點故障時重新排程。這些機制要發揮作用，應用程式本身要先符合一些條件，叢集周邊也要有一些元件。這一課依序講：基本物件怎麼串成一個系統、更新時發生什麼事、地端自建要自己補什麼、跟雲端代管差在哪，以及導入前團隊要先具備的能力。
+- 開兩個副本時，登入狀態只存在其中一個，下一個請求被分到另一個副本就變成未登入。
+- 上傳的檔案只在某一個容器的檔案系統裡，容器重啟就消失。
+- 沒有健康檢查，更新時流量會被送到還沒啟動完成的新版本。
+
+Kubernetes 提供的是**機制**：維持副本數、滾動更新、依健康狀態轉送流量、節點故障時重新排程。應用程式要先符合條件，機制才有作用。
 
 ## 一個 web + DB 系統在 Kubernetes 上長怎樣
 
@@ -49,15 +51,8 @@ Kubernetes 提供的是**機制**：維持副本數、滾動更新、依健康�
 | Deployment | 管理 ReplicaSet：換版時建新的 ReplicaSet、逐步縮舊的 | 更新版本、回退版本都透過它 |
 | Service | 給一組 Pod 一個穩定的 DNS 名稱與虛擬 IP，依 label 選取 Pod | `booking-web`、`booking-db` |
 | Ingress | 依網域、路徑把外部 HTTP(S) 流量導到 Service；本身只是規則 | `booking.example.org` → `booking-web` |
-| ConfigMap | 非機密的設定，以環境變數或檔案注入 Pod | 時區、功能開關、外部 API 位址 |
-| Secret | 機密設定，以環境變數或檔案注入 | 資料庫密碼、API 金鑰 |
-| PersistentVolume（PV） | 一塊實際的儲存空間 | 資料庫的資料目錄 |
-| PersistentVolumeClaim（PVC） | Pod 對儲存的「申請單」：要多大、什麼存取模式 | 「我要 100 Gi、單節點讀寫」 |
-| StorageClass | 描述某一類儲存，以及如何**動態建立** PV | 對應到 SAN、分散式儲存或雲端磁碟 |
-| Namespace | 把物件分組，配合權限與資源配額 | 每個系統一個 namespace |
-| StatefulSet | 給每個 Pod 固定的名稱與各自的儲存 | 資料庫這類有狀態服務 |
 
-Pod 是**用完即丟**的：重新排程或更新時，舊的 Pod 被刪除、新的 Pod 換一個 IP 出現。所以其他元件永遠透過 Service 的名稱（例如 `booking-db`）連線，不記 Pod 的 IP；Pod 的檔案系統也只是暫存，需要保留的資料要放在 PV 或外部儲存。
+Pod 是**用完即丟**的：重新排程或更新時，舊的 Pod 被刪除、新的 Pod 換一個 IP 出現。其他元件透過 Service 的名稱（例如 `booking-db`）連線，不記 Pod 的 IP；需要保留的資料放在 PV 或外部儲存。
 
 ### 對應的 YAML
 
@@ -125,6 +120,42 @@ spec:
               service: { name: booking-web, port: { number: 80 } }
 ```
 
+## 滾動更新靠 readiness probe
+
+把 image tag 從 `3f9c2a1b` 改成 `8d1e7f40` 後，Deployment 建立新的 ReplicaSet，逐步把 Pod 換成新版本（3 個副本時預設最多多開 1 個、最多少 0 個）：
+
+| 時間 | 舊版 Pod | 新版 Pod | Service 轉送給 |
+|---|---|---|---|
+| t0 | 3 個 ready | 0 | 舊 ×3 |
+| t1 | 3 個 ready | 1 個啟動中（readiness 未通過） | 舊 ×3 |
+| t2 | 3 個 ready | 1 個 ready | 舊 ×3 + 新 ×1 |
+| t3 | 停掉 1 個 → 2 個 | 再建 1 個 | 舊 ×2 + 新 ×1 |
+| … | … | … | … |
+| tn | 0 | 3 個 ready | 新 ×3 |
+
+新 Pod 的 **readiness** 通過之前，Service 不會把流量送給它，Deployment 也不會繼續砍舊的 Pod。沒有設定 readiness probe 時，容器一啟動就被視為 ready，應用程式還沒連上資料庫流量就進來了。**liveness** 失敗則是重啟容器，只檢查程序是否卡死，不檢查資料庫。
+
+最先遇到的兩種狀態：
+
+| `kubectl get pod` 的狀態 | 意思 | 從哪裡查 |
+|---|---|---|
+| `Running` 但 `READY 0/1` | readiness probe 沒通過，不收流量 | `kubectl describe pod` 看 probe 失敗訊息 |
+| `CrashLoopBackOff` | 容器啟動後一直結束，Kubernetes 越等越久再重試 | `kubectl logs <pod> --previous` 看上一次的輸出；常見原因是設定或機密缺漏 |
+
+:::stop 讀到這裡可以先停：會畫出 web 加 DB 系統用到的物件，寫出帶 probe 的 Deployment，說出 readiness 在滾動更新時做什麼。後面是設定與儲存類物件、Secret、優雅關閉與三種 probe、地端自建要補的元件、雲端代管的差別、導入前的能力清單與其他錯誤狀態，在要決定叢集放哪裡、評估要不要導入時再回來讀。
+
+## 設定、儲存、分組的物件與資料庫放哪裡
+
+| 物件 | 作用 | 在這個系統裡 |
+|---|---|---|
+| ConfigMap | 非機密的設定，以環境變數或檔案注入 Pod | 時區、功能開關、外部 API 位址 |
+| Secret | 機密設定，以環境變數或檔案注入 | 資料庫密碼、API 金鑰 |
+| PersistentVolume（PV） | 一塊實際的儲存空間 | 資料庫的資料目錄 |
+| PersistentVolumeClaim（PVC） | Pod 對儲存的「申請單」：要多大、什麼存取模式 | 「我要 100 Gi、單節點讀寫」 |
+| StorageClass | 描述某一類儲存，以及如何**動態建立** PV | 對應到 SAN、分散式儲存或雲端磁碟 |
+| Namespace | 把物件分組，配合權限與資源配額 | 每個系統一個 namespace |
+| StatefulSet | 給每個 Pod 固定的名稱與各自的儲存 | 資料庫這類有狀態服務 |
+
 `resources` 的估法見 [硬體資源與容量規劃](#/skill/capacity-planning)。
 
 ### Secret 不是加密
@@ -139,22 +170,13 @@ Secret 的值在 API 裡只是 base64 **編碼**，任何能讀取這個 namespa
 
 資料庫可以用 StatefulSet 或 operator（例如 PostgreSQL 的 CloudNativePG）跑在叢集裡，但備份、還原、升級、儲存效能都要團隊自己能掌握。導入初期常見的做法是**應用程式先上 K8s、資料庫維持在既有的 VM 或代管服務**，等團隊熟悉叢集的儲存與維運後再評估。
 
-## 滾動更新與 probe
+## 滾動更新的細節：優雅關閉、三種 probe、回退
 
-把 image tag 從 `3f9c2a1b` 改成 `8d1e7f40` 後，Deployment 建立新的 ReplicaSet，逐步把 Pod 換成新版本。預設的策略是 `RollingUpdate`，`maxSurge` 與 `maxUnavailable` 都是 25%（以 3 個副本計算，最多多開 1 個、最多少 0 個；25% 的 3 是 0.75，maxSurge 無條件進位成 1，maxUnavailable 無條件捨去成 0）。
+預設的策略是 `RollingUpdate`，`maxSurge` 與 `maxUnavailable` 都是 25%。以 3 個副本計算，25% 的 3 是 0.75：maxSurge 無條件進位成 1，maxUnavailable 無條件捨去成 0。
 
-| 時間 | 舊版 Pod | 新版 Pod | Service 轉送給 |
-|---|---|---|---|
-| t0 | 3 個 ready | 0 | 舊 ×3 |
-| t1 | 3 個 ready | 1 個啟動中（readiness 未通過） | 舊 ×3 |
-| t2 | 3 個 ready | 1 個 ready | 舊 ×3 + 新 ×1 |
-| t3 | 停掉 1 個 → 2 個 | 再建 1 個 | 舊 ×2 + 新 ×1 |
-| … | … | … | … |
-| tn | 0 | 3 個 ready | 新 ×3 |
+**優雅關閉**：舊 Pod 被刪除時，Kubernetes 先送 SIGTERM，等 `terminationGracePeriodSeconds`（預設 30 秒）後才送 SIGKILL。應用程式要在收到 SIGTERM 後停止接新請求、把手上的請求做完再結束。
 
-這個過程由 **readiness probe** 控制：新 Pod 的 readiness 通過之前，Service 不會把流量送給它，Deployment 也不會繼續砍舊的 Pod。沒有設定 readiness probe 時，容器一啟動就被視為 ready：應用程式還在載入、還沒連上資料庫，流量就進來了，使用者看到錯誤。所謂「零停機」，有一半是靠這個 probe 做到的。
-
-另一半是**優雅關閉**：舊 Pod 被刪除時，Kubernetes 先送 SIGTERM，等 `terminationGracePeriodSeconds`（預設 30 秒）後才送 SIGKILL。應用程式要在收到 SIGTERM 後停止接新請求、把手上的請求做完再結束。從 Service 移除 Pod 與送出 SIGTERM 是同時開始的，可能有少量請求在這段時間仍被送到要關閉的 Pod，常見做法是加一個短暫的 `preStop` 等待。
+從 Service 移除 Pod 與送出 SIGTERM 是同時開始的，可能有少量請求在這段時間仍被送到要關閉的 Pod，常見做法是加一個短暫的 `preStop` 等待。
 
 三種 probe 的差別：
 
@@ -177,8 +199,6 @@ deployment.apps/booking-web rolled back
 ```
 
 新版的 readiness 一直不通過時，滾動更新會停住，舊版 Pod 繼續服務。資料庫 schema 變更要讓新舊版本能同時運作，見 [部署策略與資料庫遷移](#/skill/cd-strategies)。
-
-:::stop 讀到這裡可以先停：會畫出 web 加 DB 系統用到的物件，說出 readiness 與 liveness 在滾動更新時各做什麼。後面的地端自建、雲端代管與團隊要先具備的能力，在要決定叢集放哪裡、評估要不要導入時再回來讀。
 
 ## 地端自建：要自己補的東西
 
@@ -219,9 +239,9 @@ Failed to pull image "registry.example.org/booking/web:3f9c2a1b": ... tls: faile
 
 拉 image 的是**節點上的容器執行環境**（例如 containerd），不是 Pod。內部 CA 的根憑證要裝在每一個節點上，新加入的節點也要。憑證的細節見 [HTTPS 憑證](#/skill/https-certificates)。
 
-**Ingress controller 的選擇**：Ingress 只是規則，實際處理流量的是 controller，選擇很多。要注意的是，Kubernetes 社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API（Kubernetes 的新一代流量路由 API，已正式發布 v1）。選型前查清楚專案的維護狀態，這類資訊變動很快。
+**Ingress controller 的選擇**：Ingress 只是規則，實際處理流量的是 controller。Kubernetes 社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API（Kubernetes 的新一代流量路由 API，已正式發布 v1）。選型前查清楚專案的維護狀態，這類資訊變動很快。
 
-**升級是持續的工作**：Kubernetes 大約每年發布三個 minor 版本，每個版本約有 14 個月的修補支援。也就是說，叢集大約每年要升級一到兩次才不會落到不再支援的版本，而且只能一個 minor 一個 minor 升。這要排進年度維運計畫，導入專案結束後仍要持續做。
+**升級是持續的工作**：Kubernetes 大約每年發布三個 minor 版本，每個版本約有 14 個月的修補支援。叢集大約每年要升級一到兩次才不會落到不再支援的版本，而且只能一個 minor 一個 minor 升。這要排進年度維運計畫。
 
 ## 雲端代管（EKS、GKE、AKS）差在哪
 
@@ -239,7 +259,7 @@ Amazon EKS、Google GKE、Azure AKS 這類服務，替你運作控制平面，�
 
 ## 導入前，團隊與系統要先具備的能力
 
-Kubernetes 不會解決應用程式既有的問題，只會把它們放大。下面這份清單，每一項沒做到，搬上叢集後都會變成維運問題：
+下面每一項沒做到，搬上叢集後都會變成維運問題：
 
 | 能力 | 具體要做到 | 沒做到時在 K8s 上的後果 |
 |---|---|---|
@@ -262,15 +282,13 @@ Kubernetes 不會解決應用程式既有的問題，只會把它們放大。下
 3. 把第一個系統搬上叢集，資料庫先留在外面。
 4. 依經驗寫下內部的部署範本與規範，再逐步搬其他系統。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤狀態與訊息
 
 | `kubectl get pod` 的狀態 / 現象 | 意思 | 從哪裡查 |
 |---|---|---|
 | `Pending` | 排程不了：資源不夠、PVC 沒綁定、節點有 taint | `kubectl describe pod` 的 Events，例如 `0/3 nodes are available: 3 Insufficient memory.` |
 | `ImagePullBackOff` / `ErrImagePull` | 拉不到 image：名稱或 tag 錯、沒有 registry 登入資訊、節點不信任 registry 憑證 | `kubectl describe pod` 的 Events |
-| `CrashLoopBackOff` | 容器啟動後一直結束，Kubernetes 越等越久再重試 | `kubectl logs <pod> --previous` 看上一次的輸出；常見原因是設定或機密缺漏 |
 | `OOMKilled`（Exit Code 137） | 記憶體超過 limit | 監控記憶體曲線，區分用量不足還是洩漏 |
-| `Running` 但 `READY 0/1` | readiness probe 沒通過，不收流量 | `kubectl describe pod` 看 probe 失敗訊息 |
 | Service 連不到任何 Pod | Service 的 selector 和 Pod 的 label 不一致，或沒有 Pod ready | `kubectl get endpointslices -n <ns>` 看有沒有後端位址 |
 | PVC 一直 `Pending` | 沒有符合的 StorageClass，或沒有預設 StorageClass | Events 會出現 `no persistent volumes available for this claim and no storage class is set` |
 | Ingress 回 404 或 503 | 404：Host 或路徑沒對到規則；503：對到的 Service 沒有可用的 Pod | Ingress controller 的 log；排查方式見 [網路通不通](#/skill/network-troubleshooting) |

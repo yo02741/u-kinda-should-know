@@ -1,4 +1,4 @@
-## 從一個具體問題開始：名單少了人，報表多了錢
+## 名單少了人，報表多了錢：兩個不報錯的 SQL
 
 行銷要寄一封「台北以外地區限定」的優惠信，有人寫了這句：
 
@@ -6,28 +6,24 @@
 SELECT name, email FROM users WHERE city <> '台北';
 ```
 
-名單出來，寄出去。幾天後客服發現：註冊時沒填城市的使用者一封都沒收到。資料庫沒有報錯，`city` 是 NULL 的列就這樣安靜地被排除了，因為 `NULL <> '台北'` 的結果不是 true，而是 NULL。
+沒填城市的使用者一封都沒收到，資料庫也沒有報錯：`NULL <> '台北'` 的結果是 NULL，不是 true，這些列被排除了。
 
-同一週，另一份報表要算「平均每筆訂單買幾件」，寫成 `sum(qty) / count(DISTINCT order_id)`，結果是 `1`。實際是 7 件除以 6 筆，約 1.17。兩邊都是整數，SQL 做的是整數除法，小數直接捨去。
+同一週，另一份報表算「平均每筆訂單買幾件」，寫成 `sum(qty) / count(DISTINCT order_id)`，結果是 `1`。實際是 7 件除以 6 筆，約 1.17：兩邊都是整數，SQL 做整數除法，小數捨去（先轉型成 `numeric` 才有小數，見選讀的型別一章）。
 
-這兩件事都不會出現錯誤訊息。SQL 寫起來像英文，但它有自己的求值規則：子句的執行順序、NULL 的三值邏輯、聚合之後剩下什麼、型別怎麼運算。下面一項一項拆開。
+## 一句 SELECT 的邏輯執行順序
 
-## 運作原理：一句 SELECT 的邏輯執行順序
+書寫順序從 `SELECT` 開始，邏輯上的求值順序從 `FROM` 開始：
 
-SQL 的書寫順序是 `SELECT … FROM … WHERE … GROUP BY … HAVING … ORDER BY … LIMIT`，但**邏輯上**的求值順序是：
-
-| 步驟 | 子句 | 這一步做什麼 | 這一步看得到什麼 |
-|---|---|---|---|
-| 1 | `FROM` / `JOIN` | 把來源資料表配對成一張中間表 | 所有來源欄位 |
-| 2 | `WHERE` | 逐列過濾，只留條件為 **true** 的列 | 來源欄位（還沒有 SELECT 的別名、也還沒有聚合） |
-| 3 | `GROUP BY` | 把列分組，每組縮成一列 | 來源欄位 |
-| 4 | `HAVING` | 過濾**組** | 群組鍵、聚合函數 |
-| 5 | `SELECT` | 計算輸出欄位、取別名 | 群組鍵、聚合（有 GROUP BY 時） |
-| 6 | `DISTINCT` | 去除重複的輸出列 | 輸出欄位 |
-| 7 | `ORDER BY` | 排序 | 輸出欄位與別名（PostgreSQL 也允許來源欄位） |
-| 8 | `LIMIT` / `OFFSET` | 取其中一段 | 排好序的結果 |
-
-這是「結果要等同於照這個順序做」的定義，引擎實際上不一定照這個順序跑：規劃器可以先用索引過濾、把條件推進 JOIN 之前，只要結果一樣。但**哪個子句能用什麼名字**是照這個順序決定的。
+| 步驟 | 子句 | 這一步做什麼 |
+|---|---|---|
+| 1 | `FROM` / `JOIN` | 把來源資料表配對成一張中間表 |
+| 2 | `WHERE` | 逐列過濾，只留條件為 **true** 的列 |
+| 3 | `GROUP BY` | 把列分組，每組縮成一列 |
+| 4 | `HAVING` | 過濾組，可以用聚合 |
+| 5 | `SELECT` | 計算輸出欄位、取別名 |
+| 6 | `DISTINCT` | 去除重複的輸出列 |
+| 7 | `ORDER BY` | 排序，可以用別名 |
+| 8 | `LIMIT` / `OFFSET` | 取其中一段 |
 
 用範例資料庫走一遍「各城市未取消的訂單數與總額，只列至少 2 筆的」：
 
@@ -42,8 +38,6 @@ HAVING count(*) >= 2                      -- 4. 過濾組
 ORDER BY total DESC;                      -- 7. ORDER BY 可以用 SELECT 的別名
 ```
 
-中間狀態：
-
 | 階段 | 剩下的資料 |
 |---|---|
 | FROM + JOIN | 101 台北 2400、102 台北 890、103 台中 7990、104 高雄 3200、106 台中 3290（105 的 user_id 9 不存在，配不到） |
@@ -53,26 +47,13 @@ ORDER BY total DESC;                      -- 7. ORDER BY 可以用 SELECT 的別
 | SELECT | 台北 2 3290、台中 2 11280 |
 | ORDER BY | 台中 11280 在前，台北 3290 在後 |
 
-從這張表可以直接推出幾條規則：
+- `WHERE` 不能用 `SELECT` 取的別名，那時別名還不存在。
+- `WHERE` 不能放聚合（`count(*) > 1`），那時還沒分組；過濾組用 `HAVING`。
+- 「只算已付款的訂單」放 `WHERE status = 'paid'`，「只列總額超過 5,000 的使用者」放 `HAVING sum(amount) > 5000`。能放 WHERE 的條件就不要放 HAVING。
 
-- `WHERE` 不能用 `SELECT` 取的別名，因為那時別名還不存在。
-- `WHERE` 不能放聚合（`count(*) > 1`），因為那時還沒分組；過濾組要用 `HAVING`。
-- `HAVING` 在 PostgreSQL 裡也**不能**用輸出別名（`HAVING total > 1` 會報 `column "total" does not exist`），要把聚合再寫一次：`HAVING sum(o.amount) > 1`。
-- `ORDER BY` 在 SELECT 之後，所以可以用別名。PostgreSQL 的 `GROUP BY` 也接受輸出欄位名稱，但同名時優先當成來源欄位，容易混淆，別的資料庫也不一定支援。
+## NULL 的比較結果是 NULL，WHERE 只留 true
 
-> `LIMIT` 沒有搭配 `ORDER BY` 時，回傳哪幾列是沒有保證的。資料量小時看起來每次都一樣，表變大、計畫改變後就可能換一批。分頁、「前 10 名」一定要寫 `ORDER BY`，而且排序鍵要能分出唯一順序（例如 `ORDER BY created_at DESC, id DESC`）。
-
-## NULL：三值邏輯
-
-NULL 代表「不知道」或「不適用」，不是 0、也不是空字串。任何值跟 NULL 比較，結果都是 NULL（不知道），連 `NULL = NULL` 也是 NULL。布林運算因此有三個值：
-
-| a | b | a AND b | a OR b | NOT a |
-|---|---|---|---|---|
-| true | NULL | NULL | true | false |
-| false | NULL | false | NULL | true |
-| NULL | NULL | NULL | NULL | NULL |
-
-`WHERE` 的規則是：**只留結果為 true 的列**，false 和 NULL 都會被丟掉。這就是開頭寄信名單漏人的原因：
+NULL 代表「不知道」或「不適用」，不是 0、也不是空字串。任何值跟 NULL 比較，結果都是 NULL，連 `NULL = NULL` 也是。`WHERE` 只留結果為 true 的列，false 和 NULL 都丟掉：
 
 ```sql run
 -- 加一位沒填城市的使用者
@@ -93,6 +74,59 @@ SELECT count(*) AS eq_null FROM users WHERE city = NULL;
 SELECT count(*) AS is_null FROM users WHERE city IS NULL;
 ```
 
+`sum`、`avg` 忽略 NULL，沒有任何非 NULL 值時回傳 NULL 而不是 0。沒有資料時要顯示 0，寫 `coalesce(sum(amount), 0)`。
+
+## GROUP BY 之後 SELECT 能放什麼，以及兩個最常見的錯誤訊息
+
+`GROUP BY` 把同一組的列縮成一列，所以 SELECT 裡只能放群組鍵、聚合函數（`count`、`sum`、`string_agg`…），以及功能上相依於群組鍵的欄位（PostgreSQL 允許 `GROUP BY users.id` 之後直接 SELECT `users.name`）。
+
+```sql run
+-- 每位使用者的訂單統計：GROUP BY 主鍵後可以直接取 name、city
+SELECT u.id, u.name, u.city,
+       count(o.id)                                    AS orders,      -- LEFT JOIN 沒配到時 o.id 是 NULL，count 不算它
+       count(*) FILTER (WHERE o.status = 'paid')      AS paid_orders, -- FILTER：只把符合條件的列餵給聚合
+       coalesce(sum(o.amount), 0)                     AS total        -- 沒訂單時 sum 是 NULL，換成 0
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+GROUP BY u.id
+ORDER BY total DESC, u.id;
+```
+
+Dave、Eve 沒有訂單，LEFT JOIN 仍為他們留一列（訂單欄位全是 NULL）。`count(*)` 會把這一列算成 1 筆，所以寫 `count(o.id)`。
+
+| 錯誤訊息 | 觸發的寫法 | 怎麼修 |
+|---|---|---|
+| `column "users.name" must appear in the GROUP BY clause or be used in an aggregate function` | `SELECT name, count(*) FROM users GROUP BY city` | 把欄位加進 GROUP BY、包進聚合，或改成 GROUP BY 主鍵 |
+| `aggregate functions are not allowed in WHERE` | `WHERE count(*) > 1` | 條件搬到 `HAVING` |
+
+:::stop 讀到這裡可以先停：會依邏輯執行順序判斷條件放 WHERE 還是 HAVING、算得出含 NULL 的查詢會回幾列、寫得出分組統計。後面是別名與 LIMIT 的規則、NULL 在聚合與排序的細節、欄位型別、DISTINCT ON 與完整的錯誤訊息表，建表選型別、取「每組一列」或遇到錯誤訊息時再回來讀。
+
+## 執行順序的細節：別名、LIMIT 與規劃器
+
+邏輯執行順序是「結果要等同於照這個順序做」的定義，引擎實際上不一定照這個順序跑：規劃器可以先用索引過濾、把條件推進 JOIN 之前，只要結果一樣。但**哪個子句能用什麼名字**是照這個順序決定的。
+
+- 每個步驟看得到的名字：`WHERE`、`GROUP BY` 看得到來源欄位；`HAVING`、`SELECT` 看得到群組鍵與聚合；`ORDER BY` 看得到輸出欄位與別名（PostgreSQL 也允許來源欄位）。
+- `HAVING` 在 PostgreSQL 裡也**不能**用輸出別名（`HAVING total > 1` 會報 `column "total" does not exist`），要把聚合再寫一次：`HAVING sum(o.amount) > 1`。
+- `ORDER BY` 在 SELECT 之後，所以可以用別名。PostgreSQL 的 `GROUP BY` 也接受輸出欄位名稱，但同名時優先當成來源欄位，容易混淆，別的資料庫也不一定支援。
+
+> `LIMIT` 沒有搭配 `ORDER BY` 時，回傳哪幾列是沒有保證的。資料量小時看起來每次都一樣，表變大、計畫改變後就可能換一批。分頁、「前 10 名」一定要寫 `ORDER BY`，而且排序鍵要能分出唯一順序（例如 `ORDER BY created_at DESC, id DESC`）。
+
+`WHERE` 和 `HAVING` 的差別在時機：
+
+| | WHERE | HAVING |
+|---|---|---|
+| 過濾的對象 | 分組**前**的每一列 | 分組**後**的每一組 |
+| 能不能用聚合 | 不能 | 能 |
+| 效能 | 越早丟掉越少資料要分組 | 已經做完分組 |
+
+## NULL 的三值邏輯、聚合與排序
+
+| a | b | a AND b | a OR b | NOT a |
+|---|---|---|---|---|
+| true | NULL | NULL | true | false |
+| false | NULL | false | NULL | true |
+| NULL | NULL | NULL | NULL | NULL |
+
 聚合函數對 NULL 也有各自的規則：
 
 | 寫法 | 對 NULL 的處理 | 範例資料加入 Frank 後 |
@@ -108,42 +142,6 @@ SELECT count(*) AS is_null FROM users WHERE city IS NULL;
 排序時，PostgreSQL 把 NULL 當成比所有值都大：`ORDER BY x` 時 NULL 在最後，`ORDER BY x DESC` 時 NULL 在最前面。要改用 `NULLS FIRST` / `NULLS LAST` 明寫。
 
 還有一個常見的 NULL 地雷是 `NOT IN`：子查詢回傳的值裡只要有一個 NULL，`x NOT IN (…)` 對每一列都不會是 true，整個結果變空。這和 anti-join 一起在 [JOIN](#/skill/sql-joins) 那課詳細講。
-
-## 聚合、GROUP BY 與 HAVING
-
-`GROUP BY` 把同一組的列縮成**一列**。縮完之後，SELECT 裡每個欄位都必須對每一組有唯一的值，所以只能是：
-
-1. 群組鍵本身
-2. 聚合函數（`count`、`sum`、`avg`、`min`、`max`、`string_agg`…）
-3. 在功能上相依於群組鍵的欄位：PostgreSQL 允許 `GROUP BY users.id` 之後直接 SELECT `users.name`，因為 `id` 是主鍵，每個 id 只對應一個 name
-
-寫 `SELECT name, count(*) FROM users GROUP BY city` 時，台北那一組可能有很多個 name，資料庫不知道要給哪一個，就會報錯，而不是隨便挑一個。
-
-```sql run
--- 每位使用者的訂單統計：GROUP BY 主鍵後可以直接取 name、city
-SELECT u.id, u.name, u.city,
-       count(o.id)                                    AS orders,      -- LEFT JOIN 沒配到時 o.id 是 NULL，count 不算它
-       count(*) FILTER (WHERE o.status = 'paid')      AS paid_orders, -- FILTER：只把符合條件的列餵給聚合
-       coalesce(sum(o.amount), 0)                     AS total        -- 沒訂單時 sum 是 NULL，換成 0
-FROM users u
-LEFT JOIN orders o ON o.user_id = u.id
-GROUP BY u.id
-ORDER BY total DESC, u.id;
-```
-
-注意 `count(o.id)` 而不是 `count(*)`：Dave、Eve 沒有訂單，LEFT JOIN 仍會為他們留一列（訂單欄位全是 NULL），`count(*)` 會把這一列算成 1 筆。
-
-`WHERE` 和 `HAVING` 都能過濾，差在時機：
-
-| | WHERE | HAVING |
-|---|---|---|
-| 過濾的對象 | 分組**前**的每一列 | 分組**後**的每一組 |
-| 能不能用聚合 | 不能 | 能 |
-| 效能 | 越早丟掉越少資料要分組 | 已經做完分組 |
-
-所以「只算已付款的訂單」放 `WHERE status = 'paid'`；「只列總額超過 5,000 的使用者」放 `HAVING sum(amount) > 5000`。能放 WHERE 的條件就不要放 HAVING。
-
-:::stop 讀到這裡可以先停：會依邏輯執行順序判斷條件放 WHERE 還是 HAVING，也算得出含 NULL 的查詢會回幾列。後面的欄位型別與 DISTINCT ON，在要建表選型別或取「每組一列」時再回來讀。
 
 ## 型別：存什麼就得到什麼
 

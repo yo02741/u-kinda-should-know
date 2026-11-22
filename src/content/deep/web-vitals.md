@@ -1,4 +1,4 @@
-## 從一個具體問題開始：Lighthouse 98 分，病患說很慢
+## 問題：Lighthouse 98 分，病患說很慢
 
 門診看板頁（各診間目前叫到幾號）在工程師的筆電上跑 Lighthouse，效能 98 分。上線後收到病患回報：手機打開要等很久，好不容易看到看板，正要點自己的診間，上方突然插進一條「颱風停診公告」，整個畫面往下掉，點到了隔壁診間；護理站的大螢幕按「下一號」，號碼要半秒多才變。
 
@@ -12,11 +12,15 @@
 
 Lighthouse 分數高，是因為它在快速的筆電與網路上、沒有人操作、公告也還沒插入時量了一次。指標要看使用者那一端。
 
-## 運作原理
+## 三個指標怎麼算、多少算良好
 
-### 門檻與評等
+| 指標 | 怎麼算 |
+|---|---|
+| LCP | 視窗內最大的圖片、影片封面或文字區塊畫出來的時間，從開始載入頁面算起 |
+| CLS | 一次位移的分數是影響比例 × 距離比例；取分數最大的那一組位移的總和 |
+| INP | 整段造訪中最慢的那一次互動（點擊、觸控、按鍵），從操作到下一次畫面更新 |
 
-web-vitals 6.2.3 原始碼裡的常數：
+web-vitals 6.2.3 原始碼裡的門檻：
 
 | 指標 | 良好（good） | 需要改善（needs-improvement） | 差（poor） |
 |---|---|---|---|
@@ -24,57 +28,9 @@ web-vitals 6.2.3 原始碼裡的常數：
 | INP | ≤ 200 ms | 200–500 ms | > 500 ms |
 | CLS | ≤ 0.1 | 0.1–0.25 | > 0.25 |
 
-判斷是「大於第一個門檻就是 needs-improvement、大於第二個就是 poor」，所以剛好 2500 ms 算良好。一個網站的評等看實際使用者的第 75 百分位（p75）：75% 的造訪在良好以內才算良好，手機與桌機分開算。INP 在 2024 年 3 月 12 日取代 FID 成為 Core Web Vitals 的一員。
+剛好 2500 ms 算良好。一個網站的評等看實際使用者的第 75 百分位（p75）：75% 的造訪在良好以內才算良好，手機與桌機分開算。
 
-### LCP：最大的那塊什麼時候畫出來
-
-LCP 是視窗內最大的圖片、影片封面或文字區塊畫出來的時間，從開始載入頁面算起。頁面載入中，越大的元素出現，LCP 候選就更新一次；使用者第一次點擊、按鍵或切走分頁後就定案（web-vitals 監聽 `keydown`、`click`、`visibilitychange` 來結束 LCP）。
-
-主圖是 LCP 元素時，時間可以拆成四段，DevTools 的 `LCP breakdown` 與 web-vitals 的 attribution 都用這四段：
-
-```
-0 ──── TTFB ────┬── 資源載入延遲 ──┬── 資源載入時間 ──┬── 元素渲染延遲 ──┤ LCP
-     HTML 第一個  │  發現主圖、開始下載  │  主圖下載完        │  CSS、字型、JS 擋住  │
-     位元組到達   │  之前的空等          │                    │  讓它還沒畫出來      │
-```
-
-| 段落 | 常見原因 | 修法 |
-|---|---|---|
-| TTFB（time to first byte） | 伺服器慢、重新導向、沒有 CDN | 後端與快取（見 [HTTP 快取與條件請求](#/skill/http-caching)） |
-| 資源載入延遲（resource load delay） | 主圖 `loading="lazy"`、是 CSS 背景圖、由 JS 渲染才出現、優先順序低 | 拿掉 lazy、加 `fetchpriority="high"`、必要時 `preload`；CSR 的頁面考慮 SSR 或 SSG |
-| 資源載入時間（resource load duration） | 圖片太大 | 壓縮、AVIF 或 WebP、`srcset` 與 `sizes` |
-| 元素渲染延遲（element render delay） | render-blocking 的 CSS 與 script、長任務 | 見 [一個頁面的載入順序](#/skill/page-loading) |
-
-### CLS：沒有預期的位移
-
-一次版面位移的分數是：
-
-```
-位移分數 = 影響比例（impact fraction）× 距離比例（distance fraction）
-```
-
-影響比例是「移動前後佔用的區域聯集」佔視窗面積的比例，距離比例是「移動距離」佔視窗高度（或寬度，取較大者）的比例。例如視窗高 800px，看板佔下方 640px，上方插入 120px 的公告：移動前後聯集是 640px 高，影響比例 0.8；移動 120px，距離比例 0.15；這一次的分數是 0.12，已經超過 0.1。
-
-位移會分組（session window）：和前一次相隔不到 1 秒、而且離這組第一次不到 5 秒，就算同一組；CLS 是分數最大的那一組的總和。使用者點擊、按鍵後 0.5 秒內發生的位移（例如按「展開」之後內容推開）不算，因為那是預期中的。
-
-常見來源：沒有寬高的圖片、晚插入的廣告與公告橫幅、iframe 嵌入、網頁字型換上時文字重新換行、在既有內容上方插入東西。DevTools 的 `Layout shift culprits` 會標出 `Unsized image element`、`Web font`、`Injected iframe` 這類原因。
-
-### INP：操作到下一次畫面更新
-
-一次互動（點擊、觸控、按鍵；捲動與滑鼠移過不算）的延遲拆成三段：
-
-```
-點下去 ── input delay ──┬── processing duration ──┬── presentation delay ──┤ 畫面更新
-        主執行緒還在忙   │  事件處理函式在執行        │  樣式、版面、繪製
-```
-
-- **input delay**：點下去的時候主執行緒正在跑別的 task（第三方 script、上一次的長任務），事件要排隊。
-- **processing duration**：`click`、`input` 這些處理函式本身的時間，包含 Vue 因為狀態改變而重新渲染。
-- **presentation delay**：處理完之後算樣式、版面、繪製下一張畫面的時間；DOM 很大時這段會變長。
-
-頁面的 INP 是整段造訪中最慢的那一次互動；互動很多時，每 50 次略去一個最高值，排除偶發的極端值。主執行緒為什麼會「忙」，以及 task 與渲染的順序，見 [事件迴圈](#/skill/event-loop)。
-
-### 實驗室數據與實際數據
+## 實驗室數據與實際數據：用 web-vitals 套件收實際數據
 
 | | 實驗室（lab） | 實際（field） |
 |---|---|---|
@@ -83,19 +39,9 @@ LCP 是視窗內最大的圖片、影片封面或文字區塊畫出來的時間�
 | 用途 | 重現與找原因 | 判斷使用者實際的體驗、評等 |
 | INP | Lighthouse 的一般報告沒有（沒有人操作），改用 Total Blocking Time | 有 |
 
-Lighthouse 13.6 的效能分數由五項加權：Total Blocking Time 30%、LCP 25%、CLS 25%、FCP 10%、Speed Index 10%。CrUX 是以近 28 天為一期的滾動資料，只收公開、流量夠的網站；要登入的院內系統多半查不到，要自己用 web-vitals 套件收。
+CrUX 只收公開、流量夠的網站；要登入的院內系統多半查不到，要自己用 web-vitals 套件收。
 
-### web-vitals 套件的支援範圍
-
-web-vitals 6.2.3 的 README 列出：`onLCP`、`onINP` 在 Chromium、Firefox、Safari 都能量；`onCLS` 只有 Chromium。Safari 使用者的 CLS 收不到，不代表沒有位移。
-
-還有一個 SPA 要注意的地方：這些指標預設以「一次完整的頁面載入」為單位。Vue Router 換頁不會重新載入，INP 與 CLS 會一直累積到使用者離開。web-vitals 6 加了 `reportSoftNavs: true`，在 Chromium 151 起的瀏覽器把這類「軟導覽」分開計算，其他瀏覽器沒有作用。
-
-:::stop 讀到這裡可以先停：會讀 LCP、CLS、INP 的門檻與評等，分辨實驗室數據與實際數據。後面的收集程式與三個指標的修法，在要接上實際數據或修一個不合格的指標時再回來讀。
-
-## 實際程式
-
-### 收集實際數據
+最小的收集程式，把三個指標送到自己的後端：
 
 ```js
 // src/vitals.js：在 main.js 裡 import 一次
@@ -131,11 +77,85 @@ onINP(send)
 onCLS(send)
 ```
 
-Chrome 團隊給 coding agent 的 Modern Web Guidance 建議這類「不需要回應、晚點送也可以」的資料用 `fetchLater()`，並提醒在 `unload` 事件裡送資料（例如插一個 `<img>`）在手機上常常送不出去，還會讓頁面無法進入 bfcache。`fetchLater()` 目前是 Limited availability，所以上面用 `sendBeacon` 當退路。
+後端存下來後，依頁面與裝置類型算每個指標的 p75，和門檻比較。
+
+## 最常見的三個錯誤
+
+DevTools 的 Performance 分頁錄一次載入（`Record and reload`），Insights 面板用固定的標題指出原因：
+
+| Insight 或現象 | 原因 | 修法 |
+|---|---|---|
+| `LCP request discovery`：`LCP resources shouldn’t use loading=lazy` | 首屏主圖加了 `loading="lazy"`，要等版面算完才開始下載 | 拿掉 `loading="lazy"` |
+
+| `Layout shift culprits`：`Unsized image element` | `<img>` 沒有 `width`、`height` | 補上寬高或 `aspect-ratio` |
+
+| Lighthouse 100 分，實際數據的 INP 很差 | Lighthouse 的一般報告沒有操作，沒有量 INP | 看實際數據；在 Performance 分頁自己錄操作，CPU 加 `4× slowdown` |
+
+:::stop 讀到這裡可以先停：會讀 LCP、CLS、INP 的門檻與評等，分辨實驗室數據與實際數據，用 web-vitals 套件收實際數據。後面是三個指標各自的拆解與修法、p75 與 CLS 分組的模擬、DevTools Insights 對照表，要修一個不合格的指標時再回來讀。
+
+## LCP 的四段：時間花在哪裡
+
+頁面載入中，越大的元素出現，LCP 候選就更新一次；使用者第一次點擊、按鍵或切走分頁後就定案（web-vitals 監聽 `keydown`、`click`、`visibilitychange` 來結束 LCP）。
+
+主圖是 LCP 元素時，時間可以拆成四段，DevTools 的 `LCP breakdown` 與 web-vitals 的 attribution 都用這四段：
+
+```
+0 ──── TTFB ────┬── 資源載入延遲 ──┬── 資源載入時間 ──┬── 元素渲染延遲 ──┤ LCP
+     HTML 第一個  │  發現主圖、開始下載  │  主圖下載完        │  CSS、字型、JS 擋住  │
+     位元組到達   │  之前的空等          │                    │  讓它還沒畫出來      │
+```
+
+| 段落 | 常見原因 | 修法 |
+|---|---|---|
+| TTFB（time to first byte） | 伺服器慢、重新導向、沒有 CDN | 後端與快取（見 [HTTP 快取與條件請求](#/skill/http-caching)） |
+| 資源載入延遲（resource load delay） | 主圖 `loading="lazy"`、是 CSS 背景圖、由 JS 渲染才出現、優先順序低 | 拿掉 lazy、加 `fetchpriority="high"`、必要時 `preload`；CSR 的頁面考慮 SSR 或 SSG |
+| 資源載入時間（resource load duration） | 圖片太大 | 壓縮、AVIF 或 WebP、`srcset` 與 `sizes` |
+| 元素渲染延遲（element render delay） | render-blocking 的 CSS 與 script、長任務 | 見 [一個頁面的載入順序](#/skill/page-loading) |
+
+## CLS 的算法：位移分數與分組
+
+一次版面位移的分數是：
+
+```
+位移分數 = 影響比例（impact fraction）× 距離比例（distance fraction）
+```
+
+影響比例是「移動前後佔用的區域聯集」佔視窗面積的比例，距離比例是「移動距離」佔視窗高度（或寬度，取較大者）的比例。例如視窗高 800px，看板佔下方 640px，上方插入 120px 的公告：移動前後聯集是 640px 高，影響比例 0.8；移動 120px，距離比例 0.15；這一次的分數是 0.12，已經超過 0.1。
+
+位移會分組（session window）：和前一次相隔不到 1 秒、而且離這組第一次不到 5 秒，就算同一組；CLS 是分數最大的那一組的總和。使用者點擊、按鍵後 0.5 秒內發生的位移（例如按「展開」之後內容推開）不算，因為那是預期中的。
+
+常見來源：沒有寬高的圖片、晚插入的廣告與公告橫幅、iframe 嵌入、網頁字型換上時文字重新換行、在既有內容上方插入東西。DevTools 的 `Layout shift culprits` 會標出 `Unsized image element`、`Web font`、`Injected iframe` 這類原因。
+
+## INP 的三段：input delay、processing duration、presentation delay
+
+一次互動（點擊、觸控、按鍵；捲動與滑鼠移過不算）的延遲拆成三段：
+
+```
+點下去 ── input delay ──┬── processing duration ──┬── presentation delay ──┤ 畫面更新
+        主執行緒還在忙   │  事件處理函式在執行        │  樣式、版面、繪製
+```
+
+- **input delay**：點下去的時候主執行緒正在跑別的 task（第三方 script、上一次的長任務），事件要排隊。
+- **processing duration**：`click`、`input` 這些處理函式本身的時間，包含 Vue 因為狀態改變而重新渲染。
+- **presentation delay**：處理完之後算樣式、版面、繪製下一張畫面的時間；DOM 很大時這段會變長。
+
+互動很多時，INP 每 50 次略去一個最高值，排除偶發的極端值。主執行緒為什麼會「忙」，以及 task 與渲染的順序，見 [事件迴圈](#/skill/event-loop)。INP 在 2024 年 3 月 12 日取代 FID 成為 Core Web Vitals 的一員。
+
+## Lighthouse 分數的組成、CrUX 與 web-vitals 的支援範圍
+
+Lighthouse 13.6 的效能分數由五項加權：Total Blocking Time 30%、LCP 25%、CLS 25%、FCP 10%、Speed Index 10%。CrUX 是以近 28 天為一期的滾動資料。
+
+web-vitals 6.2.3 的 README 列出：`onLCP`、`onINP` 在 Chromium、Firefox、Safari 都能量；`onCLS` 只有 Chromium。Safari 使用者的 CLS 收不到，不代表沒有位移。
+
+還有一個 SPA 要注意的地方：這些指標預設以「一次完整的頁面載入」為單位。Vue Router 換頁不會重新載入，INP 與 CLS 會一直累積到使用者離開。web-vitals 6 加了 `reportSoftNavs: true`，在 Chromium 151 起的瀏覽器把這類「軟導覽」分開計算，其他瀏覽器沒有作用。
+
+## 收集程式的細節：`fetchLater()`、回報時機、p75
+
+Chrome 團隊給 coding agent 的 Modern Web Guidance 建議這類「不需要回應、晚點送也可以」的資料用 `fetchLater()`，並提醒在 `unload` 事件裡送資料（例如插一個 `<img>`）在手機上常常送不出去，還會讓頁面無法進入 bfcache。`fetchLater()` 目前是 Limited availability，所以必讀的程式用 `sendBeacon` 當退路。
 
 `onINP` 與 `onCLS` 會在分頁切到背景時回報（之後還可能再回報更大的值），沒有互動時 INP 不會回報；所以後端收到的筆數三個指標不會一樣多。web-vitals 的 README 也提醒不要重複呼叫這些函式，每呼叫一次就多一組監聽。
 
-後端存下來後，依頁面與裝置類型算每個指標的 p75，和門檻比較。下面這段示範為什麼要看 p75 而不是平均，以及 CLS 的分組怎麼算：
+下面這段示範為什麼要看 p75 而不是平均，以及 CLS 的分組怎麼算：
 
 ```js run
 // web-vitals 6 的門檻與評等規則：大於第一個門檻是 needs-improvement，大於第二個是 poor
@@ -175,7 +195,7 @@ const fixed = shifts.filter((s) => s.t !== 2200)   // 橫幅預留空間之後
 console.log('預留空間後的 CLS', cls(fixed), rating('CLS', cls(fixed)))
 ```
 
-### 三個指標各自的修法
+## 三個指標各自的修法
 
 ```html
 <!-- LCP：首屏主圖不 lazy、提高優先順序、寫寬高（同時避免 CLS） -->
@@ -243,27 +263,25 @@ async function recomputeStats(rows) {
 }
 ```
 
-## 常見錯誤與錯誤訊息
-
-DevTools 的 Performance 分頁錄一次載入（`Record and reload`）或操作，Insights 面板會用固定的標題指出原因：
+## DevTools Insights 對照表
 
 | Insight 或現象 | 原因 | 修法 |
 |---|---|---|
-| `LCP request discovery`：`LCP resources shouldn’t use loading=lazy` | 首屏主圖加了 `loading="lazy"`，要等版面算完才開始下載 | 拿掉 `loading="lazy"` |
+
 | `LCP request discovery`：`fetchpriority=high should be applied` | 主圖用一般優先順序，和其他資源搶頻寬 | 加 `fetchpriority="high"` |
 | `LCP breakdown` 的 `Resource load delay` 很長 | 主圖太晚被發現：CSS 背景圖、JS 渲染才出現 | 改成 `<img>`，或 `<link rel="preload" as="image">` |
-| `Layout shift culprits`：`Unsized image element` | `<img>` 沒有 `width`、`height` | 補上寬高或 `aspect-ratio` |
+
 | `Layout shift culprits`：`Web font` | 字型換上時文字重新換行 | `font-display: optional`，或調整備用字型 |
 | `Font display` | 字型的 `font-display` 讓文字在載入期間看不見 | 文件建議改 `swap` 或 `optional` |
 | `INP breakdown` 的 `Processing duration` 很長 | 事件處理函式（含重新渲染）太久 | 拆開、讓出主執行緒、移到 Web Worker |
 | `INP breakdown` 的 `Input delay` 很長 | 點下去時主執行緒正在跑別的長任務 | 找出那個 task（常是第三方 script） |
-| Lighthouse 100 分，實際數據的 INP 很差 | Lighthouse 的一般報告沒有操作，沒有量 INP | 看實際數據；在 Performance 分頁自己錄操作，CPU 加 `4× slowdown` |
+
 | Safari 使用者沒有 CLS 數據 | `onCLS` 只在 Chromium 能量 | 用 Chromium 的數據代表，Safari 上實機檢查 |
 
 ## 動手
 
 1. 打開 [VitalsLab](#/lab/VitalsLab)：把主圖切成 `loading="lazy"` 並拉大檔案，看 LCP 跨過 2.5 秒與 4 秒；插入沒有預留空間的公告橫幅，看 CLS 怎麼加總；把長任務拉到 400 毫秒，再打開「讓出主執行緒」，比較 INP 的三段。
-2. 按上面 `js run` 區塊的「在 Playground 開啟」，把公告的時間改成 4000，看它和 4800 的位移是否變成同一組。
+2. 按 p75 那段 `js run` 區塊的「在 Playground 開啟」，把公告的時間改成 4000，看它和 4800 的位移是否變成同一組。
 3. 在自己的頁面打開 Performance 分頁，看 `Local metrics` 的 LCP 是哪個元素；錄一次 `Record and reload`，讀 `LCP breakdown` 的四段。
 4. 勾 Rendering 面板的 `Layout shift regions`，重新整理，找出閃藍色的區塊。
-5. 把「實際程式」的 `src/vitals.js` 接到測試環境，一週後算每頁手機的 p75。
+5. 把必讀的 `src/vitals.js` 接到測試環境，一週後算每頁手機的 p75。

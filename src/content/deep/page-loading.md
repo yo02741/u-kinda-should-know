@@ -1,4 +1,4 @@
-## 從一個具體問題開始：白畫面停了三秒
+## 具體問題：白畫面停了三秒
 
 門診網站的首頁在醫院的 Wi-Fi 下打開，白畫面停了將近三秒才出現內容，院區照片又再晚一秒才跑出來。`<head>` 是這樣寫的：
 
@@ -16,21 +16,15 @@
   …
 ```
 
-用 Performance 分頁的 `Record and reload` 錄一次載入，加上 Network 節流 `Slow 4G`，可以看到三件事：
+用 Performance 分頁的 `Record and reload` 錄一次載入，加上 Network 節流 `Slow 4G`，看到三件事：
 
-1. Main 軌道上的 `Parse HTML` 被切成五段，中間夾著四段 `Evaluate script`。四支 script 都沒有 `defer` 或 `async`，解析器每遇到一支就停下來等它下載、執行；客服聊天的 `chat-widget.js` 來自另一個網域，光下載就花了一秒多。
-2. Insights 的 `Render-blocking requests` 除了那四支 script，還列出 `main.css` 與 `print.css`。列印樣式沒寫 `media="print"`，瀏覽器把它當成畫面要用的樣式，等它載完才畫第一個畫面。
-3. `hero.webp` 在 Network 分頁的 `Priority` 欄是 `Low`，而且等版面算完才開始下載；`LCP request discovery` 這個 insight 提示 `LCP resources shouldn’t use loading=lazy`。
+1. Main 軌道上的 `Parse HTML` 被切成五段，中間夾著四段 `Evaluate script`。四支 script 都沒有 `defer` 或 `async`，解析器每遇到一支就停下來等它下載、執行。
+2. Insights 的 `Render-blocking requests` 除了那四支 script，還列出 `main.css` 與 `print.css`。列印樣式沒寫 `media="print"`，瀏覽器等它載完才畫第一個畫面。
+3. `hero.webp` 在 Network 分頁的 `Priority` 欄是 `Low`，等版面算完才開始下載。`LCP request discovery` 這個 insight 提示 `LCP resources shouldn’t use loading=lazy`。
 
-三個問題各自對應瀏覽器載入頁面的一條規則：樣式表擋住第一個畫面、一般的 script 擋住解析、圖片的下載有先後順序。
+## 哪些資源擋解析，哪些擋第一個畫面
 
-## 運作原理
-
-### 邊收邊解析
-
-瀏覽器不等整份 HTML 下載完。收到一段就解析一段，把標籤變成 DOM 節點；遇到 `<link>`、`<script src>`、`<img>` 就送出請求。解析器因為 script 停下來的時候，另一個叫 preload scanner 的元件會繼續往後掃描還沒解析的 HTML，提早送出後面那些資源的請求。所以資源在 HTML 裡出現得越早，越早開始下載；JavaScript 執行之後才插入的資源，preload scanner 看不到。
-
-### 兩種「擋」
+瀏覽器不等整份 HTML 下載完，收到一段就解析一段，遇到 `<link>`、`<script src>`、`<img>` 就送出請求。
 
 | 資源 | 擋 HTML 解析嗎 | 擋第一個畫面嗎 | 說明 |
 |---|---|---|---|
@@ -42,68 +36,11 @@
 | `<script type="module" src>` | 不擋 | 不擋 | 預設和 `defer` 相同；`import` 的模組也要下載完才執行 |
 | `<img>` | 不擋 | 不擋 | 下載完再畫上去；沒寫寬高會讓版面跳動 |
 
-樣式表擋第一個畫面，是為了不先畫出沒有樣式的內容再跳一次。一般的 script 擋解析，是因為它可能用 `document.write` 寫入 HTML、或讀取還沒建好的 DOM，瀏覽器只好停下來等。它還要等前面的樣式表，因為 script 可能讀取元素的樣式（例如 `getComputedStyle`）。
+- 樣式表擋第一個畫面，是為了不先畫出沒有樣式的內容再跳一次。
+- 一般的 script 擋解析，是因為它可能用 `document.write` 寫入 HTML、或讀取還沒建好的 DOM。它還要等前面的樣式表，因為 script 可能讀取元素的樣式（例如 `getComputedStyle`）。
+- 解析器因為 script 停下來時，preload scanner 會繼續往後掃描還沒解析的 HTML，提早送出後面資源的請求。JavaScript 執行之後才插入的資源，它看不到。
 
-### 四種 script 的時間線
-
-下面是同一支 script 用四種寫法時，解析（`=`）、下載（`-`）、執行（`#`）的先後。時間是示意：
-
-```
-時間 →                0         10        20        30        40
-一般 <script>   解析   ======|                 |===========
-               下載         ------------
-               執行                     ####
-defer          解析   ================================
-               下載         ------------
-               執行                                     ####   ← 解析完才執行
-async          解析   ===================|    |=========
-               下載         ------------
-               執行                     ####                   ← 下載完立刻執行
-type="module"  和 defer 相同；加上 async 就和 async 相同
-```
-
-- 一般 script：解析在 script 的位置停住，等下載與執行都完成。
-- `defer`：下載和解析同時進行，執行排在解析結束之後，多支 `defer` 依照在 HTML 裡出現的順序執行。
-- `async`：下載完的那一刻就執行，可能在解析中途、也可能在解析結束後；兩支 `async` 誰先下載完誰先跑。
-- `type="module"`：瀏覽器還要下載它 `import` 的所有模組，整棵依賴樹都下載完才執行。依賴一層層往下時，瀏覽器要等上一層下載並解析完，才知道下一層要抓什麼。
-
-`defer` 與 `async` 只對有 `src` 的一般 script 有作用，寫在行內 script 上會被忽略；用 JavaScript 建立再插入的 script 預設就是 async 的行為。
-
-:::stop 讀到這裡可以先停：會分辨擋解析與擋第一個畫面的資源，替 `<head>` 裡的 script 選 `defer`、`async` 或 module。後面的時間點、下載優先順序與 Vite 的輸出，在主圖很晚才出現或要讀 waterfall 時再回來讀。
-
-### DOMContentLoaded 與 load
-
-頁面載入過程的幾個時間點，依先後順序：
-
-1. 解析 HTML，遇到一般 script 就停下來執行。`document.readyState` 是 `'loading'`。
-2. 解析結束，`readyState` 變成 `'interactive'`。
-3. 依序執行所有 `defer` 與 module script。
-4. 觸發 `DOMContentLoaded`。
-5. 圖片、iframe、樣式表等資源全部載完，`readyState` 變成 `'complete'`。
-6. 觸發 `load`。
-
-`async` script 在第 1 到第 5 步之間任何時候都可能執行，所以它可能在 `DOMContentLoaded` 之前或之後。Network 分頁最下面的狀態列會顯示這次載入的 `DOMContentLoaded` 與 `Load` 時間。
-
-### 下載的優先順序
-
-瀏覽器會替每個請求排優先順序：`<head>` 裡的樣式表與 script 最高；圖片預設較低，Chrome 要等算完版面、知道圖片在畫面內，才把它調高（各瀏覽器的規則不完全相同）。三個屬性可以改變這個順序：
-
-| 寫法 | 作用 | 用在哪裡 |
-|---|---|---|
-| `<img fetchpriority="high">` | 一開始就用高優先順序下載 | 首屏最大的那張圖（通常是 LCP 元素） |
-| `<img loading="lazy">` | 等圖片接近畫面時才下載 | 首屏以下的圖片；首屏的主圖不能加 |
-| `<link rel="preload" href as>` | 提早下載晚才會被發現的資源 | CSS 裡指定的字型、JS 才會插入的主圖 |
-| `<link rel="modulepreload">` | 提早下載並解析 module | 入口依賴的 chunk（Vite 自動加） |
-
-`fetchpriority` 在 2024 年 10 月成為 Baseline（Chrome 101、Firefox 132、Safari 17.2 起支援）。它只是提示，更舊的瀏覽器忽略這個屬性、照預設的優先順序下載，不必另外寫退路。字型的 preload 要加 `crossorigin`：字型一律用 CORS 模式下載，preload 沒加 `crossorigin` 時兩個請求的模式不同，瀏覽器用不到預先下載的那一份，同一個字型會下載兩次。
-
-### SPA 的首屏
-
-Vue 的 SPA 把畫面交給 JavaScript 畫。`index.html` 只有一個空的 `<div id="app">`，第一個有內容的畫面要等：入口 JS 下載與解析 → 執行並掛載 Vue → 元件呼叫 API → 資料回來再渲染。入口 JS 越大，白畫面越久；常見的做法是把不在首頁的路由改成懶載入（`() => import('./views/Report.vue')`），讓入口只帶首頁要的程式。更進一步是在伺服器先把 HTML 產生好（SSR 或 SSG）。
-
-## 實際程式碼
-
-### 修好的 `<head>`
+## 最小範例：修好的 `<head>`
 
 ```html
 <head>
@@ -136,7 +73,90 @@ Vue 的 SPA 把畫面交給 JavaScript 畫。`index.html` 只有一個空的 `<d
 
 改完之後再錄一次：`Parse HTML` 一路解析到底，`Render-blocking requests` 只剩 `main.css`，`hero.webp` 的 `Priority` 是 `High` 並且和 CSS 同時開始下載。
 
-### Vite 建置出的 `index.html`
+## 最常見的兩個錯誤
+
+| 錯誤訊息 | 原因 | 修法 |
+|---|---|---|
+| `Uncaught TypeError: Cannot read properties of null (reading 'addEventListener')` | `<head>` 裡的一般 script 執行時，`<body>` 還沒解析，`querySelector` 回傳 `null` | 加 `defer`，或改成 `type="module"` |
+| `Uncaught ReferenceError: $ is not defined` | 依賴 jQuery 的 script 用了 `async`，比 jQuery 先執行 | 有依賴關係的 script 都改用 `defer` |
+
+:::stop 讀到這裡可以先停：會分辨擋解析與擋第一個畫面的資源，替 `<head>` 裡的 script 選 `defer`、`async` 或 module。後面是四種 script 的時間線、載入時間點、下載優先順序與 Vite 的輸出，在主圖很晚才出現或要讀 waterfall 時再回來讀。
+
+## 四種 script 的時間線
+
+下面是同一支 script 用四種寫法時，解析（`=`）、下載（`-`）、執行（`#`）的先後。時間是示意：
+
+```
+時間 →                0         10        20        30        40
+一般 <script>   解析   ======|                 |===========
+               下載         ------------
+               執行                     ####
+defer          解析   ================================
+               下載         ------------
+               執行                                     ####   ← 解析完才執行
+async          解析   ===================|    |=========
+               下載         ------------
+               執行                     ####                   ← 下載完立刻執行
+type="module"  和 defer 相同；加上 async 就和 async 相同
+```
+
+- 一般 script：解析在 script 的位置停住，等下載與執行都完成。
+- `defer`：下載和解析同時進行，執行排在解析結束之後，多支 `defer` 依照在 HTML 裡出現的順序執行。
+- `async`：下載完的那一刻就執行，可能在解析中途、也可能在解析結束後；兩支 `async` 誰先下載完誰先跑。
+- `type="module"`：瀏覽器還要下載它 `import` 的所有模組，整棵依賴樹都下載完才執行。依賴一層層往下時，瀏覽器要等上一層下載並解析完，才知道下一層要抓什麼。
+
+`defer` 與 `async` 只對有 `src` 的一般 script 有作用，寫在行內 script 上會被忽略；用 JavaScript 建立再插入的 script 預設就是 async 的行為。
+
+客服聊天的 `chat-widget.js` 來自另一個網域，在開頭的例子裡光下載就花了一秒多，所以修好的版本等 `load` 之後才插入它。
+
+## DOMContentLoaded 與 load 的先後
+
+頁面載入過程的幾個時間點，依先後順序：
+
+1. 解析 HTML，遇到一般 script 就停下來執行。`document.readyState` 是 `'loading'`。
+2. 解析結束，`readyState` 變成 `'interactive'`。
+3. 依序執行所有 `defer` 與 module script。
+4. 觸發 `DOMContentLoaded`。
+5. 圖片、iframe、樣式表等資源全部載完，`readyState` 變成 `'complete'`。
+6. 觸發 `load`。
+
+`async` script 在第 1 到第 5 步之間任何時候都可能執行，所以它可能在 `DOMContentLoaded` 之前或之後。Network 分頁最下面的狀態列會顯示這次載入的 `DOMContentLoaded` 與 `Load` 時間。
+
+在頁面最前面加一段行內 script，或打開 Console 後重新整理（Console 要先勾 `Preserve log`，新版 Chrome 叫 `Keep log`），可以看到各時間點：
+
+```js
+// 各時間點距離這次導覽開始幾毫秒
+console.log('readyState', document.readyState, performance.now().toFixed(0), 'ms')
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('DOMContentLoaded', performance.now().toFixed(0), 'ms')
+})
+window.addEventListener('load', () => {
+  console.log('load', performance.now().toFixed(0), 'ms')
+  // 每個資源各花了多久：只看 script 與 CSS
+  for (const r of performance.getEntriesByType('resource')) {
+    if (['script', 'link', 'css'].includes(r.initiatorType)) {
+      console.log(r.name.split('/').pop(), Math.round(r.startTime), '→', Math.round(r.responseEnd), 'ms')
+    }
+  }
+})
+```
+
+## 下載的優先順序：`fetchpriority`、`lazy` 與 preload
+
+瀏覽器會替每個請求排優先順序：`<head>` 裡的樣式表與 script 最高；圖片預設較低，Chrome 要等算完版面、知道圖片在畫面內，才把它調高（各瀏覽器的規則不完全相同）。三個屬性可以改變這個順序：
+
+| 寫法 | 作用 | 用在哪裡 |
+|---|---|---|
+| `<img fetchpriority="high">` | 一開始就用高優先順序下載 | 首屏最大的那張圖（通常是 LCP 元素） |
+| `<img loading="lazy">` | 等圖片接近畫面時才下載 | 首屏以下的圖片；首屏的主圖不能加 |
+| `<link rel="preload" href as>` | 提早下載晚才會被發現的資源 | CSS 裡指定的字型、JS 才會插入的主圖 |
+| `<link rel="modulepreload">` | 提早下載並解析 module | 入口依賴的 chunk（Vite 自動加） |
+
+`fetchpriority` 在 2024 年 10 月成為 Baseline（Chrome 101、Firefox 132、Safari 17.2 起支援）。它只是提示，更舊的瀏覽器忽略這個屬性、照預設的優先順序下載，不必另外寫退路。字型的 preload 要加 `crossorigin`：字型一律用 CORS 模式下載，preload 沒加 `crossorigin` 時兩個請求的模式不同，瀏覽器用不到預先下載的那一份，同一個字型會下載兩次。
+
+## SPA 的首屏與 Vite 建置出的 `index.html`
+
+Vue 的 SPA 把畫面交給 JavaScript 畫。`index.html` 只有一個空的 `<div id="app">`，第一個有內容的畫面要等：入口 JS 下載與解析 → 執行並掛載 Vue → 元件呼叫 API → 資料回來再渲染。入口 JS 越大，白畫面越久；常見的做法是把不在首頁的路由改成懶載入（`() => import('./views/Report.vue')`），讓入口只帶首頁要的程式。更進一步是在伺服器先把 HTML 產生好（SSR 或 SSG）。
 
 開發時寫的是 `<script type="module" src="/src/main.js">`。`vite build` 之後的 `index.html` 長這樣（檔名的 hash 每次建置都不同）：
 
@@ -158,33 +178,10 @@ Vue 的 SPA 把畫面交給 JavaScript 畫。`index.html` 只有一個空的 `<d
 
 建置出的 `dist/index.html` 不能直接用檔案總管雙擊打開：網址變成 `file://`，module script 會被瀏覽器擋下。用 `npx vite preview` 或任何 HTTP 伺服器開。
 
-### 在 Console 觀察時間點
-
-在頁面最前面加一段行內 script，或打開 Console 後重新整理（Console 要先勾 `Preserve log`，新版 Chrome 叫 `Keep log`）：
-
-```js
-// 各時間點距離這次導覽開始幾毫秒
-console.log('readyState', document.readyState, performance.now().toFixed(0), 'ms')
-document.addEventListener('DOMContentLoaded', () => {
-  console.log('DOMContentLoaded', performance.now().toFixed(0), 'ms')
-})
-window.addEventListener('load', () => {
-  console.log('load', performance.now().toFixed(0), 'ms')
-  // 每個資源各花了多久：只看 script 與 CSS
-  for (const r of performance.getEntriesByType('resource')) {
-    if (['script', 'link', 'css'].includes(r.initiatorType)) {
-      console.log(r.name.split('/').pop(), Math.round(r.startTime), '→', Math.round(r.responseEnd), 'ms')
-    }
-  }
-})
-```
-
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 錯誤訊息或現象 | 原因 | 修法 |
 |---|---|---|
-| `Uncaught TypeError: Cannot read properties of null (reading 'addEventListener')` | `<head>` 裡的一般 script 執行時，`<body>` 還沒解析，`querySelector` 回傳 `null` | 加 `defer`，或改成 `type="module"` |
-| `Uncaught ReferenceError: $ is not defined` | 依賴 jQuery 的 script 用了 `async`，比 jQuery 先執行 | 有依賴關係的 script 都改用 `defer` |
 | `Uncaught SyntaxError: Cannot use import statement outside a module` | 用了 `import` 的檔案沒有 `type="module"` | 加上 `type="module"` |
 | `Access to script at 'file:///…' from origin 'null' has been blocked by CORS policy` | 直接用檔案打開建置後的 `index.html` | 用 `vite preview` 或 HTTP 伺服器開 |
 | `The resource … was preloaded using link preload but not used within a few seconds from the window's load event` | preload 的 `as` 寫錯、少了 `crossorigin`，或頁面沒用到 | 改正屬性，或拿掉這個 preload |

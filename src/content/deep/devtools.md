@@ -1,4 +1,4 @@
-## 從一個具體問題開始：「按了取消掛號，沒有反應」
+## 具體問題：「按了取消掛號，沒有反應」
 
 病患回報：在「我的掛號」頁按「取消」，按鈕轉了一下又恢復，掛號還在。同一個回報可能有好幾種原因，各自出現在開發者工具的不同地方：
 
@@ -13,7 +13,7 @@
 
 照「Console → Network → Elements」的順序看，多半幾分鐘內就能說出問題在前端還是後端，以及卡在哪一步。驗收 AI 產出的畫面也是同一套動作：先確認沒有錯誤，再確認送出的請求和規格一致，最後才看版面細節。
 
-## 驗收的固定路線
+## 驗收的固定路線：六個分頁依序看
 
 | 順序 | 分頁 | 看什麼 | 錯的時候長什麼樣 |
 |---|---|---|---|
@@ -27,6 +27,11 @@
 Performance 分頁用在「覺得卡」的時候，細節在 [瀏覽器怎麼把網頁畫出來](#/skill/how-browsers-render)。Vue DevTools 是另外安裝的擴充功能，用來看元件樹、props、Pinia store 與目前的路由，第 6 步之後需要時再開。
 
 以下的分頁與選項名稱以 Chrome 為準（2026 年 11 月核對）。Firefox 與 Safari 有對應的面板，名稱略有不同。
+
+## 最常見的兩個錯誤
+
+- **沒開 `Disable cache` 就判斷「改了沒效果」**：看到的是快取裡的舊檔。Size 欄出現 `(memory cache)` 時，先排除快取。
+- **換頁後找不到剛剛的請求**：沒勾 `Preserve log`（`Keep log`）。
 
 :::stop 讀到這裡可以先停：會照 Console、Network、Elements 的順序驗收一個畫面，說出問題在前端還是後端。後面各分頁的細節，在固定路線找不到原因時再回來查。
 
@@ -103,10 +108,8 @@ getEventListeners(window).resize    // 列出 window 上的 resize 監聽（Chro
 
 **Lighthouse** 可以只勾單一類別。無障礙的項目（`Form elements do not have associated labels`、`Image elements do not have [alt] attributes`）是確定性的檢查，每次跑結果相同；效能分數會受電腦負載影響，同一頁連跑幾次分數不同是正常的，比較時固定裝置與節流設定。
 
-## 常見錯誤
+## 其他常見錯誤
 
-- **沒開 `Disable cache` 就判斷「改了沒效果」**：看到的是快取裡的舊檔。Size 欄出現 `(memory cache)` 時，先排除快取。
-- **換頁後找不到剛剛的請求**：沒勾 `Preserve log`（`Keep log`）。
 - **只看 Preview**：Preview 會把 JSON 排版好，回應的實際格式（例如多了一層 `data`）要在 Response 看。
 - **擴充功能干擾**：廣告阻擋器會擋掉某些請求，Network 顯示 `(blocked:other)` 之類的狀態。用無痕視窗或沒有擴充功能的設定檔重測。
 - **裝置模式當成實機**：裝置模式改的是寬度、觸控與 User-Agent，模擬不了手機的螢幕鍵盤、網址列收合與真實的 CPU 速度。驗收手機版時，最後仍要用實機看一次。

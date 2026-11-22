@@ -1,4 +1,4 @@
-## 從一個具體問題開始：同一個時段掛了兩次號
+## 同一個時段掛了兩次號
 
 掛號頁的「確認掛號」按鈕上線一週，客服收到三件「同一個人在同一個診次有兩筆掛號」。重現方式：Network 分頁的節流選 `3G`，按下按鈕，畫面兩秒沒有任何變化，使用者以為沒按到，又按了一次，兩個 `POST` 都成功。
 
@@ -7,7 +7,7 @@
 - 用鍵盤操作的使用者按 Tab 看不到焦點在哪，因為樣式表裡有一行 `button:focus { outline: none; }`，當初是為了拿掉滑鼠點擊後的外框。
 - 「確認掛號」在必填欄位沒填完時是 `disabled`，使用者只看到一顆淡灰色的按鈕，不知道為什麼不能按；用螢幕閱讀器的使用者 Tab 不到它。
 
-三個問題都出在「狀態」沒有被定義：送出中長什麼樣、焦點長什麼樣、停用時怎麼說明。規格裡只畫了按鈕平常的樣子，其他狀態由寫程式的人（或 AI）臨時決定。
+規格裡只畫了按鈕平常的樣子，送出中、焦點、停用這些狀態由寫程式的人（或 AI）臨時決定。
 
 ## 運作原理：狀態從哪裡來
 
@@ -26,43 +26,11 @@
 | error | `[aria-invalid="true"]` | 程式（驗證後） | invalid，加上 `aria-describedby` 指向的訊息 |
 | selected、current、pressed | `[aria-selected="true"]`、`[aria-current="page"]`、`[aria-pressed="true"]` | 程式 | selected、current、pressed |
 
-用 ARIA 屬性當樣式的依據有個好處：畫面看起來的狀態和螢幕閱讀器念出來的狀態來自同一個屬性，不會一個改了另一個忘了改。
+三條規則：
 
-### :focus 與 :focus-visible
-
-`:focus` 只要元素有焦點就成立，滑鼠點按鈕也算，所以點完會留一圈外框，常常被要求拿掉。`:focus-visible` 由瀏覽器判斷「這時候該不該顯示焦點」：
-
-- 用 Tab 移動焦點時成立。
-- 用滑鼠點按鈕時通常不成立。
-- 文字輸入框就算用滑鼠點，也會成立，因為接下來要用鍵盤打字。
-
-所以正確的做法是不碰 `:focus` 的預設外框，或只針對 `:focus-visible` 寫明顯的樣式。`:focus-visible` 在 2022 年 3 月進入 Baseline，2024 年 9 月起列為廣泛可用。
-
-WCAG 2.2 的 2.4.7 Focus Visible（AA）要求鍵盤操作時看得到焦點；1.4.11 Non-text Contrast（AA）要求元件邊界與狀態指示和相鄰顏色的對比至少 3:1，焦點外框也包含在內。
-
-### disabled 與 aria-disabled
-
-| | `disabled` 屬性 | `aria-disabled="true"` |
-|---|---|---|
-| 拿得到焦點（Tab） | 拿不到 | 拿得到 |
-| 點擊 | 不觸發 `click` | 照樣觸發，處理函式要自己擋 |
-| 表單送出 | 欄位值不會送出 | 照常送出 |
-| 螢幕閱讀器 | 用 Tab 走不到；瀏覽模式讀得到 | 念出「已停用」，並讀得到旁邊的說明 |
-| 樣式 | `:disabled` | `[aria-disabled="true"]` |
-
-短暫的停用（送出中的那兩秒）用 `disabled` 很合適，但要注意焦點：在 Chromium 實測，有焦點的按鈕一變成 `disabled`，焦點會掉到 `body`，鍵盤使用者送出後得從頁面開頭重新 Tab。送出完成後把焦點移到結果訊息或下一個要操作的元件；不想讓焦點掉，就改用 `aria-disabled="true"`，並在處理函式裡擋掉重複送出（[互動狀態實驗室](#/lab/UiStatesLab) 的 loading 狀態可以看到這個現象）。長時間停用、而且使用者需要知道原因時（必填欄位沒填完、名額已滿），有兩個做法：按鈕保持可按，按下後列出缺什麼並把焦點移到第一個錯誤欄位；或用 `aria-disabled="true"` 並在按鈕旁寫出原因。
-
-### 狀態疊在一起時
-
-一個按鈕可能同時是 focus 又是 hover，一列可能同時是 selected 又是 hover。規格要寫出優先順序，常見的排法是：disabled > loading > error > active > focus > hover > default。寫成 CSS 時用 `:not(:disabled)` 避免停用的按鈕還有 hover 效果：`.btn:hover:not(:disabled) { … }`。
-
-### 觸控裝置沒有 hover
-
-手機上沒有滑鼠移上去這回事。只在 hover 時出現的資訊（例如列上的「取消」按鈕要 hover 才看得到）在手機上找不到。CSS 的 `@media (hover: hover)` 只在主要輸入裝置能 hover 時成立，可以把 hover 才顯示的設計限制在這種裝置，其他裝置一律顯示。
-
-### 狀態表
-
-描述元件時把狀態寫成表，寫程式與驗收都照它：
+1. 焦點樣式寫在 `:focus-visible`：Tab 移動時成立，滑鼠點按鈕時通常不成立。不寫 `outline: none`。
+2. 送出中的短暫停用用 `disabled`；長時間停用且使用者需要知道原因時，用 `aria-disabled="true"` 並在旁邊寫出原因，或讓按鈕保持可按、按下後列出缺什麼。
+3. 把狀態寫成表，寫程式與驗收都照它：
 
 | 狀態 | 外觀 | 行為 |
 |---|---|---|
@@ -73,7 +41,7 @@ WCAG 2.2 的 2.4.7 Focus Visible（AA）要求鍵盤操作時看得到焦點；1
 | loading | spinner 加「送出中…」，寬度不變 | `disabled`，不會送出第二次 |
 | disabled | 透明度 0.6、游標 `not-allowed` | 不可按 |
 
-## 實際程式：不會送兩次的按鈕
+## 不會送兩次的按鈕，與兩個最常見的錯誤
 
 ```vue
 <script setup>
@@ -134,9 +102,47 @@ async function submit() {
 </style>
 ```
 
-前端的停用只擋得住同一個分頁裡的連點。網路逾時後使用者重新整理再送、或兩個分頁各送一次，伺服器一樣會收到兩筆；要擋住這些，請求要帶冪等鍵（Idempotency-Key），伺服器那一側的做法見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
+- **停用寫在 `await` 之後**：`await fetch(…)` 之後才設 `submitting = true`，請求進行中按鈕還能按。設定要在 `await` 前面。
+- **`outline: none` 沒有替代樣式**：鍵盤使用者看不到焦點。在 Styles 窗格搜尋 `outline`，改成只對 `:focus-visible` 寫樣式。
 
-:::stop 讀到這裡可以先停：會寫一個按鈕的狀態表，做出不會送兩次的送出按鈕。後面的切換按鈕與常見錯誤，在做篩選開關或驗收別人的元件時再回來讀。
+:::stop 讀到這裡可以先停：會寫一個按鈕的狀態表，做出不會送兩次的送出按鈕。後面是 `:focus-visible` 與 `disabled` 的細節、狀態疊加、觸控裝置、切換按鈕與其餘常見錯誤，做篩選開關或驗收別人的元件時再回來讀。
+
+## :focus 與 :focus-visible
+
+`:focus` 只要元素有焦點就成立，滑鼠點按鈕也算，所以點完會留一圈外框，常常被要求拿掉。`:focus-visible` 由瀏覽器判斷「這時候該不該顯示焦點」：
+
+- 用 Tab 移動焦點時成立。
+- 用滑鼠點按鈕時通常不成立。
+- 文字輸入框就算用滑鼠點，也會成立，因為接下來要用鍵盤打字。
+
+所以正確的做法是不碰 `:focus` 的預設外框，或只針對 `:focus-visible` 寫明顯的樣式。`:focus-visible` 在 2022 年 3 月進入 Baseline，2024 年 9 月起列為廣泛可用。
+
+WCAG 2.2 的 2.4.7 Focus Visible（AA）要求鍵盤操作時看得到焦點；1.4.11 Non-text Contrast（AA）要求元件邊界與狀態指示和相鄰顏色的對比至少 3:1，焦點外框也包含在內。
+
+## disabled 與 aria-disabled
+
+| | `disabled` 屬性 | `aria-disabled="true"` |
+|---|---|---|
+| 拿得到焦點（Tab） | 拿不到 | 拿得到 |
+| 點擊 | 不觸發 `click` | 照樣觸發，處理函式要自己擋 |
+| 表單送出 | 欄位值不會送出 | 照常送出 |
+| 螢幕閱讀器 | 用 Tab 走不到；瀏覽模式讀得到 | 念出「已停用」，並讀得到旁邊的說明 |
+| 樣式 | `:disabled` | `[aria-disabled="true"]` |
+
+短暫的停用（送出中的那兩秒）用 `disabled` 要注意焦點：在 Chromium 實測，有焦點的按鈕一變成 `disabled`，焦點會掉到 `body`，鍵盤使用者送出後得從頁面開頭重新 Tab（[互動狀態實驗室](#/lab/UiStatesLab) 的 loading 狀態可以看到這個現象）。兩個做法：
+
+- 送出完成後把焦點移到結果訊息或下一個要操作的元件。
+- 改用 `aria-disabled="true"`，並在處理函式裡擋掉重複送出。
+
+用 ARIA 屬性當樣式的依據時，畫面看起來的狀態和螢幕閱讀器念出來的狀態來自同一個屬性，不會一個改了另一個忘了改。
+
+## 狀態疊加、觸控裝置與重複送出的最後一道防線
+
+- **優先順序**：一個按鈕可能同時是 focus 又是 hover。常見的排法是 disabled > loading > error > active > focus > hover > default；用 `:not(:disabled)` 避免停用的按鈕還有 hover 效果：`.btn:hover:not(:disabled) { … }`。
+- **觸控裝置沒有 hover**：只在 hover 時出現的資訊（例如列上的「取消」按鈕）在手機上找不到。`@media (hover: hover)` 只在主要輸入裝置能 hover 時成立，把 hover 才顯示的設計限制在這種裝置，其他裝置一律顯示。
+- **伺服器那一側**：前端的停用只擋得住同一個分頁裡的連點。網路逾時後重新整理再送、或兩個分頁各送一次，伺服器一樣會收到兩筆；請求要帶冪等鍵（Idempotency-Key），做法見 [分頁、篩選、版本與冪等鍵](#/skill/api-patterns)。
+
+## 切換按鈕用 aria-pressed
 
 切換按鈕（例如「只看未報到」）用 `aria-pressed` 表示開關，樣式也依它切換：
 
@@ -151,10 +157,8 @@ async function submit() {
 </style>
 ```
 
-## 常見錯誤
+## 其餘常見錯誤
 
-- **`outline: none` 沒有替代樣式**：鍵盤使用者看不到焦點。在 Styles 窗格搜尋 `outline`，改成只對 `:focus-visible` 寫樣式。
-- **停用寫在 `await` 之後**：`await fetch(…)` 之後才設 `submitting = true`，請求進行中按鈕還能按。設定要在 `await` 前面。
 - **只改樣式、沒有停用**：加了 `.is-loading` 讓按鈕變灰，`disabled` 卻沒設，點擊照樣觸發。
 - **用了 `aria-disabled` 卻沒擋點擊**：`aria-disabled` 只改變輔助科技讀到的狀態，`click` 事件照常觸發，處理函式第一行要檢查。
 - **停用的按鈕旁邊沒有原因**：`disabled` 的按鈕拿不到焦點，靠 Tooltip 說明時鍵盤與螢幕閱讀器使用者看不到。

@@ -1,4 +1,4 @@
-## 從一個具體問題開始：按了「取消」，Drawer 也打開了
+## 具體問題：按了「取消」，Drawer 也打開了
 
 「我的掛號」頁的清單放在一個篩選表單裡，點一整列會打開右側的詳細資料 Drawer，每一列另有一顆「取消」按鈕：
 
@@ -22,13 +22,11 @@
 2. Drawer 也跟著打開，顯示剛被取消的那一筆。
 3. 一秒後整頁重新載入，網址多了 `?`，剛輸入的搜尋字不見了。
 
-第 2 件來自事件的冒泡：按鈕上的 click 處理完之後，事件繼續往上傳到 `li`，`li` 的監聽也執行了。第 3 件來自瀏覽器的預設動作：`form` 裡沒寫 `type` 的 `button` 是送出鈕，click 之後瀏覽器把表單送出去。兩件事要用兩個不同的方法處理。
+第 2 件來自事件的冒泡：按鈕上的 click 處理完之後，事件繼續往上傳到 `li`，`li` 的監聽也執行了。第 3 件來自瀏覽器的預設動作：`form` 裡沒寫 `type` 的 `button` 是送出鈕，click 之後瀏覽器把表單送出去。
 
-## 運作原理
+## 事件怎麼傳：路徑、`target` 與 `currentTarget`、預設動作
 
-### 傳遞路徑與三個階段
-
-DOM 是一棵樹。使用者點了按鈕，瀏覽器先算出從 `window` 到按鈕的路徑，接著讓事件沿著這條路徑走一趟來回：
+使用者點了按鈕，瀏覽器先算出從 `window` 到按鈕的路徑，接著讓事件沿著這條路徑走一趟來回：
 
 ```
 window
@@ -44,6 +42,55 @@ window
 ③ 冒泡（bubble）  ：li → ul → form → … → window        由內往外
 ```
 
+一般的 `addEventListener(type, fn)` 與 Vue 的 `@click` 在冒泡階段執行，所以「內層先、外層後」。
+
+- `event.target`：被點到的最內層元素，整趟傳遞都不變。按鈕裡有 `<svg>` 圖示時，點到圖示的話 `target` 就是那個 `<svg>`。
+- `event.currentTarget`：目前執行的監聽掛在哪個元素上，每經過一個元素就換一次。
+
+很多事件有瀏覽器自己會做的事（預設動作），在所有監聽都跑完之後才執行。例如 `<a href>` 的 click 換到那個網址，`form` 裡送出鈕的 click 送出表單。監聽裡呼叫 `preventDefault()` 就取消它。
+
+開頭的按鈕，四種寫法的結果：
+
+| 按鈕的處理函式裡 | 外層 `li` 的監聽 | 表單送出 |
+|---|---|---|
+| 什麼都不呼叫 | 執行（Drawer 打開） | 送出 |
+| `stopPropagation()` | 不執行 | 照樣送出 |
+| `preventDefault()` | 照樣執行 | 不送出 |
+| 兩個都呼叫 | 不執行 | 不送出 |
+
+`stopPropagation()` 只管事件還要不要傳給下一個元素，同一個元素上的其他監聽照樣執行；要連它們一起擋用 `stopImmediatePropagation()`。`preventDefault()` 只管預設動作，事件照樣往上冒泡，外層可以用 `event.defaultPrevented` 知道它被取消了。
+
+## 最小範例：修好的清單
+
+```vue
+<template>
+  <!-- @submit.prevent：取消瀏覽器送出表單的預設動作 -->
+  <form @submit.prevent="search">
+    <input v-model="keyword" placeholder="搜尋病患姓名" aria-label="搜尋病患姓名">
+    <ul>
+      <li v-for="a in appointments" :key="a.id" @click="openDetail(a.id)">
+        <span>{{ a.time }} {{ a.patientName }}</span>
+        <!-- type="button"：不是送出鈕；.stop：不再冒泡到 li -->
+        <button type="button" @click.stop="cancel(a.id)">取消</button>
+      </li>
+    </ul>
+  </form>
+</template>
+```
+
+`@click.stop` 等於 `event.stopPropagation()`，`@submit.prevent` 等於 `event.preventDefault()`。
+
+## 最常見的兩個錯誤
+
+| 現象 | 原因 | 修法 |
+|---|---|---|
+| 加了 `stopPropagation()`，頁面還是重新載入 | 停止傳遞不會取消預設動作 | 另外呼叫 `preventDefault()` |
+| Network 分頁出現 `/api/appointments/undefined/cancel` | 讀了 `event.target.dataset.id`，`target` 是按鈕裡的 `svg` 或 `span` | 改用 `closest('[data-id]')` 或 `currentTarget` |
+
+:::stop 讀到這裡可以先停：會分辨 `target` 與 `currentTarget`，用 `stopPropagation()` 與 `preventDefault()` 分別處理冒泡和預設動作。後面是三個階段的細節、不冒泡的事件、監聽選項、事件委派與完整的 Vue 寫法，在要做事件委派或在 `window` 上掛監聽時再回來讀。
+
+## 三個階段與預設動作的完整表
+
 每經過一個元素，就執行掛在這個元素、這個階段的監聽：
 
 | 階段 | `event.eventPhase` | 執行哪些監聽 |
@@ -56,16 +103,7 @@ window
 
 路徑在事件發出的那一刻就決定了。監聽裡把元素從 DOM 移走，事件照樣沿著原本的路徑傳完。
 
-### `target` 與 `currentTarget`
-
-- `event.target`：被點到的最內層元素，整趟傳遞都不變。按鈕裡有 `<svg>` 圖示時，點到圖示的話 `target` 就是那個 `<svg>`。
-- `event.currentTarget`：目前執行的監聽掛在哪個元素上，每經過一個元素就換一次。
-
-事件委派就靠這兩個的差別：監聽掛在 `ul` 上（`currentTarget` 是 `ul`），再從 `target` 往上找到被點的那一列。
-
-### 預設動作
-
-很多事件有瀏覽器自己會做的事，在所有監聽都跑完之後才執行；監聽裡呼叫 `preventDefault()` 就取消它：
+事件委派靠 `target` 與 `currentTarget` 的差別：監聽掛在 `ul` 上（`currentTarget` 是 `ul`），再從 `target` 往上找到被點的那一列。
 
 | 事件 | 在哪裡 | 預設動作 |
 |---|---|---|
@@ -79,22 +117,7 @@ window
 
 `event.cancelable` 是 `false` 的事件（例如 `scroll`）呼叫 `preventDefault()` 沒有作用。
 
-### 停止傳遞與取消預設，四種組合
-
-回到開頭的按鈕，四種寫法的結果：
-
-| 按鈕的處理函式裡 | 外層 `li` 的監聽 | 表單送出 |
-|---|---|---|
-| 什麼都不呼叫 | 執行（Drawer 打開） | 送出 |
-| `stopPropagation()` | 不執行 | 照樣送出 |
-| `preventDefault()` | 照樣執行 | 不送出 |
-| 兩個都呼叫 | 不執行 | 不送出 |
-
-`stopPropagation()` 只管事件還要不要傳給下一個元素，同一個元素上的其他監聽照樣執行；要連它們一起擋用 `stopImmediatePropagation()`。`preventDefault()` 只管預設動作，事件照樣往上冒泡，外層可以用 `event.defaultPrevented` 知道它被取消了。
-
-:::stop 讀到這裡可以先停：會分辨 `target` 與 `currentTarget`，用 `stopPropagation()` 與 `preventDefault()` 分別處理冒泡和預設動作。後面的不冒泡事件、監聽選項與 Vue 寫法，在要做事件委派或在 `window` 上掛監聽時再回來讀。
-
-### 不冒泡的事件
+## 不冒泡的事件
 
 | 不冒泡 | 會冒泡的替代 | 用途 |
 |---|---|---|
@@ -107,7 +130,7 @@ window
 
 Vue 元件用 `emit('cancel')` 送出的事件不是 DOM 事件，只送給直接使用這個元件的父元件，不會一路往上冒泡；要跨好幾層傳資料，用 props 與 emit 一層層接，或改用 `provide`／`inject` 或 store。
 
-### `addEventListener` 的選項
+## `addEventListener` 的選項：`capture`、`once`、`passive`、`signal`
 
 ```js
 el.addEventListener('click', handler, {
@@ -122,7 +145,7 @@ el.addEventListener('click', handler, {
 
 `signal` 選項在 Chrome 90、Firefox 86、Safari 15 起支援。一個元件加了好幾個監聽時，共用一個 `AbortController`，卸載時呼叫一次 `abort()` 就全部移除。
 
-## 一段可以跑的模擬
+## 一段可以跑的模擬：捕獲、冒泡與兩種「擋」
 
 下面照規範的順序（捕獲由外往內、冒泡由內往外，目標上的 capture 監聽先執行）寫了一個迷你版的 dispatch，用物件代替 DOM 元素，模擬開頭那個頁面：`document` 上有一個捕獲階段的記錄、`ul` 用事件委派打開 Drawer、按鈕執行取消。依序點按鈕（三種寫法）、列裡的文字、清單的空白處：
 
@@ -188,9 +211,7 @@ click(ul)                                    // 點清單的空白處：closest 
 
 第二次點擊說明了最常見的誤解：`stopPropagation()` 讓 Drawer 不再打開，表單卻照樣送出。
 
-## 實際程式碼
-
-### 原生寫法：事件委派加上 `closest`
+## 原生寫法：事件委派加上 `closest`
 
 ```html
 <ul id="appointments">
@@ -218,7 +239,7 @@ click(ul)                                    // 點清單的空白處：closest 
 
 這個寫法沒有用到 `stopPropagation()`：外層自己判斷點的是按鈕還是列。`document` 上「點外面關閉選單」或分析工具的監聽照樣收得到這次點擊。按鈕寫了 `type="button"`，不會送出表單。
 
-### Vue 寫法
+## 完整的 Vue 寫法與修飾符
 
 ```vue
 <script setup>
@@ -287,14 +308,12 @@ Vue 的修飾符對應的原生寫法：
 
 模板上的 `@click` 在元件卸載時由 Vue 自動移除；自己在 `window`、`document` 上加的監聽，Vue 不會幫忙移除，上面用 `AbortController` 處理。
 
-## 常見錯誤與錯誤訊息
+## 其他錯誤訊息
 
 | 錯誤訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | 按列裡的按鈕，外層的動作也執行 | click 冒泡到外層的監聽 | 外層用 `event.target.closest()` 判斷，或按鈕加 `@click.stop` |
 | 按了按鈕整頁重新載入，網址多了 `?` | `form` 裡的 `button` 預設是 `submit` | 按鈕加 `type="button"`，表單用 `@submit.prevent` |
-| 加了 `stopPropagation()`，頁面還是重新載入 | 停止傳遞不會取消預設動作 | 另外呼叫 `preventDefault()` |
-| Network 分頁出現 `/api/appointments/undefined/cancel` | 讀了 `event.target.dataset.id`，`target` 是按鈕裡的 `svg` 或 `span` | 改用 `closest('[data-id]')` 或 `currentTarget` |
 | `Uncaught TypeError: Cannot read properties of null (reading 'addEventListener')` | `querySelector` 沒找到元素：script 比元素早執行，或選擇器打錯 | script 加 `defer`；Vue 裡改用 template ref 並在 `onMounted` 之後取用 |
 | `removeEventListener` 之後監聽還在 | 傳入的不是同一個函式（匿名函式、每次 `.bind()` 產生的新函式），或 `capture` 值不同 | 把函式存在變數裡，或改用 `signal` |
 | 同一個操作執行兩次 | 每次掛載都 `addEventListener`、卸載時沒移除 | `onUnmounted` 移除，或用 `AbortController` |

@@ -21,7 +21,7 @@
     "e2e": "npm run e2e:runtime && npm run e2e:frame && npm run e2e:verify && npm run e2e:deep && npm run e2e:ui && npm run e2e:labs && npm run e2e:sweep && npm run e2e:mobile",
     "e2e:cloud": "vite build --mode e2e --outDir dist-e2e && npx -y firebase-tools@15 emulators:exec --only auth,firestore --project demo-u-kinda-should-know \"node e2e/cloud-sync.mjs\"",
     "validate:scenarios": "node scripts/validate-scenarios.mjs",
-    "validate:content": "node scripts/validate-content.mjs",
+    "validate:content": "node scripts/validate-content.mjs && node scripts/deep-stats.mjs --check",
     "check:links": "node scripts/check-links.mjs",
     "fonts:gen": "node scripts/gen-fonts.mjs",
     "docs:sync": "node scripts/sync-docs.mjs",
@@ -29,7 +29,8 @@
     "validate": "npm run validate:content && npm run validate:quizzes && npm run validate:scenarios",
     "test:unit": "node scripts/test-progress.mjs && node scripts/test-review.mjs && node scripts/test-sandbox.mjs",
     "e2e:deep": "node e2e/verify-deep.mjs",
-    "quiz:stats": "node scripts/quiz-stats.mjs"
+    "quiz:stats": "node scripts/quiz-stats.mjs",
+    "deep:stats": "node scripts/deep-stats.mjs"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

@@ -1,13 +1,13 @@
-## 從一個具體問題開始：兩台機器，同一個 `latest`，兩種行為
+## 兩台機器，同一個 `latest`，兩種行為
 
-CI 每次合併到 main 就建一個 image，推到 registry，tag 一律是 `registry.example.com/shop/api:latest`。正式環境有兩台主機，部署腳本在每台上執行：
+CI 每次合併到 main 就建一個 image 推到 registry，tag 一律是 `registry.example.com/shop/api:latest`。正式環境兩台主機各自執行：
 
 ```bash
 docker rm -f api
 docker run -d --name api -p 8000:8000 registry.example.com/shop/api:latest
 ```
 
-某天合併了一個修正，部署後一半的請求已經修好、一半還是舊的錯誤。查下去：
+某天合併了一個修正，部署後一半的請求已經修好、一半還是舊的錯誤：
 
 ```bash
 # web-1
@@ -19,11 +19,9 @@ $ docker image inspect --format '{{index .RepoDigests 0}}' registry.example.com/
 registry.example.com/shop/api@sha256:51b7…0d2e
 ```
 
-同一個名字，兩個不同的 image。原因是 `docker run` 預設只在**本機沒有這個 image 時**才去 registry 拉。web-1 是新開的機器，第一次就拉到新版；web-2 上早就有一份舊的 `latest`，`docker run` 直接拿來用，根本沒有連到 registry。
+同一個名字，兩個不同的 image。`docker run` 預設只在**本機沒有這個 image 時**才去 registry 拉。web-1 是新開的機器，拉到新版；web-2 上早就有一份舊的 `latest`，直接拿來用。tag 是一個**可以被移動的名字**，`latest` 不代表「最新」。
 
-這是 tag 的設計，不是 Docker 的 bug：tag 是一個**可以被移動的名字**，`latest` 也只是其中一個名字，不代表「最新」。這一課從 image 與 container 的關係講起，接著是層與快取、registry 與 tag、容器的隔離、資料放哪、PID 1 與訊號，最後整理 `docker run` 的常用參數與錯誤訊息。
-
-## image 與 container
+## image 是唯讀的範本，container 是跑起來的行程
 
 | | image | container |
 |---|---|---|
@@ -32,46 +30,15 @@ registry.example.com/shop/api@sha256:51b7…0d2e
 | 數量關係 | 一個 | 同一個 image 可以同時跑很多個 container，各自有自己的可寫層 |
 | 看清單 | `docker image ls` | `docker ps`（執行中）、`docker ps -a`（含已停止） |
 
-container 有生命週期：`created` → `running` → `exited`。**container 停止不等於刪除**，停止的 container 和它的可寫層還在，`docker start` 可以讓它再跑起來；`docker rm` 才會刪掉。所以 `docker ps -a` 常常會看到一長串 `Exited` 的舊容器，用 `docker run --rm` 讓容器結束時自動刪除。
+- container 裡跑的是**一個主行程**和它的子行程。主行程結束，container 就結束。
+- 停止不等於刪除：停止的 container 和它的可寫層還在，`docker rm` 才會刪掉。
+- 資料庫檔案、上傳的檔案不放可寫層，放 volume（見選讀）。
 
-container 裡面跑的是**一個主行程**以及它衍生的子行程。主行程結束，container 就結束。這解釋了一個常見的困惑：「`docker run -d myimage` 之後，`docker ps` 看不到它」。多半是主行程啟動後馬上出錯退出了，或者它本來就是一個執行完就結束的指令。`docker ps -a` 會看到 `Exited (1) 3 seconds ago`，`docker logs <容器>` 看它印了什麼。
+## image 是一疊層：Dockerfile 的順序決定建置快取
 
-## 層：image 是一疊唯讀的檔案系統
+Dockerfile 裡會改變檔案系統的指令（`RUN`、`COPY`、`ADD`）各產生一層。每一層有一個快取鍵：重建時鍵沒變就用上次的結果（`CACHED`）；某一行的鍵變了，那一行**以及之後的每一行**都要重做。`COPY` 的鍵包含被複製檔案的內容，`RUN` 的鍵是指令的文字加前一層。
 
-Dockerfile 裡會改變檔案系統的指令（`RUN`、`COPY`、`ADD`）各產生一層；`ENV`、`CMD`、`EXPOSE` 這類只改 image 的設定，不產生有內容的層。
-
-```bash
-$ docker image history shop/api:1.4.2
-IMAGE          CREATED        CREATED BY                                      SIZE
-3f2a91c0d7e4   2 hours ago    CMD ["uvicorn" "app.main:app" "--host" "0.0…   0B
-<missing>      2 hours ago    COPY . . # buildkit                             412kB
-<missing>      2 hours ago    RUN /bin/sh -c uv sync --frozen --no-dev # b…   61.3MB
-<missing>      2 hours ago    COPY pyproject.toml uv.lock ./ # buildkit       96.1kB
-<missing>      2 hours ago    WORKDIR /app                                    0B
-<missing>      3 weeks ago    …（基底映像 python:3.12-slim 的各層）            …
-```
-
-（`<missing>` 只表示那一層沒有對應的本機 image ID，不是缺檔。）
-
-執行時，Docker 用聯合檔案系統（Linux 上通常是 overlayfs）把這些層疊起來，最上面加一層可寫層。讀檔案時從上往下找，第一個找到的就是；寫檔案時，如果檔案在下面的唯讀層，先把整個檔案**複製到可寫層**再改（copy-on-write）。這帶來幾個結果：
-
-- **層是共用的**。十個 container 用同一個 image，唯讀層在磁碟上只有一份；兩個 image 用同一個基底，基底的層也只存一份、只下載一次。
-- **後面的層刪檔案不會讓 image 變小**。`RUN rm` 只是在新的一層記錄「這個檔案被刪了」，前一層的內容仍然在 image 裡。要在同一個 `RUN` 裡下載、使用、刪除，或用多階段建置，見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
-- **大量寫入可寫層又慢又會遺失**。資料庫檔案、上傳的檔案要放 volume（下面會講）。
-
-### 建置快取
-
-每一層都有一個快取鍵。重建時，Docker 依序檢查每一行：鍵沒變就直接用上次的結果（`CACHED`），某一行的鍵變了，那一行**以及之後的每一行**都要重做。
-
-| 指令 | 快取鍵包含 | 結果 |
-|---|---|---|
-| `FROM` | 基底映像的內容（digest） | 基底更新了，全部重建 |
-| `COPY` / `ADD` | 指令本身 + **被複製檔案的內容** | 檔案內容一變就失效（修改時間不算） |
-| `RUN` | 指令的文字 + 前一層 | 文字沒變就用快取，**不管外面的世界變了沒** |
-
-`RUN` 那一列是個陷阱：`RUN apt-get update` 第一次執行後就被快取，三個月後重建 image，套件清單還是三個月前的。官方建議把 `apt-get update` 和 `apt-get install` 寫在同一個 `RUN` 裡，讓它們一起失效；要強制全部重來用 `docker build --no-cache`。
-
-下面用雜湊模擬這條「一層失效，後面全部失效」的鏈：每一層的鍵由前一層的鍵加上自己的輸入算出來。可以直接執行：
+下面用雜湊模擬這條鏈：
 
 ```python run
 import hashlib
@@ -107,19 +74,80 @@ for name, steps in [("好的順序", good), ("壞的順序", bad)]:
 
 壞的順序裡，`COPY . .` 在安裝依賴之前，改一行程式碼就讓 `uv sync` 重跑。[DockerLab](#/lab/DockerLab) 把同一件事畫成圖。
 
-## registry、tag 與 digest
+## 用不會重複的 tag 部署，以及兩個最常見的錯誤訊息
 
-image 的完整名字是這樣組成的：
+image 的完整名字：
 
 ```text
 registry.example.com/shop/api:1.4.2@sha256:9c1e…a41f
 └──── registry ────┘ └ repo ┘ └tag┘ └──── digest ────┘
 ```
 
+- **tag** 是人取的名字，可以被重新指向另一個 image；不寫時預設是 `latest`。
+- **digest** 是 image 內容的 SHA-256。用 digest 拉，每一台拿到的位元組完全相同。
+
+自己建的 image 用不會重複的 tag（例如 git commit SHA），推出去之後不再移動它；部署時明確 `docker pull`，或 `docker run --pull=always`：
+
+```bash
+docker pull registry.example.com/shop/api:8d1e7f40
+docker rm -f api
+docker run -d --name api -p 8000:8000 registry.example.com/shop/api:8d1e7f40
+docker ps                 # 看不到就用 docker ps -a
+docker logs api           # 主行程印了什麼
+```
+
+| 訊息 | 原因 | 怎麼修 |
+|---|---|---|
+| `Bind for 0.0.0.0:8000 failed: port is already allocated` | 主機上的 8000 已經被別的容器或程式占用 | `docker ps` 看是不是舊容器；或換一個主機埠 `-p 8001:8000` |
+| 容器立刻 `Exited (0)` 或 `Exited (1)`，`docker ps` 看不到 | 主行程結束了 | `docker logs`；確認 CMD 是常駐程式而不是跑完就結束的指令 |
+
+:::stop 讀到這裡可以先停：分得出 image 與 container、會排 Dockerfile 的順序讓快取生效、部署時用不會重複的 tag 或 digest 確認每台跑的是同一份。後面是層的細節、`latest` 的其他問題與多架構、隔離、資料存放、PID 1 與訊號、`docker run` 的參數與完整的錯誤訊息表，容器裡的資料不見、`docker stop` 要等 10 秒或遇到錯誤訊息時再回來讀。
+
+## container 的生命週期
+
+container 有生命週期：`created` → `running` → `exited`。**container 停止不等於刪除**，停止的 container 和它的可寫層還在，`docker start` 可以讓它再跑起來；`docker rm` 才會刪掉。所以 `docker ps -a` 常常會看到一長串 `Exited` 的舊容器，用 `docker run --rm` 讓容器結束時自動刪除。
+
+container 裡面跑的是**一個主行程**以及它衍生的子行程。主行程結束，container 就結束。這解釋了一個常見的困惑：「`docker run -d myimage` 之後，`docker ps` 看不到它」。多半是主行程啟動後馬上出錯退出了，或者它本來就是一個執行完就結束的指令。`docker ps -a` 會看到 `Exited (1) 3 seconds ago`，`docker logs <容器>` 看它印了什麼。
+
+## 層的細節：history、copy-on-write 與快取鍵
+
+`ENV`、`CMD`、`EXPOSE` 這類指令只改 image 的設定，不產生有內容的層。
+
+```bash
+$ docker image history shop/api:1.4.2
+IMAGE          CREATED        CREATED BY                                      SIZE
+3f2a91c0d7e4   2 hours ago    CMD ["uvicorn" "app.main:app" "--host" "0.0…   0B
+<missing>      2 hours ago    COPY . . # buildkit                             412kB
+<missing>      2 hours ago    RUN /bin/sh -c uv sync --frozen --no-dev # b…   61.3MB
+<missing>      2 hours ago    COPY pyproject.toml uv.lock ./ # buildkit       96.1kB
+<missing>      2 hours ago    WORKDIR /app                                    0B
+<missing>      3 weeks ago    …（基底映像 python:3.12-slim 的各層）            …
+```
+
+（`<missing>` 只表示那一層沒有對應的本機 image ID，不是缺檔。）
+
+執行時，Docker 用聯合檔案系統（Linux 上通常是 overlayfs）把這些層疊起來，最上面加一層可寫層。讀檔案時從上往下找，第一個找到的就是；寫檔案時，如果檔案在下面的唯讀層，先把整個檔案**複製到可寫層**再改（copy-on-write）。這帶來幾個結果：
+
+- **層是共用的**。十個 container 用同一個 image，唯讀層在磁碟上只有一份；兩個 image 用同一個基底，基底的層也只存一份、只下載一次。
+- **後面的層刪檔案不會讓 image 變小**。`RUN rm` 只是在新的一層記錄「這個檔案被刪了」，前一層的內容仍然在 image 裡。要在同一個 `RUN` 裡下載、使用、刪除，或用多階段建置，見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
+- **大量寫入可寫層又慢又會遺失**。資料庫檔案、上傳的檔案要放 volume（下面會講）。
+
+| 指令 | 快取鍵包含 | 結果 |
+|---|---|---|
+| `FROM` | 基底映像的內容（digest） | 基底更新了，全部重建 |
+| `COPY` / `ADD` | 指令本身 + **被複製檔案的內容** | 檔案內容一變就失效（修改時間不算） |
+| `RUN` | 指令的文字 + 前一層 | 文字沒變就用快取，**不管外面的世界變了沒** |
+
+`RUN` 那一列是個陷阱：`RUN apt-get update` 第一次執行後就被快取，三個月後重建 image，套件清單還是三個月前的。官方建議把 `apt-get update` 和 `apt-get install` 寫在同一個 `RUN` 裡，讓它們一起失效；要強制全部重來用 `docker build --no-cache`。
+
+## registry、tag 與 digest 的細節
+
+名字的前兩段：
+
 - **registry**：存 image 的伺服器。省略時是 Docker Hub（`docker.io`），只寫 `python:3.12-slim` 等於 `docker.io/library/python:3.12-slim`。
 - **repository**：同一個 image 的各個版本放在一起。
-- **tag**：人取的名字，可以被重新指向另一個 image。不寫 tag 時預設是 `latest`。
-- **digest**：image 內容的 SHA-256，內容不變它就不變，內容一變它一定變。用 digest 拉，保證每一台拿到的位元組完全相同。
+
+digest 是內容的雜湊：內容不變它就不變，內容一變它一定變。
 
 `latest` 的問題整理如下：
 
@@ -145,8 +173,6 @@ exec /usr/local/bin/python3: exec format error
 ```
 
 意思是「這個執行檔不是這顆 CPU 能跑的格式」。建置時指定目標平台：`docker buildx build --platform linux/amd64 -t … --push .`，或交給 CI 在目標架構上建。
-
-:::stop 讀到這裡可以先停：分得出 image 與 container，會排 Dockerfile 的順序讓快取生效，部署時用 digest 確認每台跑的是同一份。後面的隔離、資料存放、PID 1 與常用參數，在容器裡的資料不見或 `docker stop` 要等 10 秒時再回來讀。
 
 ## 隔離：container 不是虛擬機
 

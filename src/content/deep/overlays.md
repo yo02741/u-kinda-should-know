@@ -1,4 +1,4 @@
-## 從一個具體問題開始：關掉 Dialog 之後，焦點回到頁首
+## 關掉 Dialog 之後，焦點回到頁首
 
 預約清單每一列有「取消預約」，按下去跳出確認視窗。視窗是一個 `div`，`position: fixed` 加 `z-index: 1000`，蓋在頁面中央。用滑鼠操作一切正常，換成鍵盤：
 
@@ -8,11 +8,7 @@
 - 頁首是 `position: sticky` 的導覽列，在某幾頁會蓋在視窗上面，原因是視窗被放在一個有 `transform` 的容器裡。
 - 手機上，在視窗裡往下滑，後面的清單跟著捲。
 
-這幾個問題都是浮層的基本行為：焦點去哪、Esc 怎麼關、背景能不能操作、誰蓋在誰上面。原生的 `<dialog>` 與 `popover` 已經處理掉大部分。
-
-## 運作原理
-
-### 浮層的種類
+## 浮層的種類：擋不擋操作、焦點去哪、怎麼關
 
 | 元件 | 擋住其他操作 | 開啟時焦點 | 怎麼關 | 原生做法 | ARIA |
 |---|---|---|---|---|---|
@@ -24,21 +20,9 @@
 
 選擇的順序：使用者一定要處理才能繼續嗎（Dialog、Drawer）？是附屬在某個按鈕旁的設定或資訊，而且裡面有可以點的東西嗎（Popover）？只是一句說明嗎（Tooltip）？
 
-### Dialog 的焦點：開啟、留在裡面、還回去
+## 運作原理：showModal() 替你做的事
 
-WAI-ARIA APG 的 Dialog (Modal) 模式：
-
-1. 開啟時焦點移到 Dialog 裡的元素，通常是第一個可聚焦的元素。內容很長時，先聚焦開頭的標題或段落（加 `tabindex="-1"`）；確認刪除這類不容易復原的操作，可以先聚焦比較安全的按鈕。
-2. 開著的時候，Tab 與 Shift+Tab 只在 Dialog 裡移動，到了最後一個再按 Tab 回到第一個。
-3. Esc 關閉。
-4. 關閉後焦點回到開啟它的元素；那個元素不存在了，就移到接得上工作流程的地方。
-5. 建議 Tab 順序裡一定有一顆看得見的關閉或取消按鈕。
-
-APG 也提醒：`aria-modal="true"` 會讓部分輔助科技看不到 Dialog 以外的內容，所以只有在程式真的擋住了外面所有操作、外面也被遮暗時才標。用 `div` 做卻沒擋住背景，標了反而更糟。
-
-### 原生 `<dialog>` 做了哪些事
-
-照 WHATWG HTML 規範，呼叫 `showModal()` 時：
+modal Dialog 的規則（WAI-ARIA APG）：開啟時焦點移進 Dialog，Tab 只在裡面移動，Esc 關閉，關閉後焦點回到開啟它的元素。原生 `<dialog>`（Baseline 2022）呼叫 `showModal()` 時，照 WHATWG HTML 規範：
 
 ```text
 showModal()
@@ -56,85 +40,9 @@ showModal()
      └─ 焦點還給剛才記下的元素
 ```
 
-規範要求關閉 modal Dialog 時把焦點還給開啟前的元素；這一課沒有逐一實測各瀏覽器，驗收時照樣檢查。
+Dialog 裡的 `<form method="dialog">` 送出時直接關閉 Dialog，按下的按鈕的 `value` 成為 `returnValue`，不會發出網路請求。
 
-幾個常用的部分：
-
-- `close(value)` 關閉並把 `returnValue` 設成 `value`。
-- Dialog 裡的 `<form method="dialog">` 送出時直接關閉 Dialog，按下的按鈕的 `value` 成為 `returnValue`，不會發出網路請求。
-- `::backdrop` 是後面那層遮罩的樣式；`:modal` 選得到目前以 modal 開啟的 Dialog（Baseline 2022）。
-- 在最後一個元素再按 Tab，焦點不會走到頁面其他元素；依瀏覽器而定，可能移到網址列這類瀏覽器介面，而不是繞回 Dialog 的第一個元素。
-
-`<dialog>` 是 Baseline 2022。較新的屬性要看支援狀態（依 2026-11 的 web-features 資料）：
-
-| 功能 | 做什麼 | 狀態 |
-|---|---|---|
-| `closedby="any"` | 點背景也能關閉 Dialog | 還不是 Baseline（Chrome 134、Firefox 141 起，Safari 尚未支援） |
-| `command="show-modal"`、`commandfor` | 按鈕不寫 JavaScript 就能開關 Dialog 或 popover | Baseline 2025（2025 年 12 月），舊瀏覽器要退路 |
-| `requestClose()`、`command="request-close"` | 和按 Esc 一樣先觸發 `cancel`，可以在這裡擋下「表單還沒存」 | Baseline 2025（2025 年 5 月），舊瀏覽器要退路 |
-
-:::stop 讀到這裡可以先停：會依擋不擋操作選浮層，並用原生 `<dialog>` 的 `showModal()` 處理開啟、Esc 與焦點歸還。後面的 Popover、Tooltip、背景捲動與疊放，在做到那種浮層或遇到浮層被蓋住時再回來讀。
-
-### Popover
-
-`popover` 屬性讓任何元素變成浮層，`popovertarget` 指定由哪顆按鈕開關（Baseline 2025，2025 年 1 月）：
-
-```html
-<button popovertarget="filters">篩選</button>
-<div id="filters" popover>
-  <label><input type="checkbox" name="status" value="waiting"> 只看候診</label>
-</div>
-```
-
-| `popover` 的值 | 點外面或 Esc 會關（light dismiss） | 開啟時關掉其他 popover |
-|---|---|---|
-| `auto`（寫 `popover` 不帶值就是這個） | 會 | 會（祖先除外） |
-| `manual` | 不會，要自己關 | 不會 |
-| `hint` | 會 | 只關其他 `hint`；還不是 Baseline |
-
-Popover 同樣放在 top layer，但不會讓頁面其他部分 inert，也不困住焦點。開啟時焦點不會自動移進去，除非裡面有 `autofocus` 的元素；`auto` popover 關閉時，如果焦點在 popover 裡，會還給開啟前有焦點的元素。
-
-把 popover 定位在按鈕旁邊的 CSS anchor positioning，依 2026-11 的 web-features 資料還不是 Baseline，目前多半用 Floating UI 這類函式庫，或自己用 `getBoundingClientRect()` 計算位置。
-
-### Tooltip
-
-APG 的 Tooltip 模式頁面標明「仍在進行中，還沒有工作小組的共識」，以下是它目前的說法：Tooltip 在觸發元素取得焦點或滑鼠移上去時出現，通常有一點延遲；Tooltip 本身拿不到焦點；Esc 關閉；觸發元素用 `aria-describedby` 指向 `role="tooltip"` 的元素。需要放可聚焦元素時，改用非 modal 的 Dialog。
-
-WCAG 2.1 的 1.4.13 Content on Hover or Focus（AA）對 hover 或 focus 才出現的內容有三個要求：
-
-- **可以關掉**：不移動滑鼠或焦點也能關（例如 Esc）。
-- **滑鼠移得上去**：滑鼠從觸發元素移到 Tooltip 上，Tooltip 不能消失。
-- **不自己消失**：直到移開、關掉或資訊失效之前都留著。
-
-瀏覽器內建的 `title` 提示是這條的例外，但它多半只在滑鼠停留時出現，鍵盤與觸控使用者看不到，重要的說明不要只放在 `title`。
-
-AI 有時會產生 `interestfor` 屬性（滑鼠停留或聚焦就開啟目標的 interest invokers）搭配 `popover="hint"` 的 Tooltip。依 2026-11 的 web-features 資料，`interestfor` 只有 Chrome 149 起支援，`popover="hint"` 也還不是 Baseline。用它就要另外寫 `mouseenter`、`focus`、`Esc` 的處理當退路，不能當成唯一的寫法。
-
-### Drawer 與手機
-
-Drawer 是位置不同的 Dialog：從側邊或底部滑出，擋住頁面時規則和 modal Dialog 完全一樣。手機上常把置中的 Dialog 改成從底部滑出的 Sheet，只改 CSS，不改行為。
-
-### 背景捲動與 top layer
-
-`showModal()` 讓背景不能點、不能聚焦，但滾輪與觸控捲動仍可能捲到後面的頁面：滑鼠停在 `::backdrop` 上捲動，或 Dialog 自己捲到底之後繼續捲。用 CSS 擋：
-
-```css
-dialog:modal { overscroll-behavior: contain; }   /* Dialog 裡的捲動不傳給頁面 */
-dialog::backdrop {
-  overflow: hidden;                              /* 讓 ::backdrop 成為捲動容器，overscroll-behavior 才有作用 */
-  overscroll-behavior: contain;
-}
-```
-
-`overscroll-behavior` 本身早就各瀏覽器都支援，但「內容沒有溢出的捲動容器也套用」是較新的行為。依 2026-11 的 web-features 資料只有 Chrome 144、Firefox 150 起支援，Safari 還不支援，也沒辦法用 `@supports` 偵測。沒支援的瀏覽器裡，Dialog 內容比畫面高時照樣不會把捲動傳出去，滑鼠在背景上捲動則仍會捲到頁面，背景照樣不能點、不能聚焦。
-
-舊做法是開 Dialog 時把 `html` 或 `body` 設成 `overflow: hidden`（或 `body:has(dialog[open]) { overflow: hidden }`）、`position: fixed`。捲軸消失會讓整頁左右跳，`position: fixed` 的版本還要自己記住並還原捲動位置。規格要求 Safari 也絕對不能捲時才考慮它，並在驗收時檢查版面有沒有跳動。
-
-用 `position: fixed` 加 `z-index` 做的浮層，只要某個祖先建立了 stacking context（`transform`、`filter`、`opacity` 小於 1、有 `z-index` 的定位元素…），它的 `z-index` 就只在那個祖先裡比較，蓋不過祖先外面的 sticky 導覽列。祖先有 `transform` 或 `filter` 時，`position: fixed` 還會改成以那個祖先定位，祖先的 `overflow: hidden` 也會把它切掉。top layer 的元素不受祖先的 stacking context、`transform` 與 `overflow` 影響，這些問題都不會發生。
-
-## 實際程式
-
-確認取消預約的 Dialog，用原生 `<dialog>`：
+## 確認取消預約的 Dialog，與兩個最常見的錯誤
 
 ```vue
 <script setup>
@@ -186,19 +94,121 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); overflow: hidden; overscroll-be
 - `role="alertdialog"` 用在要使用者確認的 Dialog；一般的表單 Dialog 不用寫，`<dialog>` 預設的角色就是 `dialog`。
 - 不寫 `aria-modal`：`showModal()` 開的 Dialog，背景的 inert 與 modal 狀態由瀏覽器處理。
 
-在 `setup` 頂層、也就是元件掛載前呼叫 `dialog.value.showModal()`，`dialog.value` 還是 `null`，錯誤訊息是 `Cannot read properties of null (reading 'showModal')`。只在使用者操作（`@click`）或 `onMounted` 之後呼叫。
+| 現象或訊息 | 原因 | 修法 |
+|---|---|---|
+| 背景能操作、沒有 `::backdrop`、Esc 不會關 | 用 `<dialog :open="show">` 綁定開關，開出的是非 modal 的 Dialog | 用 `showModal()` |
+| `Cannot read properties of null (reading 'showModal')` | 在 `setup` 頂層、元件掛載前呼叫，`dialog.value` 還是 `null` | 只在使用者操作（`@click`）或 `onMounted` 之後呼叫 |
 
-## 常見錯誤
+:::stop 讀到這裡可以先停：會依擋不擋操作選浮層，並用原生 `<dialog>` 的 `showModal()` 做出確認視窗，處理開啟、Esc 與焦點歸還。後面是 APG 的焦點規則、較新的屬性、Popover、Tooltip、背景捲動與疊放，做到那種浮層或遇到浮層被蓋住時再回來讀。
 
-- **用 `:open` 綁定開關 Dialog**：`<dialog :open="show">` 開出的是非 modal 的 Dialog，背景能操作、沒有 `::backdrop`、Esc 不會關。要用 `showModal()`。
-- **對已經開著的 Dialog 呼叫 `showModal()`**：用 `open` 屬性或 `show()` 開過的 Dialog 再呼叫 `showModal()`，會丟出 `InvalidStateError`；Dialog 不在 DOM 裡時呼叫也一樣。
-- **關閉後焦點掉到 `body`**：自己做的 Dialog 沒記下觸發元素。Console 建立 live expression `document.activeElement` 一看就知道。
-- **在 `keydown` 自己處理 Esc，又用了原生 `<dialog>`**：兩邊都關一次，或 `preventDefault()` 擋掉了原生的關閉。取消原生行為請聽 `cancel` 事件。
-- **Tooltip 裡放連結**：滑鼠移過去 Tooltip 就消失，鍵盤也到不了。改用 Popover。
-- **Tooltip 只聽 `mouseenter`**：Tab 到觸發元素時不出現，鍵盤使用者看不到說明。
-- **`z-index: 9999` 還是被蓋住**：浮層在一個建立了 stacking context 的祖先裡。改用 top layer，或把浮層用 `<Teleport to="body">` 搬到 `body` 底下。
-- **點背景關閉，填到一半的表單不見了**：有輸入內容的 Dialog，點背景不要關閉，或關閉前確認。確認寫在 `cancel` 事件裡（Esc 與 `requestClose()` 都會先觸發它），「取消」按鈕呼叫 `requestClose()` 走同一條路；`closedby` 不是每個瀏覽器都有，不能只靠它擋。沒有 `requestClose()` 的瀏覽器，退路是自己發一個可取消的 `cancel` 事件：`if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close()`。
-- **用了 `<dialog>` 又補上舊的手工處理**：`role="dialog"`、`aria-modal="true"`、自己寫的焦點陷阱、開啟時把 `body` 設成 `overflow: hidden`。`showModal()` 已經提供角色、modal 狀態與焦點範圍，這些都刪掉。要使用者確認的視窗可以寫 `role="alertdialog"`，那是另一個角色，不算重複。
+## Dialog 的焦點：開啟、留在裡面、還回去
+
+WAI-ARIA APG 的 Dialog (Modal) 模式：
+
+1. 開啟時焦點移到 Dialog 裡的元素，通常是第一個可聚焦的元素。內容很長時，先聚焦開頭的標題或段落（加 `tabindex="-1"`）；確認刪除這類不容易復原的操作，可以先聚焦比較安全的按鈕。
+2. 開著的時候，Tab 與 Shift+Tab 只在 Dialog 裡移動，到了最後一個再按 Tab 回到第一個。
+3. Esc 關閉。
+4. 關閉後焦點回到開啟它的元素；那個元素不存在了，就移到接得上工作流程的地方。
+5. 建議 Tab 順序裡一定有一顆看得見的關閉或取消按鈕。
+
+APG 也提醒：`aria-modal="true"` 會讓部分輔助科技看不到 Dialog 以外的內容，所以只有在程式真的擋住了外面所有操作、外面也被遮暗時才標。用 `div` 做卻沒擋住背景，標了反而更糟。
+
+## `<dialog>` 的其他方法與較新的屬性
+
+規範要求關閉 modal Dialog 時把焦點還給開啟前的元素；這一課沒有逐一實測各瀏覽器，驗收時照樣檢查。
+
+- `close(value)` 關閉並把 `returnValue` 設成 `value`。
+- `::backdrop` 是後面那層遮罩的樣式；`:modal` 選得到目前以 modal 開啟的 Dialog（Baseline 2022）。
+- 在最後一個元素再按 Tab，焦點不會走到頁面其他元素；依瀏覽器而定，可能移到網址列這類瀏覽器介面，而不是繞回 Dialog 的第一個元素。
+
+`<dialog>` 是 Baseline 2022。較新的屬性要看支援狀態（依 2026-11 的 web-features 資料）：
+
+| 功能 | 做什麼 | 狀態 |
+|---|---|---|
+| `closedby="any"` | 點背景也能關閉 Dialog | 還不是 Baseline（Chrome 134、Firefox 141 起，Safari 尚未支援） |
+| `command="show-modal"`、`commandfor` | 按鈕不寫 JavaScript 就能開關 Dialog 或 popover | Baseline 2025（2025 年 12 月），舊瀏覽器要退路 |
+| `requestClose()`、`command="request-close"` | 和按 Esc 一樣先觸發 `cancel`，可以在這裡擋下「表單還沒存」 | Baseline 2025（2025 年 5 月），舊瀏覽器要退路 |
+
+## Popover：不擋操作的浮層
+
+`popover` 屬性讓任何元素變成浮層，`popovertarget` 指定由哪顆按鈕開關（Baseline 2025，2025 年 1 月）：
+
+```html
+<button popovertarget="filters">篩選</button>
+<div id="filters" popover>
+  <label><input type="checkbox" name="status" value="waiting"> 只看候診</label>
+</div>
+```
+
+| `popover` 的值 | 點外面或 Esc 會關（light dismiss） | 開啟時關掉其他 popover |
+|---|---|---|
+| `auto`（寫 `popover` 不帶值就是這個） | 會 | 會（祖先除外） |
+| `manual` | 不會，要自己關 | 不會 |
+| `hint` | 會 | 只關其他 `hint`；還不是 Baseline |
+
+Popover 同樣放在 top layer，但不會讓頁面其他部分 inert，也不困住焦點。開啟時焦點不會自動移進去，除非裡面有 `autofocus` 的元素；`auto` popover 關閉時，如果焦點在 popover 裡，會還給開啟前有焦點的元素。
+
+把 popover 定位在按鈕旁邊的 CSS anchor positioning，依 2026-11 的 web-features 資料還不是 Baseline，目前多半用 Floating UI 這類函式庫，或自己用 `getBoundingClientRect()` 計算位置。
+
+## Tooltip 與 WCAG 1.4.13
+
+APG 的 Tooltip 模式頁面標明「仍在進行中，還沒有工作小組的共識」，以下是它目前的說法：Tooltip 在觸發元素取得焦點或滑鼠移上去時出現，通常有一點延遲；Tooltip 本身拿不到焦點；Esc 關閉；觸發元素用 `aria-describedby` 指向 `role="tooltip"` 的元素。需要放可聚焦元素時，改用非 modal 的 Dialog。
+
+WCAG 2.1 的 1.4.13 Content on Hover or Focus（AA）對 hover 或 focus 才出現的內容有三個要求：
+
+- **可以關掉**：不移動滑鼠或焦點也能關（例如 Esc）。
+- **滑鼠移得上去**：滑鼠從觸發元素移到 Tooltip 上，Tooltip 不能消失。
+- **不自己消失**：直到移開、關掉或資訊失效之前都留著。
+
+瀏覽器內建的 `title` 提示是這條的例外，但它多半只在滑鼠停留時出現，鍵盤與觸控使用者看不到，重要的說明不要只放在 `title`。
+
+AI 有時會產生 `interestfor` 屬性（滑鼠停留或聚焦就開啟目標的 interest invokers）搭配 `popover="hint"` 的 Tooltip。依 2026-11 的 web-features 資料，`interestfor` 只有 Chrome 149 起支援，`popover="hint"` 也還不是 Baseline。用它就要另外寫 `mouseenter`、`focus`、`Esc` 的處理當退路，不能當成唯一的寫法。
+
+## Drawer 與手機
+
+Drawer 是位置不同的 Dialog：從側邊或底部滑出，擋住頁面時規則和 modal Dialog 完全一樣。手機上常把置中的 Dialog 改成從底部滑出的 Sheet，只改 CSS，不改行為。
+
+## 背景捲動
+
+`showModal()` 讓背景不能點、不能聚焦，但滾輪與觸控捲動仍可能捲到後面的頁面：滑鼠停在 `::backdrop` 上捲動，或 Dialog 自己捲到底之後繼續捲。用 CSS 擋：
+
+```css
+dialog:modal { overscroll-behavior: contain; }   /* Dialog 裡的捲動不傳給頁面 */
+dialog::backdrop {
+  overflow: hidden;                              /* 讓 ::backdrop 成為捲動容器，overscroll-behavior 才有作用 */
+  overscroll-behavior: contain;
+}
+```
+
+`overscroll-behavior` 本身早就各瀏覽器都支援，但「內容沒有溢出的捲動容器也套用」是較新的行為。依 2026-11 的 web-features 資料只有 Chrome 144、Firefox 150 起支援，Safari 還不支援，也沒辦法用 `@supports` 偵測。沒支援的瀏覽器裡，Dialog 內容比畫面高時照樣不會把捲動傳出去，滑鼠在背景上捲動則仍會捲到頁面，背景照樣不能點、不能聚焦。
+
+舊做法是開 Dialog 時把 `html` 或 `body` 設成 `overflow: hidden`（或 `body:has(dialog[open]) { overflow: hidden }`）、`position: fixed`。捲軸消失會讓整頁左右跳，`position: fixed` 的版本還要自己記住並還原捲動位置。規格要求 Safari 也絕對不能捲時才考慮它，並在驗收時檢查版面有沒有跳動。
+
+## top layer 與 z-index 的差別
+
+| | `position: fixed` 加 `z-index` | top layer（`showModal()`、popover） |
+|---|---|---|
+| 祖先建立了 stacking context（`transform`、`filter`、`opacity` 小於 1、有 `z-index` 的定位元素…） | `z-index` 只在那個祖先裡比較，蓋不過祖先外面的 sticky 導覽列 | 不受影響 |
+| 祖先有 `transform` 或 `filter` | `position: fixed` 改成以那個祖先定位 | 不受影響 |
+| 祖先有 `overflow: hidden` | 浮層被切掉（祖先有 `transform` 或 `filter` 時） | 不受影響 |
+
+## 其餘常見錯誤
+
+| 錯誤 | 現象與原因 | 修法 |
+|---|---|---|
+| 對已經開著的 Dialog 呼叫 `showModal()` | 用 `open` 屬性或 `show()` 開過再呼叫，丟出 `InvalidStateError`；Dialog 不在 DOM 裡時呼叫也一樣 | 只用 `showModal()` 開 |
+| 關閉後焦點掉到 `body` | 自己做的 Dialog 沒記下觸發元素 | Console 建立 live expression `document.activeElement` 檢查 |
+| 在 `keydown` 自己處理 Esc，又用了原生 `<dialog>` | 兩邊都關一次，或 `preventDefault()` 擋掉了原生的關閉 | 取消原生行為請聽 `cancel` 事件 |
+| Tooltip 裡放連結 | 滑鼠移過去 Tooltip 就消失，鍵盤也到不了 | 改用 Popover |
+| Tooltip 只聽 `mouseenter` | Tab 到觸發元素時不出現，鍵盤使用者看不到說明 | 也聽焦點 |
+| `z-index: 9999` 還是被蓋住 | 浮層在一個建立了 stacking context 的祖先裡 | 改用 top layer，或用 `<Teleport to="body">` 把浮層搬到 `body` 底下 |
+| 用了 `<dialog>` 又補上舊的手工處理 | `role="dialog"`、`aria-modal="true"`、自己寫的焦點陷阱、開啟時把 `body` 設成 `overflow: hidden`；`showModal()` 已經提供角色、modal 狀態與焦點範圍 | 都刪掉。要使用者確認的視窗可以寫 `role="alertdialog"`，那是另一個角色，不算重複 |
+
+**點背景關閉，填到一半的表單不見了**：有輸入內容的 Dialog，點背景不要關閉，或關閉前確認。
+
+- 確認寫在 `cancel` 事件裡（Esc 與 `requestClose()` 都會先觸發它），「取消」按鈕呼叫 `requestClose()` 走同一條路。
+- `closedby` 不是每個瀏覽器都有，不能只靠它擋。
+- 沒有 `requestClose()` 的瀏覽器，退路是自己發一個可取消的 `cancel` 事件：`if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close()`。
 
 AI 產生的 Dialog 最常見的是 `div` 加 `v-if` 加 `z-index`：沒有焦點移動、沒有 Esc、背景沒有 inert。描述需求時指定「用原生 `<dialog>` 的 `showModal()`」，並寫出開啟與關閉時焦點的位置。
 

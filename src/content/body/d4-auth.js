@@ -29,7 +29,7 @@ const base = {
       ],
     },
     challenge: {
-      task: '改本課「查表 vs 驗簽章」那段 Python：alice 在「手機」與「網咖」各登入一次，兩邊都拿到 session id 與 token。依序做四件事：(1) 網咖那台按登出；(2) 一小時後手機繼續用；(3) alice 改密碼並「登出所有裝置」；(4) 關掉網咖的分頁再打開，瀏覽器帶著同一份 cookie 或 token 回來。每一步之後，先預測兩台裝置的 session 版與 token 版各會不會通過，再執行。',
+      task: '改本課「查表與驗簽章的程式比較」那段 Python：alice 在「手機」與「網咖」各登入一次，兩邊都拿到 session id 與 token。依序做四件事：(1) 網咖那台按登出；(2) 一小時後手機繼續用；(3) alice 改密碼並「登出所有裝置」；(4) 關掉網咖的分頁再打開，瀏覽器帶著同一份 cookie 或 token 回來。每一步之後，先預測兩台裝置的 session 版與 token 版各會不會通過，再執行。',
       deliver: '一張「步驟 × 裝置 × session 版／token 版」的預測與實際對照表，加上 token 版在「登出所有裝置」之後還能用多久。',
       check: [
         '預測寫在執行之前',

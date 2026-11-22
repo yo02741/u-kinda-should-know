@@ -1,6 +1,6 @@
-## 從一個具體問題開始：一個引號讓搜尋回傳整張表
+## 一個引號讓搜尋回傳整張表
 
-後台有一個「用 email 查會員」的功能，程式是這樣寫的：
+後台有一個「用 email 查會員」的功能：
 
 ```python
 # 危險：把使用者輸入直接拼進 SQL 字串
@@ -9,7 +9,7 @@ def find_user(conn, email: str):
     return conn.execute(sql).fetchall()
 ```
 
-正常輸入 `alice@example.com` 時，送到資料庫的 SQL 是：
+輸入 `alice@example.com` 時，送到資料庫的 SQL 是：
 
 ```sql
 SELECT id, name, email FROM users WHERE email = 'alice@example.com'
@@ -21,13 +21,13 @@ SELECT id, name, email FROM users WHERE email = 'alice@example.com'
 SELECT id, name, email FROM users WHERE email = '' OR '1'='1'
 ```
 
-第一個引號提前關掉了字串，後面的 `OR '1'='1'` 成了 SQL 語法的一部分。`'1'='1'` 對每一列都成立，於是整張會員表都被回傳。同樣的手法放在登入表單，可以讓「帳號或密碼正確」的判斷永遠成立；放在有權限寫入的帳號上，可以改資料或刪資料。
+第一個引號提前關掉了字串，後面的 `OR '1'='1'` 成了 SQL 語法的一部分，對每一列都成立，整張會員表被回傳。同樣的手法放在登入表單，可以讓密碼判斷永遠成立。
 
-另一個沒有惡意的版本：會員叫 `O'Brien`，查詢直接噴 `syntax error`。兩件事是同一個 bug：**輸入被當成程式碼的一部分解析**。
+沒有惡意的版本：會員叫 `O'Brien`，查詢直接噴 `syntax error`。兩件事是同一個 bug：**輸入被當成程式碼的一部分解析**。
 
-## 運作原理：注入改變的是語法結構
+## 注入改變語法結構，參數化把結構與值分開送
 
-資料庫收到 SQL 字串後，第一步是把它切成 token（關鍵字、識別字、字串常值、運算子），再組成語法樹。開發者心中的語法樹長這樣：
+資料庫收到 SQL 字串後，先切成 token，再組成語法樹：
 
 | 開發者以為的結構 | 實際被解析的結構（輸入 `' OR '1'='1`） |
 |---|---|
@@ -35,76 +35,21 @@ SELECT id, name, email FROM users WHERE email = '' OR '1'='1'
 | 字串內容：使用者輸入的整段文字 | 左邊：`email = ''`（空字串） |
 | | 右邊：`'1' = '1'`（永遠為真） |
 
-拼接的問題是**程式碼與資料走同一條通道**：資料庫看到的只有一串文字，分不出哪一段是開發者寫的、哪一段是使用者給的。輸入只要能讓解析器切出不同的 token，就能改變查詢的意義。
+資料庫看到的只有一串文字，分不出哪一段是開發者寫的、哪一段是使用者給的。
 
-這個模式出現在所有「把字串交給另一個解譯器」的地方：
-
-| 解譯器 | 拼接的位置 | 名稱 |
-|---|---|---|
-| SQL 資料庫 | `WHERE`、`ORDER BY`、表名 | SQL injection |
-| shell（`/bin/sh`） | `os.system`、`subprocess(..., shell=True)` | 命令注入（OS command injection） |
-| 模板引擎（Jinja2 等） | 把使用者輸入當模板原始碼編譯 | 伺服器端模板注入（SSTI） |
-| NoSQL 查詢（MongoDB filter） | 使用者的 JSON 直接當 filter | 運算子注入 |
-| LDAP、XPath | filter 字串 | LDAP／XPath injection |
-| 瀏覽器的 HTML 解析器 | 回應的 HTML | XSS（見 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)） |
-
-### 參數化查詢為什麼有效
-
-參數化查詢（parameterized query，也叫 prepared statement）把「SQL 結構」與「值」分開送。以 PostgreSQL 的 extended query protocol 為例：
+參數化查詢（parameterized query，也叫 prepared statement）把 SQL 結構與值分開送。以 PostgreSQL 為例：
 
 1. **Parse**：送出 `SELECT … WHERE email = $1`。資料庫在這一步就完成解析，語法樹裡 `$1` 的位置固定是「一個值」。
 2. **Bind**：另外送出參數值，例如 `' OR '1'='1` 這 11 個字元。
 3. **Execute**：用已經解析好的語法樹執行。
 
-值到達時解析已經結束，它不會再被切成 token，裡面的引號只是普通字元。所以查詢的意思變成「找 email 剛好等於 `' OR '1'='1` 這串文字的會員」，結果是 0 列。
+值到達時解析已經結束，裡面的引號只是普通字元。查詢的意思變成「找 email 剛好等於 `' OR '1'='1` 這串文字的會員」，結果是 0 列。
 
-不是每個驅動都用伺服器端綁定。psycopg2 在客戶端把值跳脫後組成完整字串再送出，psycopg 3 的 `execute` 預設使用伺服器端綁定。兩種都安全：跳脫由驅動依資料庫規則完成，開發者寫的 **SQL 字串本身不含任何使用者輸入**。
+參數只能代表值。表名、欄名、`ORDER BY` 的欄位、`ASC`／`DESC` 無法用 `$1` 代表，這些地方用**白名單對照**：輸入只用來選擇，放進 SQL 的是程式裡寫死的字串。
 
-### 參數化做不到的地方
+同一個 payload 在兩種模式下組出來的 SQL，可以在 [SQL Injection](#/lab/SqlInjectionLab) 實驗室切換對照。
 
-參數只能代表「值」。表名、欄名、`ORDER BY` 的欄位、`ASC`／`DESC`、`LIMIT` 以外的語法片段都不是值，無法用 `$1` 代表。這些地方用**白名單對照**：輸入只用來選擇，放進 SQL 的是程式裡寫死的字串。
-
-## 實際程式
-
-### 在 PostgreSQL 裡直接比較
-
-PostgreSQL 的 `PREPARE` 是伺服器端的參數化查詢。下面同時示範 PL/pgSQL 裡的動態 SQL：用 `||` 拼接的 `EXECUTE` 一樣會被注入，改用 `USING` 傳值就安全。
-
-```sql run
--- 1) 參數化：$1 永遠是一個值
-PREPARE find_user(text) AS
-  SELECT id, name, email FROM users WHERE email = $1;
-
-EXECUTE find_user('alice@example.com');   -- 1 列
-EXECUTE find_user(''' OR ''1''=''1');      -- 0 列：整串被當成 email 比對
-
--- 2) 動態 SQL 的兩種寫法：拼接 vs USING
-CREATE FUNCTION count_unsafe(p text) RETURNS bigint AS $$
-DECLARE n bigint;
-BEGIN
-  EXECUTE 'SELECT count(*) FROM users WHERE email = ''' || p || '''' INTO n;
-  RETURN n;
-END $$ LANGUAGE plpgsql;
-
-CREATE FUNCTION count_safe(p text) RETURNS bigint AS $$
-DECLARE n bigint;
-BEGIN
-  EXECUTE 'SELECT count(*) FROM users WHERE email = $1' INTO n USING p;
-  RETURN n;
-END $$ LANGUAGE plpgsql;
-
-SELECT count_unsafe($q$' OR '1'='1$q$) AS unsafe_rows,   -- 5：整張表
-       count_safe($q$' OR '1'='1$q$)   AS safe_rows;     -- 0
-
--- 3) 識別字無法參數化時：format 的 %I 依識別字規則處理（必要時加雙引號），%L 用於值
-SELECT format('SELECT %I FROM users ORDER BY %I', 'name', 'created_at') AS built_sql,
-       format('ORDER BY %I', 'name; DROP TABLE users') AS quoted_ident,   -- 整串變成一個（不存在的）欄位名
-       format('WHERE email = %L', $q$' OR '1'='1$q$) AS quoted_literal;
-```
-
-`$q$…$q$` 是 PostgreSQL 的 dollar quoting，裡面的單引號不用重複，方便在範例裡寫出原始輸入。
-
-### Python：拼接、參數化與排序白名單
+## Python 的拼接、參數化與排序白名單，以及兩個最常見的錯誤
 
 `sqlite3` 用 `?` 當佔位符（psycopg 用 `%s`，asyncpg 用 `$1`），原理相同。
 
@@ -155,11 +100,69 @@ except ValueError as e:
     print("被白名單擋下：", e)
 ```
 
-注意最後的 `f"... ORDER BY {order_by}"` 仍然是字串拼接，但拼進去的只會是 `SORTS` 裡寫死的三個值之一，使用者輸入從頭到尾沒有進到 SQL。
+最後的 `f"... ORDER BY {order_by}"` 仍然是字串拼接，但拼進去的只會是 `SORTS` 裡寫死的三個值之一。
 
-:::stop 讀到這裡可以先停：會用參數化查詢修好字串拼接，用白名單處理排序欄位。後面的 ORM 逃生口、命令注入、模板與 NoSQL 運算子注入，在用到 `text()`、呼叫外部指令或接 MongoDB 時再回來讀。
+| 錯誤寫法 | 現象 | 修正 |
+|---|---|---|
+| `cur.execute("... = '%s'" % name)` | 名字含引號時 `syntax error at or near "…"`；或被注入 | 用 `cur.execute("... = %s", (name,))`，`%` 運算子換成逗號 |
+| 想用參數代表欄位名：`ORDER BY %s` | 不會報錯，但排序依據變成一個常數字串，結果沒有排序 | 白名單 |
 
-### ORM 也會出事的地方
+:::stop 讀到這裡可以先停：會說出注入怎麼改變語法結構、用參數化查詢修好字串拼接、用白名單處理排序欄位。後面是 PostgreSQL 的 PREPARE 與動態 SQL、ORM 的逃生口、命令注入、模板與 NoSQL 運算子注入、縱深防禦與完整的錯誤表，用到 `text()`、呼叫外部指令或接 MongoDB 時再回來讀。
+
+## 其他解譯器的注入，以及驅動怎麼綁定參數
+
+拼接的問題是程式碼與資料走同一條通道，出現在所有「把字串交給另一個解譯器」的地方：
+
+| 解譯器 | 拼接的位置 | 名稱 |
+|---|---|---|
+| SQL 資料庫 | `WHERE`、`ORDER BY`、表名 | SQL injection |
+| shell（`/bin/sh`） | `os.system`、`subprocess(..., shell=True)` | 命令注入（OS command injection） |
+| 模板引擎（Jinja2 等） | 把使用者輸入當模板原始碼編譯 | 伺服器端模板注入（SSTI） |
+| NoSQL 查詢（MongoDB filter） | 使用者的 JSON 直接當 filter | 運算子注入 |
+| LDAP、XPath | filter 字串 | LDAP／XPath injection |
+| 瀏覽器的 HTML 解析器 | 回應的 HTML | XSS（見 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)） |
+
+不是每個驅動都用伺服器端綁定。psycopg2 在客戶端把值跳脫後組成完整字串再送出，psycopg 3 的 `execute` 預設使用伺服器端綁定。兩種都安全：跳脫由驅動依資料庫規則完成，開發者寫的 **SQL 字串本身不含任何使用者輸入**。
+
+## 在 PostgreSQL 裡比較 PREPARE、動態 SQL 與 format
+
+PostgreSQL 的 `PREPARE` 是伺服器端的參數化查詢。下面同時示範 PL/pgSQL 裡的動態 SQL：用 `||` 拼接的 `EXECUTE` 一樣會被注入，改用 `USING` 傳值就安全。
+
+```sql run
+-- 1) 參數化：$1 永遠是一個值
+PREPARE find_user(text) AS
+  SELECT id, name, email FROM users WHERE email = $1;
+
+EXECUTE find_user('alice@example.com');   -- 1 列
+EXECUTE find_user(''' OR ''1''=''1');      -- 0 列：整串被當成 email 比對
+
+-- 2) 動態 SQL 的兩種寫法：拼接 vs USING
+CREATE FUNCTION count_unsafe(p text) RETURNS bigint AS $$
+DECLARE n bigint;
+BEGIN
+  EXECUTE 'SELECT count(*) FROM users WHERE email = ''' || p || '''' INTO n;
+  RETURN n;
+END $$ LANGUAGE plpgsql;
+
+CREATE FUNCTION count_safe(p text) RETURNS bigint AS $$
+DECLARE n bigint;
+BEGIN
+  EXECUTE 'SELECT count(*) FROM users WHERE email = $1' INTO n USING p;
+  RETURN n;
+END $$ LANGUAGE plpgsql;
+
+SELECT count_unsafe($q$' OR '1'='1$q$) AS unsafe_rows,   -- 5：整張表
+       count_safe($q$' OR '1'='1$q$)   AS safe_rows;     -- 0
+
+-- 3) 識別字無法參數化時：format 的 %I 依識別字規則處理（必要時加雙引號），%L 用於值
+SELECT format('SELECT %I FROM users ORDER BY %I', 'name', 'created_at') AS built_sql,
+       format('ORDER BY %I', 'name; DROP TABLE users') AS quoted_ident,   -- 整串變成一個（不存在的）欄位名
+       format('WHERE email = %L', $q$' OR '1'='1$q$) AS quoted_literal;
+```
+
+`$q$…$q$` 是 PostgreSQL 的 dollar quoting，裡面的單引號不用重複，方便在範例裡寫出原始輸入。
+
+## ORM 也會出事的地方
 
 ORM 在一般查詢會自動參數化，問題出在繞過它的地方：
 
@@ -183,7 +186,7 @@ stmt = select(User).order_by(column.desc())
 
 Django 的 `raw()`、`extra()`、`RawSQL` 也一樣：它們都接受參數列表（`params=`），問題永遠出在把值格式化進 SQL 字串本身。
 
-### 命令注入
+## 命令注入
 
 把檔名拼進 shell 命令：
 
@@ -216,7 +219,7 @@ print("shell 看到的 token：", list(lexer))     # ';' 是獨立的 token：�
 print("quote 之後：", "convert " + shlex.quote("photo.png; rm -rf ~") + " thumb.jpg")
 ```
 
-### 模板注入與 NoSQL 運算子注入
+## 模板注入與 NoSQL 運算子注入
 
 **SSTI** 發生在把使用者輸入當成模板**原始碼**編譯：
 
@@ -234,7 +237,7 @@ Template("Hello {{ name }}").render(name=user_input)
 
 **MongoDB** 的 filter 是 JSON：`{"username": u, "password": p}` 裡的 `p` 若來自請求的 JSON，攻擊者可以送 `{"$ne": null}`（不等於 null），條件變成「密碼不是 null」。對策是在邊界把欄位驗證成純字串（見 [輸入驗證與檔案上傳](#/skill/input-validation)），拒絕物件型別的輸入。
 
-### 縱深防禦
+## 縱深防禦
 
 參數化是根本解法，下面幾項是「萬一漏了」時限制損害：
 
@@ -246,7 +249,6 @@ Template("Hello {{ name }}").render(name=user_input)
 
 | 錯誤寫法 | 現象 | 修正 |
 |---|---|---|
-| `cur.execute("... = '%s'" % name)` | 名字含引號時 `syntax error at or near "…"`；或被注入 | 用 `cur.execute("... = %s", (name,))`，`%` 運算子換成逗號 |
 | 佔位符外面又加了引號：`WHERE name = '%s'` | 值被當成字串常值的內容，查不到或型別錯誤 | 佔位符不加引號，驅動會處理 |
 | params 傳字串而不是 tuple：`(name)` | 驅動把字串當成字元序列，出現參數數量不符的 `TypeError`（訊息依驅動而異） | 單一參數寫成 `(name,)` 或 `[name]` |
 | 想用參數代表欄位名：`ORDER BY %s` | 不會報錯，但排序依據變成一個常數字串，結果沒有排序 | 白名單；psycopg 可用 `sql.Identifier` 組識別字 |

@@ -1,15 +1,15 @@
-## 從一個具體問題開始：兩種「agent 不會」
+## 兩種「agent 不會」：缺知識用 Skill，缺能力用 MCP
 
 一個團隊讓 agent 處理日常開發，很快遇到兩種不一樣的「它不會」：
 
 1. **它不知道我們怎麼做事**。寫資料庫 migration 時，團隊規定檔名要有日期、每個 migration 都要能回滾、要附一個驗證資料的測試。agent 每次都照網路上常見的寫法來，於是每個人都在對話開頭貼一大段說明，貼的版本還各不相同。
 2. **它碰不到我們的系統**。修 bug 要先看工單系統裡的重現步驟，agent 連不上工單系統，只能由人把內容複製貼上。有人為了省事寫了一個腳本，把工單系統的 API token 直接寫在提示詞裡讓 agent 用 curl 呼叫。
 
-第一種缺的是知識：怎麼做。第二種缺的是能力：能做什麼。前者對應 Skill，後者對應 MCP。
+第一種缺的是知識（怎麼做），對應 Skill。第二種缺的是能力（能做什麼），對應 MCP。
 
-## Skill：模型依需要載入的工作說明書
+## Skill：任務相符時才載入的工作說明書
 
-Skill 是一份可以重複使用的工作說明書。以 Claude 的 Agent Skills 為例，一個 Skill 是一個資料夾：
+以 Claude 的 Agent Skills 為例，一個 Skill 是一個資料夾：
 
 ```text
 db-migration/
@@ -37,51 +37,17 @@ description: 撰寫或修改資料庫 migration 時使用。包含檔名規則�
 範本見 template.py。
 ```
 
-關鍵在**依需要載入**：
+載入分三層：
 
-- agent 啟動時，脈絡裡只放每個 Skill 的**名稱與描述**，一個 Skill 只佔一兩行。
-- 任務跟某個 Skill 的描述相符時（例如「幫 appointments 加一個欄位」），才把 `SKILL.md` 的全文讀進來。
-- 全文提到的範本、參考文件、腳本，用到時才讀或執行。
+1. agent 啟動時，脈絡裡只放每個 Skill 的**名稱與描述**，一個 Skill 只佔一兩行。
+2. 任務跟某個 Skill 的描述相符時（例如「幫 appointments 加一個欄位」），才把 `SKILL.md` 的全文讀進來。
+3. 全文提到的範本、參考文件、腳本，用到時才讀或執行。腳本以 agent 自己的權限執行。
 
-所以可以準備很多 Skill 而不會塞爆脈絡。也因此**描述要寫清楚「做什麼、什麼時候用」**：描述太模糊，該載入時不會載入；描述太寬（「寫程式時使用」），每個任務都載入。
+所以描述要寫「做什麼、什麼時候用」。太模糊，該載入時不會載入；太寬（「寫程式時使用」），每個任務都載入。格式與載入方式以所用產品的文件為準。
 
-Skill 不只是文字。它可以附帶腳本，agent 會以自己的權限執行這些腳本。這一點在之後談供應鏈時很重要。不同產品對 Skill 的格式與載入方式各有實作，上面描述的是共通的概念，細節以所用產品的文件為準。
+## MCP：一次工具呼叫在線路上的樣子
 
-## MCP：讓 AI 應用連接工具與資料的開放協定
-
-**MCP（Model Context Protocol）**是一個開放協定，規定 AI 應用怎麼跟外部的工具與資料來源溝通。寫一次 MCP server，支援 MCP 的應用都能使用它。
-
-### 角色與訊息
-
-```text
-┌──────────── Host（AI 應用，例如 IDE 或聊天程式）────────────┐
-│                                                              │
-│   模型  <──>  MCP client ──┐      MCP client ──┐             │
-│                            │                   │             │
-└────────────────────────────┼───────────────────┼─────────────┘
-                             │ stdio             │ HTTP
-                             ▼                   ▼
-                      MCP server（本機）    MCP server（遠端）
-                       工單系統的工具         文件搜尋
-```
-
-- **Host**：使用者操作的 AI 應用。
-- **Client**：host 裡面負責跟某一個 server 連線的元件，一個 server 一條連線。
-- **Server**：提供能力的程式。
-
-訊息格式是 **JSON-RPC 2.0**。協定版本與能力怎麼交換，依規格版本而定：2025-11-25 以前的版本在連線一開始用 `initialize` 握手；2026-07-28 版取消了握手，每個請求在 `_meta` 裡帶協定版本與 client 的能力，server 另外提供 `server/discover` 讓 client 查詢支援的版本與能力。多數 SDK 兩種都支援，client 會先試新版、對方較舊時退回握手。
-
-### Server 提供的三種東西
-
-| 種類 | 是什麼 | 由誰決定使用 | 例子 |
-|---|---|---|---|
-| **Tools** | 可以呼叫的動作，有名稱、描述、參數的 JSON Schema | 模型依任務決定呼叫（應用可以要求使用者確認） | `get_ticket(ticket_id)`、`create_branch(name)` |
-| **Resources** | 可以讀取的資料，用 URI 識別 | 應用決定要不要放進脈絡 | 一份設計文件、一張資料表的 schema |
-| **Prompts** | 提示樣板，可以帶參數 | 使用者選用（例如在介面上當成指令） | 「依這個工單寫修復計畫」 |
-
-另外，規格也定義了 client 端可以提供給 server 的能力（例如讓 server 請 client 代為呼叫模型的 sampling）。這部分在不同規格版本間有增減：2026-07-28 版取消了 server 主動發給 client 的請求，改成工具在結果裡回傳「需要使用者提供的輸入」，由 client 補上後重送，sampling 與 roots 也被標為 deprecated。用到時以所用的規格版本為準。
-
-一次工具呼叫在線路上的樣子（省略了初始化）：
+**MCP（Model Context Protocol）**是一個開放協定，規定 AI 應用怎麼跟外部的工具與資料來源溝通。寫一次 MCP server，支援 MCP 的應用都能使用它。AI 應用（host）裡的 client 一對一連到 server，訊息格式是 **JSON-RPC 2.0**。client 先用 `tools/list` 取得工具清單，模型決定呼叫時再送 `tools/call`（省略了初始化）：
 
 ```json
 {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -100,41 +66,11 @@ Skill 不只是文字。它可以附帶腳本，agent 會以自己的權限執�
   "isError": false}}
 ```
 
-注意 `description`：它會被放進模型的脈絡，模型依它決定要不要呼叫、怎麼填參數。工具描述等於是給模型讀的指令，這是 [Tool Poisoning](#/skill/tool-poisoning) 的起點。
+`description` 會被放進模型的脈絡，模型依它決定要不要呼叫、怎麼填參數。它等於給模型讀的指令，這是 [Tool Poisoning](#/skill/tool-poisoning) 的起點。
 
-### 兩種傳輸方式
+## 最小的 server 與最常見的錯誤
 
-- **stdio**：client 在本機把 server 當子程序啟動，透過標準輸入輸出交換訊息。設定裡寫的是「要執行的指令」。適合存取本機檔案、本機工具；只有啟動它的使用者能用。
-- **HTTP**：server 是一個網路服務，client 透過 HTTP 連線（目前規格稱為 Streamable HTTP；較早的版本用 HTTP 加 SSE）。設定裡寫的是 URL。適合多人共用、集中維運，但必須處理授權：誰可以呼叫、拿什麼 token，見 [MCP 的授權](#/skill/mcp-authorization)。
-
-協定仍在演進，傳輸與授權的細節在不同版本間有變動；實作時對照 server 與 client 支援的規格版本。
-
-### 用官方 Python SDK 寫一個 server
-
-下面用官方 Python SDK（`mcp` 套件 2.x）的寫法示意。它需要安裝套件，不能在瀏覽器裡執行。1.x 的類別叫 `FastMCP`（`from mcp.server.fastmcp import FastMCP`），2.0 改名為 `MCPServer`，網路上的範例兩種都有：
-
-```python
-from mcp.server import MCPServer
-
-mcp = MCPServer("tickets")
-
-
-@mcp.tool()
-def get_ticket(ticket_id: str) -> str:
-    """依工單編號取得標題、狀態與重現步驟"""
-    # 這裡呼叫工單系統的 API；token 從 OS keyring 或 gateway 取得，不寫在程式裡
-    ...
-
-
-if __name__ == "__main__":
-    mcp.run()   # 預設用 stdio
-```
-
-函式的 docstring 會成為工具描述，型別提示會成為參數的 JSON Schema。
-
-### 協定在做什麼：一個極簡的分派器
-
-下面這段不是完整的 MCP 實作（沒有版本交換、沒有傳輸層），只示範 server 收到 JSON-RPC 訊息後怎麼回應，包括兩種不同的錯誤。可以直接執行：
+下面不是完整的 MCP 實作（沒有版本交換、沒有傳輸層），只示範 server 收到 JSON-RPC 訊息後怎麼回應：
 
 ```python run
 import json
@@ -178,7 +114,17 @@ for msg in [
     print("←", handle(json.dumps(msg)), "\n")
 ```
 
-兩種錯誤的差別：工具不存在是**協定層**的錯誤（JSON-RPC `error`）；工具存在但執行失敗，回傳的是正常結果加上 `isError: true`，錯誤內容會進到模型的脈絡，模型可以據此換個參數重試。
+| 狀況 | 回應 | 模型看得到嗎 |
+|---|---|---|
+| 工具不存在（協定層的錯誤） | JSON-RPC `error`，例如 `Unknown tool: delete_ticket` | 看不到 |
+| 工具存在但執行失敗 | 正常結果加 `isError: true`，例如「找不到工單 'BUG-999'」 | 看得到，可以換參數重試 |
+
+兩個最常見的錯誤：
+
+- 執行失敗卻回 JSON-RPC `error`，模型看不到錯誤內容，沒辦法調整。
+- 把 API token 寫在 Skill 或提示詞裡。token 會進入模型脈絡與對話紀錄，還跟著 Skill 被分享出去；應該由 MCP server 從 keyring 或 gateway 取得。
+
+:::stop 讀到這裡可以先停：分得出 Skill 與 MCP 各管什麼，會寫 `SKILL.md` 的描述，看得懂一次 `tools/call` 與兩種錯誤。後面是分工表、MCP 的版本與傳輸、官方 SDK 寫法與治理問題，在要自己寫 MCP server、做內部 Skill 平台或開放上架時再回來讀。
 
 ## 分工：什麼時候用哪一個
 
@@ -192,7 +138,72 @@ for msg in [
 
 兩者可以組合：Skill 告訴模型「這種任務的步驟是什麼、該用哪些工具」，MCP 提供那些工具。專案根目錄的規範檔（例如 `CLAUDE.md` 或 `AGENTS.md`）則是每次都會載入的那一份，放專案層級、每個任務都需要知道的規則；只在某類任務才需要的，就移到 Skill。
 
-:::stop 讀到這裡可以先停：分得出 Skill 與 MCP 各管什麼，看得懂一次 `tools/call` 與兩種錯誤。後面的治理問題，在團隊要做內部 Skill 平台或開放 MCP server 上架時再回來讀。
+## MCP 的細節：角色、版本交換、三種能力、兩種傳輸
+
+```text
+┌──────────── Host（AI 應用，例如 IDE 或聊天程式）────────────┐
+│                                                              │
+│   模型  <──>  MCP client ──┐      MCP client ──┐             │
+│                            │                   │             │
+└────────────────────────────┼───────────────────┼─────────────┘
+                             │ stdio             │ HTTP
+                             ▼                   ▼
+                      MCP server（本機）    MCP server（遠端）
+                       工單系統的工具         文件搜尋
+```
+
+- **Host**：使用者操作的 AI 應用。
+- **Client**：host 裡面負責跟某一個 server 連線的元件，一個 server 一條連線。
+- **Server**：提供能力的程式。
+
+協定版本與能力怎麼交換，依規格版本而定：
+
+| 規格版本 | 做法 |
+|---|---|
+| 2025-11-25 以前 | 連線一開始用 `initialize` 握手 |
+| 2026-07-28 | 取消握手，每個請求在 `_meta` 裡帶協定版本與 client 的能力；server 另外提供 `server/discover` 讓 client 查詢支援的版本與能力 |
+
+多數 SDK 兩種都支援，client 會先試新版、對方較舊時退回握手。
+
+Server 提供三種東西：
+
+| 種類 | 是什麼 | 由誰決定使用 | 例子 |
+|---|---|---|---|
+| **Tools** | 可以呼叫的動作，有名稱、描述、參數的 JSON Schema | 模型依任務決定呼叫（應用可以要求使用者確認） | `get_ticket(ticket_id)`、`create_branch(name)` |
+| **Resources** | 可以讀取的資料，用 URI 識別 | 應用決定要不要放進脈絡 | 一份設計文件、一張資料表的 schema |
+| **Prompts** | 提示樣板，可以帶參數 | 使用者選用（例如在介面上當成指令） | 「依這個工單寫修復計畫」 |
+
+另外，規格也定義了 client 端可以提供給 server 的能力（例如讓 server 請 client 代為呼叫模型的 sampling）。這部分在不同規格版本間有增減：2026-07-28 版取消了 server 主動發給 client 的請求，改成工具在結果裡回傳「需要使用者提供的輸入」，由 client 補上後重送，sampling 與 roots 也被標為 deprecated。用到時以所用的規格版本為準。
+
+兩種傳輸方式：
+
+- **stdio**：client 在本機把 server 當子程序啟動，透過標準輸入輸出交換訊息。設定裡寫的是「要執行的指令」。適合存取本機檔案、本機工具；只有啟動它的使用者能用。
+- **HTTP**：server 是一個網路服務，client 透過 HTTP 連線（目前規格稱為 Streamable HTTP；較早的版本用 HTTP 加 SSE）。設定裡寫的是 URL。適合多人共用、集中維運，但必須處理授權：誰可以呼叫、拿什麼 token，見 [MCP 的授權](#/skill/mcp-authorization)。
+
+協定仍在演進，傳輸與授權的細節在不同版本間有變動；實作時對照 server 與 client 支援的規格版本。
+
+## 用官方 Python SDK 寫一個 server
+
+下面是官方 Python SDK（`mcp` 套件 2.x）的寫法，需要安裝套件，不能在瀏覽器裡執行。1.x 的類別叫 `FastMCP`（`from mcp.server.fastmcp import FastMCP`），2.0 改名為 `MCPServer`，網路上的範例兩種都有：
+
+```python
+from mcp.server import MCPServer
+
+mcp = MCPServer("tickets")
+
+
+@mcp.tool()
+def get_ticket(ticket_id: str) -> str:
+    """依工單編號取得標題、狀態與重現步驟"""
+    # 這裡呼叫工單系統的 API；token 從 OS keyring 或 gateway 取得，不寫在程式裡
+    ...
+
+
+if __name__ == "__main__":
+    mcp.run()   # 預設用 stdio
+```
+
+函式的 docstring 會成為工具描述，型別提示會成為參數的 JSON Schema。
 
 ## 治理：內部分享平台與 MCP 上架
 

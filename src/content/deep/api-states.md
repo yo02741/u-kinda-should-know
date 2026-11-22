@@ -1,4 +1,4 @@
-## 從一個具體問題開始：一邊轉圈，一邊說「載入失敗」
+## 一邊轉圈，一邊說「載入失敗」
 
 預約清單的程式用三個變數表示請求的狀況：
 
@@ -28,9 +28,7 @@ async function load() {
 
 三個布林值與陣列可以組合出 8 種以上的狀況，模板只處理了其中幾種。改成一個變數、只允許五個值，畫面一次只會處在其中一種。
 
-## 運作原理
-
-### 五個值：idle 加四種狀態
+## 運作原理：一個 status、五個值、六條轉換
 
 | status | 什麼時候 | 畫面 | 元件 |
 |---|---|---|---|
@@ -41,8 +39,6 @@ async function load() {
 | `error` | 網路錯誤、逾時、4xx、5xx | 發生什麼事、能不能重試 | inline Alert、「重試」 |
 
 `empty` 是成功的一種：伺服器明確回答「沒有資料」。`error` 是「不知道有沒有資料」。兩者共用畫面，使用者會把故障當成沒有資料。
-
-### 狀態轉換
 
 ```
 idle            ──（進入頁面、選了日期）──────────► loading
@@ -55,64 +51,9 @@ success、empty  ──（改條件、重新整理）─────────
 
 上面沒有列出的轉換不該發生。例如狀態已經是 error，一個早先送出、現在才回來的請求不該把它改成 success，那代表舊請求沒有被取消。
 
-### 錯誤分成能不能重試
+錯誤再分成能不能重試：網路錯誤、逾時、5xx、429 給「重試」；其他 4xx 原封不動重送會得到一樣的結果，只顯示原因。
 
-| 錯誤 | 例子 | 重試有用嗎 | 畫面 |
-|---|---|---|---|
-| 網路錯誤 | 離線、DNS 失敗（`TypeError`） | 可能有用 | 「無法連線，請檢查網路」＋重試 |
-| 逾時 | `TimeoutError` | 可能有用 | 「伺服器回應逾時」＋重試 |
-| 5xx | 500、502、503、504 | 可能有用 | 「系統暫時無法處理」＋重試 |
-| 429 | 請求太頻繁 | 等一下再試有用 | 依 `Retry-After` 停用重試一段時間 |
-| 401 | 登入過期 | 沒用 | 導向登入，回來後重送 |
-| 403 | 沒有權限 | 沒用 | Problem Details 的 `title`，不給重試 |
-| 404 | 資源不存在 | 沒用 | 「找不到這筆資料」＋回上一頁 |
-
-4xx 的意思是「請求本身有問題」，原封不動重送會得到一樣的結果；給一個按了沒用的重試按鈕，使用者會一直按。伺服器那一側怎麼決定狀態碼與錯誤格式，見 [錯誤設計](#/skill/error-design) 與 [呼叫外部服務的韌性](#/skill/resilience)。
-
-### 已經有資料時：重新整理
-
-使用者按「重新整理」或每 30 秒自動更新時，畫面上已經有清單。這時回到 loading（整個換成 Skeleton）會讓畫面閃一下、捲動位置跑掉。做法是狀態維持 success，另外用一個 `refreshing` 旗標在標題旁顯示小 spinner；更新失敗時保留舊清單，加一行「更新失敗，以下是 09:30 的資料」。
-
-### 一個可以跑的狀態機
-
-下面把轉換表寫成程式，送進一連串事件，看哪些轉換被接受、哪些被忽略；最後依錯誤種類判斷要不要給重試：
-
-```js run
-// 清單請求的狀態機：只有表裡列出的轉換會發生，其他事件忽略
-const transitions = {
-  idle:    { FETCH: 'loading' },
-  loading: { OK: (data) => (data.length ? 'success' : 'empty'), FAIL: 'error' },
-  success: { FETCH: 'loading' },
-  empty:   { FETCH: 'loading' },
-  error:   { RETRY: 'loading', FETCH: 'loading' },
-}
-function next(state, event, payload) {
-  const t = transitions[state][event]
-  if (!t) return state                                   // 不合法的事件：維持原狀態
-  return typeof t === 'function' ? t(payload) : t
-}
-function isRetryable(err) {
-  if (err.name === 'TypeError' || err.name === 'TimeoutError') return true   // 網路錯誤、逾時
-  return err.status >= 500 || err.status === 429
-}
-
-let state = 'idle'
-function send(event, payload) {
-  const from = state
-  state = next(state, event, payload)
-  console.log(`${from.padEnd(7)} --${event}--> ${state}${from === state ? '（忽略）' : ''}`)
-}
-send('FETCH'); send('OK', [])                // 成功但沒有資料 → empty
-send('FETCH'); send('FAIL')                  // 失敗 → error
-send('OK', [{ id: 1 }])                      // 舊請求晚到：error 不接受 OK
-send('RETRY'); send('OK', [{ id: 1 }])       // 重試成功 → success
-
-for (const err of [{ name: 'TypeError' }, { name: 'TimeoutError' }, { name: 'ApiError', status: 503 }, { name: 'ApiError', status: 403 }, { name: 'ApiError', status: 404 }]) {
-  console.log(`${err.name} ${err.status ?? ''} → ${isRetryable(err) ? '顯示重試' : '顯示原因，不給重試'}`)
-}
-```
-
-## 實際程式：預約清單元件
+## 預約清單元件，與三個容易寫錯的地方
 
 ```vue
 <script setup>
@@ -205,13 +146,70 @@ onUnmounted(() => controller?.abort())
 </template>
 ```
 
-幾個細節：
-
 - `fetch` 本身包在一個 `try` 裡，`res.json()` 與後面的處理在外面。`TypeError` 也可能是程式自己的錯（讀了 `undefined` 的屬性），全部包在同一個 `try` 裡，程式的 bug 會被顯示成「無法連線」。
 - 初始值是 `idle`，不是 `success` 加空陣列；後者會在第一次請求送出前閃出「這天沒有預約」。
 - `controller.abort()` 讓換日期時的舊請求不會晚到、蓋掉新日期的結果。快速切換條件的競態，實驗室的第二個模式可以看到。
 
-### 每個狀態的驗收條件
+:::stop 讀到這裡可以先停：會用一個 `status` 表示五個值，分開空清單與錯誤，只給重試有用的錯誤重試按鈕。後面是各種錯誤的畫面對照、已有資料時的重新整理、可以跑的狀態機、每個狀態的驗收條件、現成工具與常見錯誤，驗收清單頁或排查畫面錯亂時再回來讀。
+
+## 錯誤分成能不能重試
+
+| 錯誤 | 例子 | 重試有用嗎 | 畫面 |
+|---|---|---|---|
+| 網路錯誤 | 離線、DNS 失敗（`TypeError`） | 可能有用 | 「無法連線，請檢查網路」＋重試 |
+| 逾時 | `TimeoutError` | 可能有用 | 「伺服器回應逾時」＋重試 |
+| 5xx | 500、502、503、504 | 可能有用 | 「系統暫時無法處理」＋重試 |
+| 429 | 請求太頻繁 | 等一下再試有用 | 依 `Retry-After` 停用重試一段時間 |
+| 401 | 登入過期 | 沒用 | 導向登入，回來後重送 |
+| 403 | 沒有權限 | 沒用 | Problem Details 的 `title`，不給重試 |
+| 404 | 資源不存在 | 沒用 | 「找不到這筆資料」＋回上一頁 |
+
+4xx 的意思是「請求本身有問題」，原封不動重送會得到一樣的結果；給一個按了沒用的重試按鈕，使用者會一直按。伺服器那一側怎麼決定狀態碼與錯誤格式，見 [錯誤設計](#/skill/error-design) 與 [呼叫外部服務的韌性](#/skill/resilience)。
+
+## 已經有資料時：重新整理
+
+使用者按「重新整理」或每 30 秒自動更新時，畫面上已經有清單。這時回到 loading（整個換成 Skeleton）會讓畫面閃一下、捲動位置跑掉。做法是狀態維持 success，另外用一個 `refreshing` 旗標在標題旁顯示小 spinner；更新失敗時保留舊清單，加一行「更新失敗，以下是 09:30 的資料」。
+
+## 一個可以跑的狀態機
+
+下面把轉換表寫成程式，送進一連串事件，看哪些轉換被接受、哪些被忽略；最後依錯誤種類判斷要不要給重試：
+
+```js run
+// 清單請求的狀態機：只有表裡列出的轉換會發生，其他事件忽略
+const transitions = {
+  idle:    { FETCH: 'loading' },
+  loading: { OK: (data) => (data.length ? 'success' : 'empty'), FAIL: 'error' },
+  success: { FETCH: 'loading' },
+  empty:   { FETCH: 'loading' },
+  error:   { RETRY: 'loading', FETCH: 'loading' },
+}
+function next(state, event, payload) {
+  const t = transitions[state][event]
+  if (!t) return state                                   // 不合法的事件：維持原狀態
+  return typeof t === 'function' ? t(payload) : t
+}
+function isRetryable(err) {
+  if (err.name === 'TypeError' || err.name === 'TimeoutError') return true   // 網路錯誤、逾時
+  return err.status >= 500 || err.status === 429
+}
+
+let state = 'idle'
+function send(event, payload) {
+  const from = state
+  state = next(state, event, payload)
+  console.log(`${from.padEnd(7)} --${event}--> ${state}${from === state ? '（忽略）' : ''}`)
+}
+send('FETCH'); send('OK', [])                // 成功但沒有資料 → empty
+send('FETCH'); send('FAIL')                  // 失敗 → error
+send('OK', [{ id: 1 }])                      // 舊請求晚到：error 不接受 OK
+send('RETRY'); send('OK', [{ id: 1 }])       // 重試成功 → success
+
+for (const err of [{ name: 'TypeError' }, { name: 'TimeoutError' }, { name: 'ApiError', status: 503 }, { name: 'ApiError', status: 403 }, { name: 'ApiError', status: 404 }]) {
+  console.log(`${err.name} ${err.status ?? ''} → ${isRetryable(err) ? '顯示重試' : '顯示原因，不給重試'}`)
+}
+```
+
+## 每個狀態的驗收條件
 
 | 狀態 | 驗收條件 |
 |---|---|
@@ -222,9 +220,7 @@ onUnmounted(() => controller?.abort())
 | error（不可重試） | 顯示 Problem Details 的 `title`；沒有重試按鈕 |
 | 重新整理失敗 | 舊清單還在，上方一行「更新失敗」 |
 
-:::stop 讀到這裡可以先停：會用一個 `status` 表示五個值、分出能不能重試的錯誤，並照表驗收每個狀態。後面的現成工具與常見錯誤，在改用 TanStack Query 或排查畫面錯亂時再回來讀。
-
-### 現成的工具
+## 現成的工具：TanStack Query
 
 同樣的狀態有現成的函式庫處理：TanStack Query v5 的 `status` 是 `pending`、`error`、`success`，另外用 `fetchStatus`（`fetching`、`paused`、`idle`）表示背景更新，對應上面的 `refreshing`；空陣列仍然是 `success`，empty 要自己判斷。用不用工具，四種畫面與驗收條件都要自己定。
 

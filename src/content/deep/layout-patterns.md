@@ -1,4 +1,4 @@
-## 從一個具體問題開始：同一個後台，四個寬度壞成四種樣子
+## 具體問題：同一個後台，四個寬度壞成四種樣子
 
 門診後台交給 AI 產生，需求寫的是「左邊側欄、右邊診間卡片，要 RWD」。在 1280px 的筆電上看起來沒問題，換了幾個裝置之後：
 
@@ -7,11 +7,9 @@
 - **390px（手機）**：表單頁的「送出掛號」固定在底部，app shell 寫的是 `height: 100vh`，按鈕被瀏覽器的工具列蓋住一半。用 Tab 移到頁面中段的欄位時，欄位剛好藏在 sticky 頁首底下。
 - **任何寬度**：從通知點進 `#notice` 錨點，標題被頁首蓋住。
 
-每個元件各自決定了自己的斷點，彼此沒有對齊；「要 RWD」沒有說每個區域在每個寬度長什麼樣子。這一課的兩個工具：用版面模式的名稱說出結構，用一張斷點表說出每個寬度的樣子。
+每個元件各自決定了自己的斷點，彼此沒有對齊；「要 RWD」沒有說每個區域在每個寬度長什麼樣子。
 
-## 運作原理
-
-### 五種常見的版面模式
+## 用模式名稱說出結構：五種常見的版面模式
 
 | 模式 | 用在哪裡 | 結構 | 窄螢幕時 |
 |---|---|---|---|
@@ -21,9 +19,7 @@
 | 清單與詳細 | 預約清單點進預約內容、信件 | 寬螢幕左清單右詳細並排 | 清單與詳細分成兩頁，上一頁回到清單原位 |
 | 單欄表單 | 掛號、登入、個人資料 | label 在上、欄位一欄排下來，送出在最後 | 不變；送出列可以固定在底部 |
 
-說出模式名稱有兩個好處：同事與 AI 都知道這個結構的慣例（例如 app shell 換頁時外框不重新渲染），斷點表的列也跟著有了名字。
-
-### 斷點表
+## 斷點表：每個區域在每個寬度的樣子
 
 斷點表是「區域 × 寬度」的表格。列是畫面上的區域，欄是驗收的寬度，每一格寫那個寬度的樣子：
 
@@ -40,29 +36,10 @@
 寫法上的約定：
 
 - **390 是基礎樣式**，不包在任何 media query 裡；768、1024、1280 用 `min-width` 往上加（mobile-first，見 [RWD 與斷點](#/skill/rwd)）。
-- **每一欄代表「從這個寬度起，到下一個斷點之前」**。768 那一欄管 768 到 1023。只用 `min-width`，或只用範圍語法 `(width >= 48rem)`（Baseline 2023），邊界就不會重疊或留下空隙；`max-width: 768px` 與 `min-width: 768px` 混用時，剛好 768px 兩條規則都成立。
+- **每一欄代表「從這個寬度起，到下一個斷點之前」**。768 那一欄管 768 到 1023。只用 `min-width`，邊界就不會重疊或留下空隙。
 - **「同左」也要寫**。空白的格子看不出是「不變」還是「沒想過」。
 
-斷點從哪裡來？先看內容在哪個寬度放不下（卡片擠到換行、表格出現橫向捲軸），再對齊團隊的斷點表。Tailwind CSS v4 預設的 `md`、`lg`、`xl` 是 `48rem`、`64rem`、`80rem`，在瀏覽器預設字級 16px 下就是 768、1024、1280px。
-
-斷點值要集中在一個地方。CSS 自訂屬性不能用在 media query 的條件裡，`@media (min-width: var(--bp-md))` 不會成立；原生的 `@custom-media` 依 2026-11 的瀏覽器相容性資料還沒有瀏覽器正式支援。常見做法是寫在 Sass 變數、PostCSS 的 custom media 外掛，或 Tailwind 的設定裡。
-
-### 視窗寬度與容器寬度
-
-斷點表管的是整頁的排法：側欄狀態、主內容的邊距、表格與卡片的切換，這些跟著視窗寬度，用 media query。
-
-元件自己的排法跟著它拿到的空間。同一張「醫師卡片」放在 1280px 的主內容裡有 360px 寬，放在側欄的「今日值班」區只有 200px 寬；用 media query 判斷不出這個差別。改用 container query（Baseline 2023）：
-
-```css
-.doctor-list { container-type: inline-size; }        /* 這一層成為查詢的對象 */
-
-.doctor-card { display: grid; gap: var(--space-2); }  /* 窄：照片在上、文字在下 */
-@container (min-width: 22rem) {
-  .doctor-card { grid-template-columns: 4rem 1fr; }   /* 寬：照片在左 */
-}
-```
-
-### app shell
+## 最小範例與常見錯誤：app shell 的 CSS
 
 ```css
 .shell {
@@ -90,6 +67,38 @@
 html { scroll-padding-top: 64px; }                     /* 頁首 56px 加一點空隙 */
 ```
 
+### 最常見的兩個錯誤
+
+- **整頁出現橫向捲軸**。Console 執行 `document.documentElement.scrollWidth > innerWidth` 得到 `true`。在 Elements 分頁從 `body` 往下找寬度超過視窗的元素；最常見的是 Grid 軌道寫 `1fr`，被一個長網址或長的病歷號撐寬（`1fr` 的下限是內容的最小寬度），改成 `minmax(0, 1fr)`。flex 子項同理，加 `min-width: 0`。
+- **兩個斷點之間沒有導覽**。側欄與漢堡按鈕各用一組條件，`max-width: 1023px` 與 `max-width: 767px` 中間少了一段。斷點表上「側欄」那一列每一格都填了，就不會漏；驗收時在 767、768、1023、1024 各看一次。
+
+:::stop 讀到這裡可以先停：會用版面模式的名稱說出結構、寫一張四欄的斷點表，並照表寫出 app shell。後面是斷點值放哪裡、container query、側欄的切換按鈕、清單與詳細、底部固定列，在做到那種頁面時再回來讀。
+
+## 斷點從哪裡來、斷點值放哪裡
+
+先看內容在哪個寬度放不下（卡片擠到換行、表格出現橫向捲軸），再對齊團隊的斷點表。Tailwind CSS v4 預設的 `md`、`lg`、`xl` 是 `48rem`、`64rem`、`80rem`，在瀏覽器預設字級 16px 下就是 768、1024、1280px。
+
+斷點值要集中在一個地方。CSS 自訂屬性不能用在 media query 的條件裡，`@media (min-width: var(--bp-md))` 不會成立；原生的 `@custom-media` 依 2026-11 的瀏覽器相容性資料還沒有瀏覽器正式支援。常見做法是寫在 Sass 變數、PostCSS 的 custom media 外掛，或 Tailwind 的設定裡。
+
+斷點的條件只用 `min-width`，或只用範圍語法 `(width >= 48rem)`（Baseline 2023）。`max-width: 768px` 與 `min-width: 768px` 混用時，剛好 768px 兩條規則都成立。
+
+## 視窗寬度用 media query，容器寬度用 container query
+
+斷點表管的是整頁的排法：側欄狀態、主內容的邊距、表格與卡片的切換，這些跟著視窗寬度，用 media query。
+
+元件自己的排法跟著它拿到的空間。同一張「醫師卡片」放在 1280px 的主內容裡有 360px 寬，放在側欄的「今日值班」區只有 200px 寬；用 media query 判斷不出這個差別。改用 container query（Baseline 2023）：
+
+```css
+.doctor-list { container-type: inline-size; }        /* 這一層成為查詢的對象 */
+
+.doctor-card { display: grid; gap: var(--space-2); }  /* 窄：照片在上、文字在下 */
+@container (min-width: 22rem) {
+  .doctor-card { grid-template-columns: 4rem 1fr; }   /* 寬：照片在左 */
+}
+```
+
+## 側欄的切換按鈕與 icon rail
+
 側欄的切換按鈕要讓輔助科技知道狀態：
 
 ```html
@@ -104,9 +113,7 @@ html { scroll-padding-top: 64px; }                     /* 頁首 56px 加一點�
 
 收合的選擇記在 `localStorage`，重新整理後維持；只在 1024 以上有意義，768 到 1023 固定是 icon rail。
 
-:::stop 讀到這裡可以先停：會用版面模式的名稱說出結構、寫一張四欄的斷點表，並分清 media query 與 container query 各管什麼。後面的清單與詳細、底部固定列，在做到那種頁面時再回來讀。
-
-### 清單與詳細
+## 清單與詳細
 
 寬螢幕時清單與詳細同時在畫面上，選中的那一筆寫進網址（`/appointments/501`），重新整理或分享連結都回到同一筆。窄螢幕時兩者是兩頁：從清單點進 `/appointments/501`，按上一頁回到清單，而且要回到剛才捲到的位置。Vue Router 的 `scrollBehavior` 在瀏覽器上一頁、下一頁時會拿到 `savedPosition`：
 
@@ -122,7 +129,7 @@ const router = createRouter({
 
 清單的資料如果是進頁才非同步載入，回來時資料還沒到、頁面不夠高，`savedPosition` 就捲不過去；要讓清單用快取先畫出來（見 [前端的資料快取](#/skill/data-caching)）。
 
-### 表單與底部固定列
+## 表單與底部固定列
 
 表單用單欄，label 在欄位上方：長 label、翻譯後變長的文字都放得下，Tab 的順序也和閱讀順序一致。只有天生成對的短欄位並排，例如起訖日期。
 
@@ -138,10 +145,8 @@ html { scroll-padding-bottom: 80px; }   /* Tab 到最後幾個欄位時，捲到
 
 `env(safe-area-inset-bottom)` 要搭配 viewport meta 的 `viewport-fit=cover` 才會有值；沒有加時是 0，不會出錯，只是不會避開手勢區。
 
-## 常見錯誤
+## 其他常見錯誤
 
-- **整頁出現橫向捲軸**。Console 執行 `document.documentElement.scrollWidth > innerWidth` 得到 `true`。在 Elements 分頁從 `body` 往下找寬度超過視窗的元素；最常見的是 Grid 軌道寫 `1fr`，被一個長網址或長的病歷號撐寬（`1fr` 的下限是內容的最小寬度），改成 `minmax(0, 1fr)`。flex 子項同理，加 `min-width: 0`。
-- **兩個斷點之間沒有導覽**。側欄與漢堡按鈕各用一組條件，`max-width: 1023px` 與 `max-width: 767px` 中間少了一段。斷點表上「側欄」那一列每一格都填了，就不會漏；驗收時在 767、768、1023、1024 各看一次。
 - **`@media (min-width: var(--bp-md))` 沒有作用**。不會有錯誤訊息，那段樣式在任何寬度都不套用。斷點改用前處理器變數或 Tailwind 的設定。
 - **固定列蓋住焦點**。Tab 到被 sticky 頁首或底部列擋住的欄位，看不到焦點框，違反 WCAG 2.2 的 2.4.11 Focus Not Obscured (Minimum)。加上 `scroll-padding-top`、`scroll-padding-bottom`，數值至少是固定列的高度。
 - **手機上底部按鈕被蓋住或留一段空白**。`100vh` 在手機上通常等於工具列收起時的高度，比實際看得到的區域高。改用 `100dvh`（Baseline 2022），或讓固定列用 `position: sticky` 跟著內容。

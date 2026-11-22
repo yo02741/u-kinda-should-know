@@ -1,26 +1,16 @@
-## 從一個具體問題開始：三個用戶端，三種「沒辦法」
+## 三個用戶端，三種「沒辦法」，各有一個標準流程
 
 同一個授權伺服器（`auth.example.com`）要服務三種用戶端：
 
-| 用戶端 | 情況 | 標準授權碼流程卡在哪 |
+| 用戶端 | 標準授權碼流程卡在哪 | 該用的流程 |
 |---|---|---|
-| `atlas` 命令列工具，跑在 SSH 進去的伺服器上 | 沒有瀏覽器，也收不到 redirect | 授權碼流程要把使用者導到登入頁、再導回 `redirect_uri`，這台機器兩件事都做不到 |
-| 單頁應用（SPA）與手機 App | 程式碼會被下載到使用者的裝置上 | 授權碼換 token 時要帶 `client_secret`，但放進 JavaScript 或 App 安裝檔的 secret 任何人都拆得出來 |
-| 每晚跑的對帳服務 | 根本沒有使用者 | 沒有人可以按「同意」 |
+| `atlas` 命令列工具，跑在 SSH 進去的伺服器上 | 沒有瀏覽器，也收不到 redirect | **Device Authorization Grant（RFC 8628）**：給沒有瀏覽器或不方便輸入的裝置，在另一台裝置的瀏覽器登入 |
+| 單頁應用（SPA）與手機 App | 放進 JavaScript 或 App 安裝檔的 `client_secret` 任何人都拆得出來 | **授權碼 + PKCE（RFC 7636）**：**公開客戶端**（public client）用一次性的隨機值取代 secret |
+| 每晚跑的對帳服務 | 沒有使用者可以按「同意」 | **Client Credentials（RFC 6749 §4.4）**：client 用自己的身分拿 token |
 
-常見的錯誤解法各有後果：CLI 要使用者把密碼直接打進終端機（工具拿到了明文密碼，MFA 也用不上）；SPA 把 `client_secret` 寫進前端程式碼（secret 等於公開，任何人都能冒充這個 client）；對帳服務借用某位工程師的帳號（那個人離職或改密碼，服務就壞掉，稽核紀錄上也分不出是人還是服務）。
+授權碼流程本身與 `state` 見 [OAuth 2.0 與 OIDC](#/skill/oauth-oidc)。三種流程的時序圖與 HTTP 原文可以在 [三種授權流程](#/lab/DeviceCodeLab) 實驗室逐步看。
 
-OAuth 為這三種情況各有一個標準流程：
-
-- **Device Authorization Grant（RFC 8628）**：沒有瀏覽器或不方便輸入的裝置。登入在另一台有瀏覽器的裝置上完成。
-- **授權碼 + PKCE（RFC 7636）**：存不住 secret 的**公開客戶端**（public client）。用一次性的隨機值取代 secret。
-- **Client Credentials（RFC 6749 §4.4）**：服務對服務，沒有使用者，client 用自己的身分拿 token。
-
-授權碼流程本身、`state` 防 CSRF、OAuth 與 OIDC 的差別在 [OAuth 2.0 與 OIDC](#/skill/oauth-oidc) 講過，這裡專注在三種變形各自的 HTTP 往返。
-
-## Device Code：在另一台裝置上登入
-
-### 流程
+## Device Code：CLI 輪詢，使用者在另一台裝置登入
 
 ```text
  CLI（沒有瀏覽器）                授權伺服器                     手機或筆電上的瀏覽器
@@ -40,7 +30,100 @@ OAuth 為這三種情況各有一個標準流程：
       │◀──────────────────────────────│                                  │
 ```
 
-兩個碼的分工：`device_code` 只有 CLI 知道，用來輪詢；`user_code` 短、好唸、給人輸入，用來把「瀏覽器上的這次登入」和「那台 CLI 的請求」接起來。
+`device_code` 只有 CLI 知道，用來輪詢。`user_code` 短、給人輸入，把瀏覽器上的登入和那台 CLI 的請求接起來。輪詢時 token 端點回 `400` 加錯誤碼：
+
+| 錯誤碼 | 意思 | CLI 該怎麼做 |
+|---|---|---|
+| `authorization_pending` | 使用者還沒完成 | 等 `interval` 秒再問 |
+| `slow_down` | 問太快了 | 把間隔**加 5 秒**，之後每次都用新間隔 |
+| `access_denied` | 使用者按了拒絕 | 停止輪詢，告訴使用者 |
+| `expired_token` | `device_code` 過期 | 停止輪詢，重新跑整個流程 |
+
+## 授權碼 + PKCE：證明換 token 的就是發起授權的
+
+公開客戶端換 token 只需要 `code`、`client_id`、`redirect_uri`，攔截者三個都拿得到。PKCE 多加一個攔截者拿不到的值：
+
+1. 發起前，client 產生隨機的 `code_verifier`（43–128 個字元，只能用英數與 `-._~`），只留在自己的記憶體。
+2. 算出 `code_challenge = BASE64URL(SHA-256(code_verifier))`，連同 `code_challenge_method=S256` 放進授權請求。
+3. 換 token 時帶上 `code_verifier` 原文，不帶 `client_secret`。授權伺服器重算 SHA-256，和當初的 `code_challenge` 比對。
+
+攔截者看得到 `code` 與 `code_challenge`，但 SHA-256 不能反推出 `code_verifier`。
+
+### 計算 PKCE 的 code_challenge
+
+先用 RFC 7636 附錄 B 的測試向量確認算法，再產生一組新的：
+
+```js run
+// base64url：標準 base64 再換掉兩個字元、去掉 padding
+function base64url(bytes) {
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+// code_challenge = BASE64URL(SHA-256(ASCII(code_verifier)))
+async function challengeFor(verifier) {
+  const data = new TextEncoder().encode(verifier)
+  const hash = await crypto.subtle.digest('SHA-256', data)   // 32 bytes
+  return base64url(new Uint8Array(hash))
+}
+
+// 1. RFC 7636 附錄 B 的測試向量
+const rfcVerifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+const rfcChallenge = await challengeFor(rfcVerifier)
+console.log('RFC 範例 challenge：', rfcChallenge)
+console.log('與 RFC 一致：', rfcChallenge === 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM')
+
+// 2. 實際使用：32 bytes 密碼學亂數 → base64url 後剛好 43 個字元
+const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)))
+const challenge = await challengeFor(verifier)
+console.log('verifier 長度：', verifier.length, '（規範要求 43 到 128）')
+console.log('放進授權請求的 challenge：', challenge)
+
+// 3. 授權伺服器在 token 端點做的事：重算一次再比對
+async function tokenEndpointCheck(storedChallenge, receivedVerifier) {
+  return (await challengeFor(receivedVerifier)) === storedChallenge
+}
+console.log('發起者帶正確 verifier：', await tokenEndpointCheck(challenge, verifier))
+const guess = base64url(crypto.getRandomValues(new Uint8Array(32)))
+console.log('攔截者只有 code，亂猜 verifier：', await tokenEndpointCheck(challenge, guess))
+```
+
+verifier 要用 `crypto.getRandomValues`，`Math.random()` 可以被預測。verifier 和當初的 challenge 對不上，或授權碼已經用過、過期時，token 端點回 `{"error": "invalid_grant"}`：重跑授權，並確認 verifier 是同一次流程產生的。
+
+## Client Credentials：服務用自己的憑證直接要 token
+
+```http
+POST /token HTTP/1.1
+Host: auth.example.com
+Authorization: Basic YmlsbGluZy1zdmM6czNjcjN0LWRlbW8=
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&scope=invoices.write
+```
+
+`Authorization: Basic` 是 `client_id:client_secret` 的 base64（這裡是虛構的 `billing-svc:s3cr3t-demo`）。依 RFC 6749，這個流程不應該發 refresh token。token 裡的 `sub` 是服務本身。
+
+:::stop 讀到這裡可以先停：會依「有沒有瀏覽器、有沒有使用者、能不能保密 secret」選出三種流程之一，說得出 Device Code 的輪詢、PKCE 的三步與 Client Credentials 的請求。後面是每個流程完整的 HTTP 往返、Device Code 的釣魚風險、輪詢模擬與完整錯誤表，在自己實作 CLI 登入或排查 token 端點的錯誤時再回來讀。
+
+## 三種常見的錯誤解法與流程對照
+
+| 錯誤解法 | 後果 |
+|---|---|
+| CLI 要使用者把密碼直接打進終端機 | 工具拿到了明文密碼，MFA 也用不上 |
+| SPA 把 `client_secret` 寫進前端程式碼 | secret 等於公開，任何人都能冒充這個 client |
+| 對帳服務借用某位工程師的帳號 | 那個人離職或改密碼，服務就壞掉；稽核紀錄上也分不出是人還是服務 |
+
+| | Device Code | 授權碼 + PKCE | Client Credentials |
+|---|---|---|---|
+| 有沒有使用者 | 有 | 有 | 沒有 |
+| 用戶端類型 | 公開（CLI、電視） | 公開（SPA、App、桌機 CLI），機密型也建議加 | 機密（後端服務） |
+| 使用者在哪登入 | 另一台裝置的瀏覽器 | 同一台裝置的瀏覽器 | 不登入 |
+| 證明 client 身分的方式 | 只有 `client_id`（公開） | `code_verifier` 證明是同一個發起者 | client secret、私鑰 JWT 或 mTLS |
+| 拿 token 的方式 | 輪詢 token 端點 | 用 code + verifier 換 | 直接要 |
+| 主要風險 | user_code 釣魚 | 攔截授權碼（PKCE 擋）、redirect_uri 設定過寬 | 憑證外洩、scope 過大 |
+
+## Device Code 的 HTTP 往返與輪詢時間線
 
 ### ① ② 申請 device code
 
@@ -98,14 +181,7 @@ Cache-Control: no-store
 { "error": "authorization_pending" }
 ```
 
-| 錯誤碼 | 意思 | CLI 該怎麼做 |
-|---|---|---|
-| `authorization_pending` | 使用者還沒完成 | 等 `interval` 秒再問 |
-| `slow_down` | 問太快了 | 把間隔**加 5 秒**，之後每次都用新間隔 |
-| `access_denied` | 使用者按了拒絕 | 停止輪詢，告訴使用者 |
-| `expired_token` | `device_code` 過期 | 停止輪詢，重新跑整個流程 |
-
-使用者同意後，同一個請求會拿到一般的 token 回應：
+各錯誤碼的處理見必讀的表。使用者同意後，同一個請求會拿到一般的 token 回應：
 
 ```http
 HTTP/1.1 200 OK
@@ -136,171 +212,7 @@ Cache-Control: no-store
 | t=10 … t=20 | 每 5 秒一次 `authorization_pending` | 繼續 `slow_down`，間隔越拉越長 |
 | t=25 | 拿到 token | 永遠在 `slow_down`，直到 `expired_token` |
 
-不理會 `slow_down` 的 CLI 不只拿不到 token，還會把授權伺服器的負載拉高。後面的「實際程式」有可以執行的版本。
-
-### 釣魚風險：攻擊者發 user_code 給你
-
-Device Code 流程有一個結構上的弱點：**發起流程的裝置和完成登入的人之間沒有任何綁定**。攻擊者可以：
-
-1. 自己對授權伺服器發起 device 流程，拿到 `user_code` 與 `device_code`。
-2. 寄信或傳訊息給受害者：「請到 https://auth.example.com/device 輸入 WDJB-MJHT 完成驗證」。網址是真的官方網址，所以檢查網址的習慣擋不住。
-3. 受害者登入（連 MFA 都正常通過）、按同意。
-4. 攻擊者一直在輪詢，拿到的是**受害者的** token。
-
-防禦都在授權伺服器與組織政策這一側：
-
-- **驗證頁要講清楚是誰在要權限**：顯示 client 名稱、要求的 scope，並提醒「如果這不是你剛剛自己在裝置上發起的，請不要繼續」。
-- **`expires_in` 不要太長**：攻擊者要在碼過期前騙到人，時間越短越難。
-- **限制誰能用這個流程**：只有需要的 client（CLI、電視 App）才開 device grant；有些 IdP 可以用條件式政策限制哪些使用者或應用能用 device code 流程。
-- **事後可查**：token 發出時記錄是哪個 client、哪個 device 流程；異常地點的 refresh 要能撤銷。
-
-## 授權碼 + PKCE：沒有 secret 的公開客戶端
-
-### PKCE 防的是什麼
-
-授權碼流程中，授權碼會經過一段不受 client 控制的路：瀏覽器網址列、作業系統把自訂 URL scheme 交給 App、本機 loopback port。手機上別的 App 可以註冊同一個 URL scheme 攔到 `code`；瀏覽器擴充套件、log、Referer 也可能看到它。
-
-沒有 client secret 的公開客戶端，換 token 時只需要 `code`、`client_id`、`redirect_uri`，這三個攔截者都拿得到。PKCE 讓「換 token 的人」必須證明自己就是「發起授權的人」：
-
-1. 發起前，client 產生一個隨機的 `code_verifier`（43–128 個字元，只能用英數與 `-._~`），只留在自己的記憶體。
-2. 算出 `code_challenge = BASE64URL(SHA-256(code_verifier))`，放進授權請求。授權伺服器把它和這次授權綁在一起。
-3. 換 token 時帶上 `code_verifier` 原文。授權伺服器重算一次 SHA-256，和當初的 `code_challenge` 比對。
-
-攔截者拿到了 `code`，也看得到網址裡的 `code_challenge`，但 SHA-256 不能反推，所以算不出 `code_verifier`，換不到 token。`code_challenge_method` 有 `S256` 與 `plain` 兩種，`plain` 直接把 verifier 當 challenge，只在無法計算 SHA-256 時才用，實務上一律 `S256`。
-
-OAuth 2.1 草案把 PKCE 列為所有授權碼流程都要用，連有 secret 的機密型 client 也一樣：PKCE 也能防「授權碼注入」（攻擊者把自己拿到的 code 塞進受害者的流程）。
-
-### HTTP 往返
-
-```http
-GET /authorize?response_type=code
-  &client_id=atlas-spa
-  &redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback
-  &scope=orders.read
-  &state=af0ifjsldkj
-  &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
-  &code_challenge_method=S256 HTTP/1.1
-Host: auth.example.com
-```
-
-（實際請求是一行，這裡為了閱讀換行。）使用者登入、同意後，授權伺服器把瀏覽器導回：
-
-```http
-HTTP/1.1 302 Found
-Location: https://app.example.com/callback?code=SplxlOBeZQQYbYS6WxSbIA&state=af0ifjsldkj
-```
-
-client 先比對 `state`，再拿 `code` 和 `code_verifier` 換 token。注意這裡**沒有** `client_secret`：
-
-```http
-POST /token HTTP/1.1
-Host: auth.example.com
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=authorization_code
-&code=SplxlOBeZQQYbYS6WxSbIA
-&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback
-&client_id=atlas-spa
-&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
-```
-
-上面的 verifier 與 challenge 是 RFC 7636 附錄 B 的測試向量，可以用下面的程式驗算。
-
-### CLI 也能用授權碼 + PKCE
-
-有瀏覽器的桌機 CLI 不一定要用 Device Code。常見做法是 CLI 在本機開一個臨時的 HTTP 伺服器（`http://127.0.0.1:<隨機 port>/callback`），打開系統瀏覽器去授權頁，`redirect_uri` 指回這個 loopback 位址，收到 `code` 後關掉伺服器。這種原生應用的做法寫在 [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)。它的好處是使用者不用切換裝置、不用輸入碼；Device Code 留給 SSH、容器、電視這類沒有瀏覽器的環境。
-
-## Client Credentials：沒有使用者的服務
-
-對帳服務沒有使用者，它用自己的 `client_id` 與憑證直接向 token 端點要 token：
-
-```http
-POST /token HTTP/1.1
-Host: auth.example.com
-Authorization: Basic YmlsbGluZy1zdmM6czNjcjN0LWRlbW8=
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=client_credentials&scope=invoices.write
-```
-
-`Authorization: Basic` 是 `client_id:client_secret` 的 base64（這裡是 `billing-svc:s3cr3t-demo`，虛構的值）。回應：
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-Cache-Control: no-store
-
-{
-  "access_token": "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJiaWxsaW5nLXN2YyJ9…",
-  "token_type": "Bearer",
-  "expires_in": 900,
-  "scope": "invoices.write"
-}
-```
-
-幾個和使用者流程不同的地方：
-
-- **沒有 refresh token**。RFC 6749 規定這個流程不應該發 refresh token：client 隨時可以用自己的憑證再要一次，不需要它。
-- **token 裡的 `sub` 是服務本身**，不是某個人。下游 API 依據它做授權與稽核，才分得出「人做的」和「服務做的」。
-- **client 必須是機密型**：它要有地方安全地放憑證（伺服器的 secret 管理，見 [秘密管理](#/skill/secrets)）。比 `client_secret` 更好的選擇是不傳共享 secret 的認證方式，例如用私鑰簽一個 JWT 來證明身分（RFC 7523）或 mTLS（RFC 8705），授權伺服器只存公鑰或憑證資訊。
-- **scope 照樣要最小化**。服務 token 沒有使用者在旁邊看，被偷時的影響範圍完全由 scope 決定。
-
-### 三種流程對照
-
-| | Device Code | 授權碼 + PKCE | Client Credentials |
-|---|---|---|---|
-| 有沒有使用者 | 有 | 有 | 沒有 |
-| 用戶端類型 | 公開（CLI、電視） | 公開（SPA、App、桌機 CLI），機密型也建議加 | 機密（後端服務） |
-| 使用者在哪登入 | 另一台裝置的瀏覽器 | 同一台裝置的瀏覽器 | 不登入 |
-| 證明 client 身分的方式 | 只有 `client_id`（公開） | `code_verifier` 證明是同一個發起者 | client secret、私鑰 JWT 或 mTLS |
-| 拿 token 的方式 | 輪詢 token 端點 | 用 code + verifier 換 | 直接要 |
-| 主要風險 | user_code 釣魚 | 攔截授權碼（PKCE 擋）、redirect_uri 設定過寬 | 憑證外洩、scope 過大 |
-
-:::stop 讀到這裡可以先停：會依「有沒有瀏覽器、有沒有使用者、能不能保密 secret」選出三種流程之一，看得懂各自的 HTTP 往返。後面的 PKCE 計算、輪詢模擬與錯誤訊息，在自己實作 CLI 登入或排查 token 端點的錯誤時再回來讀。
-
-## 實際程式
-
-### 計算 PKCE 的 code_challenge
-
-用 WebCrypto 算 SHA-256，再轉成 base64url（`+` 換 `-`、`/` 換 `_`、去掉結尾的 `=`）。先用 RFC 7636 的測試向量確認算法，再產生一組新的：
-
-```js run
-// base64url：標準 base64 再換掉兩個字元、去掉 padding
-function base64url(bytes) {
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-// code_challenge = BASE64URL(SHA-256(ASCII(code_verifier)))
-async function challengeFor(verifier) {
-  const data = new TextEncoder().encode(verifier)
-  const hash = await crypto.subtle.digest('SHA-256', data)   // 32 bytes
-  return base64url(new Uint8Array(hash))
-}
-
-// 1. RFC 7636 附錄 B 的測試向量
-const rfcVerifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
-const rfcChallenge = await challengeFor(rfcVerifier)
-console.log('RFC 範例 challenge：', rfcChallenge)
-console.log('與 RFC 一致：', rfcChallenge === 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM')
-
-// 2. 實際使用：32 bytes 密碼學亂數 → base64url 後剛好 43 個字元
-const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)))
-const challenge = await challengeFor(verifier)
-console.log('verifier 長度：', verifier.length, '（規範要求 43 到 128）')
-console.log('放進授權請求的 challenge：', challenge)
-
-// 3. 授權伺服器在 token 端點做的事：重算一次再比對
-async function tokenEndpointCheck(storedChallenge, receivedVerifier) {
-  return (await challengeFor(receivedVerifier)) === storedChallenge
-}
-console.log('發起者帶正確 verifier：', await tokenEndpointCheck(challenge, verifier))
-const guess = base64url(crypto.getRandomValues(new Uint8Array(32)))
-console.log('攔截者只有 code，亂猜 verifier：', await tokenEndpointCheck(challenge, guess))
-```
-
-`crypto.getRandomValues` 是密碼學等級的亂數；不要用 `Math.random()` 產生 verifier，它可以被預測。
+不理會 `slow_down` 的 CLI 不只拿不到 token，還會把授權伺服器的負載拉高。
 
 ### 模擬 Device Code 的輪詢
 
@@ -344,6 +256,92 @@ const impatient = runCli(makeServer({ approveAt: 23 }), { honorSlowDown: false, 
 console.log('\n每 2 秒問一次的 CLI（共 ' + impatient.length + ' 次）：\n' + impatient.slice(0, 4).join('\n') + '\n…\n' + impatient.at(-1))
 console.log('\n使用者按拒絕：\n' + runCli(makeServer({ approveAt: 12, denied: true })).join('\n'))
 ```
+
+## Device Code 的釣魚風險：攻擊者發 user_code 給你
+
+Device Code 流程有一個結構上的弱點：**發起流程的裝置和完成登入的人之間沒有任何綁定**。攻擊者可以：
+
+1. 自己對授權伺服器發起 device 流程，拿到 `user_code` 與 `device_code`。
+2. 寄信或傳訊息給受害者：「請到 https://auth.example.com/device 輸入 WDJB-MJHT 完成驗證」。網址是真的官方網址，所以檢查網址的習慣擋不住。
+3. 受害者登入（連 MFA 都正常通過）、按同意。
+4. 攻擊者一直在輪詢，拿到的是**受害者的** token。
+
+防禦都在授權伺服器與組織政策這一側：
+
+- **驗證頁要講清楚是誰在要權限**：顯示 client 名稱、要求的 scope，並提醒「如果這不是你剛剛自己在裝置上發起的，請不要繼續」。
+- **`expires_in` 不要太長**：攻擊者要在碼過期前騙到人，時間越短越難。
+- **限制誰能用這個流程**：只有需要的 client（CLI、電視 App）才開 device grant；有些 IdP 可以用條件式政策限制哪些使用者或應用能用 device code 流程。
+- **事後可查**：token 發出時記錄是哪個 client、哪個 device 流程；異常地點的 refresh 要能撤銷。
+
+## PKCE 的 HTTP 往返、OAuth 2.1 與桌機 CLI
+
+`code_challenge_method` 有 `S256` 與 `plain` 兩種。`plain` 直接把 verifier 當 challenge，只在無法計算 SHA-256 時才用，實務上一律 `S256`。
+
+授權碼流程中，授權碼會經過一段不受 client 控制的路：瀏覽器網址列、作業系統把自訂 URL scheme 交給 App、本機 loopback port。手機上別的 App 可以註冊同一個 URL scheme 攔到 `code`；瀏覽器擴充套件、log、Referer 也可能看到它。
+
+OAuth 2.1 草案把 PKCE 列為所有授權碼流程都要用，連有 secret 的機密型 client 也一樣：PKCE 也能防「授權碼注入」（攻擊者把自己拿到的 code 塞進受害者的流程）。
+
+```http
+GET /authorize?response_type=code
+  &client_id=atlas-spa
+  &redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback
+  &scope=orders.read
+  &state=af0ifjsldkj
+  &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+  &code_challenge_method=S256 HTTP/1.1
+Host: auth.example.com
+```
+
+（實際請求是一行，這裡為了閱讀換行。）使用者登入、同意後，授權伺服器把瀏覽器導回：
+
+```http
+HTTP/1.1 302 Found
+Location: https://app.example.com/callback?code=SplxlOBeZQQYbYS6WxSbIA&state=af0ifjsldkj
+```
+
+client 先比對 `state`，再拿 `code` 和 `code_verifier` 換 token。注意這裡**沒有** `client_secret`：
+
+```http
+POST /token HTTP/1.1
+Host: auth.example.com
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=SplxlOBeZQQYbYS6WxSbIA
+&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback
+&client_id=atlas-spa
+&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
+```
+
+上面的 verifier 與 challenge 是 RFC 7636 附錄 B 的測試向量，可以用下面的程式驗算。
+
+base64url 是標準 base64 把 `+` 換 `-`、`/` 換 `_`、去掉結尾的 `=`。
+
+### CLI 也能用授權碼 + PKCE
+
+有瀏覽器的桌機 CLI 不一定要用 Device Code。常見做法是 CLI 在本機開一個臨時的 HTTP 伺服器（`http://127.0.0.1:<隨機 port>/callback`），打開系統瀏覽器去授權頁，`redirect_uri` 指回這個 loopback 位址，收到 `code` 後關掉伺服器。這種原生應用的做法寫在 [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)。它的好處是使用者不用切換裝置、不用輸入碼；Device Code 留給 SSH、容器、電視這類沒有瀏覽器的環境。
+
+## Client Credentials 的回應與注意事項
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Cache-Control: no-store
+
+{
+  "access_token": "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJiaWxsaW5nLXN2YyJ9…",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "scope": "invoices.write"
+}
+```
+
+幾個和使用者流程不同的地方：
+
+- **沒有 refresh token**。RFC 6749 規定這個流程不應該發 refresh token：client 隨時可以用自己的憑證再要一次，不需要它。
+- **token 裡的 `sub` 是服務本身**，不是某個人。下游 API 依據它做授權與稽核，才分得出「人做的」和「服務做的」。
+- **client 必須是機密型**：它要有地方安全地放憑證（伺服器的 secret 管理，見 [秘密管理](#/skill/secrets)）。比 `client_secret` 更好的選擇是不傳共享 secret 的認證方式，例如用私鑰簽一個 JWT 來證明身分（RFC 7523）或 mTLS（RFC 8705），授權伺服器只存公鑰或憑證資訊。
+- **scope 照樣要最小化**。服務 token 沒有使用者在旁邊看，被偷時的影響範圍完全由 scope 決定。
 
 ## 常見錯誤與錯誤訊息
 

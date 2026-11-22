@@ -1,17 +1,17 @@
-## 從一個具體問題開始：叫號提示一滑出來，看板就卡一下
+## 具體問題：叫號提示一滑出來，看板就卡一下
 
-門診看板 `ClinicBoard` 在候診區的電視上全螢幕顯示，每次叫號時右下角滑出一個 Toast。桌機上看起來沒事，換到電視盒內建的瀏覽器後，Toast 滑出的那半秒整個看板會頓一下，候診人數的數字也跟著閃。
+門診看板 `ClinicBoard` 在候診區的電視上全螢幕顯示，每次叫號時右下角滑出一個 Toast。換到電視盒內建的瀏覽器後，Toast 滑出的那半秒整個看板會頓一下。
 
-打開 Performance 分頁錄一次叫號，Main 軌道在動畫的每一格都有 `Recalculate style`、`Layout`、`Paint`，加起來超過一格的時間預算（60 fps 時約 16.7 ms）。原因在 Toast 的 CSS：
+用 Performance 分頁錄一次叫號，Main 軌道在動畫的每一格都有 `Recalculate style`、`Layout`、`Paint`，加起來超過一格的時間預算（60 fps 時約 16.7 ms）。原因在 Toast 的 CSS：
 
 ```css
 .toast { position: fixed; right: -320px; transition: right 0.4s; }
 .toast.show { right: 24px; }
 ```
 
-動畫改的是 `right`，`right` 會改變元素的位置，瀏覽器每一格都得重新算版面、重新畫。同樣的效果改用 `transform: translateX()`，瀏覽器可以跳過前面幾段，只在最後一段把已經畫好的圖層移過去。要判斷「改這個屬性要付出多少代價」，得知道瀏覽器從 HTML 到畫面經過哪幾段，以及每一段的輸入是什麼。
+`right` 會改變元素的位置，瀏覽器每一格都得重新算版面、重新畫。改用 `transform: translateX()`，瀏覽器只在最後一段把已經畫好的圖層移過去。
 
-## 運作原理：七段管線
+## 七段管線，以及改一個屬性從哪一段重跑
 
 | 階段 | 輸入 | 產出 | 在 DevTools 的 Performance 分頁看到的名稱 |
 |---|---|---|---|
@@ -23,9 +23,50 @@
 | 6. paint | 盒子與樣式 | 繪製指令，再點陣化成像素 | `Paint` |
 | 7. composite | 各個圖層 | 螢幕上的畫面 | 新版 Chrome 是 `Layerize`、`Commit`，舊版是 `Composite Layers` |
 
-前三段處理「收到什麼」，後四段處理「怎麼畫」。第 1 段的細節（DNS、TCP、TLS、快取）在 [一個 HTTP 請求的一生](#/skill/http-basics)。
+第 1 段的細節（DNS、TCP、TLS、快取）在 [一個 HTTP 請求的一生](#/skill/http-basics)。
 
-### 首次載入的時間線
+頁面載入後，JavaScript 或使用者互動改了東西，瀏覽器從被影響的那一段往後重跑：
+
+| 改了什麼 | 樣式計算 | layout | paint | composite |
+|---|---|---|---|---|
+| 新增或移除節點 | 重跑 | 重跑 | 重跑 | 重跑 |
+| `width`、`height`、`padding`、`margin`、`font-size`、`top`、`left` | 重跑 | 重跑 | 重跑 | 重跑 |
+| `color`、`background-color`、`box-shadow`、`visibility` | 重跑 | 跳過 | 重跑 | 重跑 |
+| 有自己合成層的元素的 `transform`、`opacity` | 重跑 | 跳過 | 跳過 | 重跑 |
+
+最後一列的前提是元素已經有自己的**合成層**（compositing layer）。設了 `will-change: transform`、正在跑 `transform` 或 `opacity` 的 CSS 動畫的元素，瀏覽器通常會把它放到獨立的圖層。沒有獨立圖層時，它的像素畫在父層裡，移動它就得重畫那一層。合成由合成器執行緒負責，所以主執行緒在跑 JavaScript 時，這類動畫仍然順暢。
+
+## 最小範例：只走合成的 Toast
+
+```css
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  transform: translateX(calc(100% + 24px)); /* 先推到畫面外 */
+  opacity: 0;
+  transition: transform 0.4s ease, opacity 0.4s ease;
+  will-change: transform; /* 先給它自己的合成層 */
+}
+.toast.show {
+  transform: translateX(0);
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast { transition: none; }
+}
+```
+
+每一層都要占 GPU 記憶體，幫上百張卡片都加 `will-change`，在記憶體少的裝置上反而更慢。只給會動的元素加，動完可以拿掉。
+
+## 最常見的兩個錯誤
+
+- **動畫改 `top`、`left`、`width`**：Performance 分頁的 Main 軌道在動畫期間每一格都有 `Layout`。改成 `transform` 與 `opacity`。
+- **強迫同步 layout**（改了樣式馬上讀 `offsetHeight` 這類尺寸）：Performance 分頁的 Insights 列出 `Forced reflow`，點開 `Layout` 事件會看到 `Forced reflow is a likely performance bottleneck`，下面附了觸發它的程式位置。
+
+:::stop 讀到這裡可以先停：會說出七段管線，判斷改一個屬性要從哪一段重跑，並把 Toast 改成只走合成。後面是首次載入的時間線、render tree 的成員、script 載入與先讀後寫，在首屏白畫面或迴圈更新卡頓時再回來讀。
+
+## 首次載入的時間線：CSS 擋渲染、script 擋解析
 
 瀏覽器邊收 HTML 邊解析，不等整份下載完。下面是一份 `<head>` 裡有一個樣式表、一個沒加 `defer` 的 script 的頁面（時間是示意）：
 
@@ -57,7 +98,19 @@
 
 `type="module"` 的 script 預設行為和 `defer` 相同；`async` 是下載完就執行，執行的那一刻仍會打斷解析，多個 `async` 之間的順序也不保證。
 
-### render tree 裡有誰
+`<head>` 的寫法：
+
+```html
+<head>
+  <link rel="stylesheet" href="/assets/main.css">
+  <!-- 不需要等的追蹤程式：defer，解析完才執行，順序照出現的順序 -->
+  <script defer src="/analytics.js"></script>
+  <!-- Vite 產生的入口是 module，預設就和 defer 一樣不擋解析 -->
+  <script type="module" src="/assets/index.js"></script>
+</head>
+```
+
+## render tree 裡有誰
 
 render tree（Chrome 的文件叫 layout tree）由 DOM 與計算後的樣式合成，只留下要畫的東西：
 
@@ -71,59 +124,7 @@ render tree（Chrome 的文件叫 layout tree）由 DOM 與計算後的樣式合
 
 Vue 的 `v-if` 為假時，連 DOM 節點都不會建立。
 
-### 改一個屬性，從哪一段重跑
-
-頁面載入後，JavaScript 或使用者互動改了東西，瀏覽器不會從頭來過，而是從被影響的那一段往後重跑：
-
-| 改了什麼 | 樣式計算 | layout | paint | composite |
-|---|---|---|---|---|
-| 新增或移除節點 | 重跑 | 重跑 | 重跑 | 重跑 |
-| `width`、`height`、`padding`、`margin`、`font-size`、`top`、`left` | 重跑 | 重跑 | 重跑 | 重跑 |
-| `color`、`background-color`、`box-shadow`、`visibility` | 重跑 | 跳過 | 重跑 | 重跑 |
-| 有自己合成層的元素的 `transform`、`opacity` | 重跑 | 跳過 | 跳過 | 重跑 |
-
-最後一列有個前提：元素要已經有自己的**合成層**（compositing layer）。設了 `will-change: transform`、正在跑 `transform` 或 `opacity` 的 CSS 動畫的元素，瀏覽器通常會把它放到獨立的圖層；沒有獨立圖層時，它的像素畫在父層裡，移動它就得重畫那一層。合成由合成器執行緒負責，所以主執行緒在跑 JavaScript 時，這類動畫仍然順暢。
-
-圖層不是越多越好：每一層都要占 GPU 記憶體，幫上百張卡片都加 `will-change`，在記憶體少的裝置上反而更慢。只給會動的元素加，動完可以拿掉。
-
-## 實際程式碼
-
-### 只走合成的 Toast
-
-```css
-.toast {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  transform: translateX(calc(100% + 24px)); /* 先推到畫面外 */
-  opacity: 0;
-  transition: transform 0.4s ease, opacity 0.4s ease;
-  will-change: transform; /* 先給它自己的合成層 */
-}
-.toast.show {
-  transform: translateX(0);
-  opacity: 1;
-}
-@media (prefers-reduced-motion: reduce) {
-  .toast { transition: none; }
-}
-```
-
-:::stop 讀到這裡可以先停：會說出七段管線，判斷改一個屬性要從哪一段重跑，並把 Toast 改成只走合成。後面的 script 載入與強迫同步 layout，在首屏白畫面或迴圈更新卡頓時再回來讀。
-
-### `<head>` 裡的 script
-
-```html
-<head>
-  <link rel="stylesheet" href="/assets/main.css">
-  <!-- 不需要等的追蹤程式：defer，解析完才執行，順序照出現的順序 -->
-  <script defer src="/analytics.js"></script>
-  <!-- Vite 產生的入口是 module，預設就和 defer 一樣不擋解析 -->
-  <script type="module" src="/assets/index.js"></script>
-</head>
-```
-
-### 先讀後寫，避免強迫同步 layout
+## 先讀後寫，避免強迫同步 layout
 
 更新 20 個診間的候診人數，同時把每張卡片的高度記下來給動畫用。下面的寫法每一圈都先寫再讀：
 
@@ -151,10 +152,10 @@ cards.forEach((card, i) => {
 
 會強迫 layout 的讀取不只 `offsetHeight`，`offsetWidth`、`clientHeight`、`scrollTop`、`getBoundingClientRect()`、`getComputedStyle()` 的部分屬性都會。用 Vue 時通常不會直接這樣寫，但在 `onUpdated` 或 `watch` 裡量尺寸、再改狀態，效果相同。
 
-## 常見錯誤與錯誤訊息
+Console 的層級打開 Verbose 時，Chrome 也可能印出 `[Violation] Forced reflow while executing JavaScript took 45ms` 這類訊息（數字依實際情況）。
 
-- **動畫改 `top`、`left`、`width`**：Performance 分頁的 Main 軌道在動畫期間每一格都有 `Layout`。改成 `transform` 與 `opacity`。
-- **強迫同步 layout**：Performance 分頁的 Insights 列出 `Forced reflow`，點開 `Layout` 事件會看到 `Forced reflow is a likely performance bottleneck`，下面附了觸發它的程式位置。Console 的層級打開 Verbose 時，Chrome 也可能印出 `[Violation] Forced reflow while executing JavaScript took 45ms` 這類訊息（數字依實際情況）。
+## 其他常見錯誤
+
 - **整頁重繪**：Rendering 面板的 `Paint flashing` 會把重繪的區域標成綠色。改一個數字卻整個清單在閃，常見原因是那個元素和大範圍的區塊在同一層、或改到了影響整個區塊的樣式（例如父元素的 class）。
 - **`display: none` 的元素量不到尺寸**：它不在 render tree，`offsetHeight` 是 0、`getBoundingClientRect()` 全是 0。要量尺寸改用 `visibility: hidden`，或等它顯示出來（Vue 裡在 `nextTick` 之後）再量。
 - **script 擋住第一個畫面**：用 `Record and reload` 錄載入，`Parse HTML` 被 `Evaluate script` 切成兩段，且第一個 `Paint` 很晚才出現。在 `<head>` 的 script 加 `defer`，或改成 `type="module"`。

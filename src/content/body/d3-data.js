@@ -195,7 +195,7 @@ const base = {
       ],
     },
     challenge: {
-      task: '在 [Playground](#/playground?lang=sql) 依序執行本課「範例資料太小」與「用 generate_series 做出 10 萬筆」兩段。執行第二段之前，先預測 `big_orders WHERE user_id = 42` 在建索引前後各是什麼節點、估計列數（`rows`）大概多少、Buffers 會差幾倍。執行後把兩份 `EXPLAIN ANALYZE` 原文並排比較。',
+      task: '在 [Playground](#/playground?lang=sql) 依序執行本課「小表不走索引是對的」（選讀）與「建索引前後的計畫」兩章的 SQL。執行第二段之前，先預測 `big_orders WHERE user_id = 42` 在建索引前後各是什麼節點、估計列數（`rows`）大概多少、Buffers 會差幾倍。執行後把兩份 `EXPLAIN ANALYZE` 原文並排比較。',
       deliver: '兩份計畫原文，加上一段比較：節點類型、估計與實際列數、Buffers、Execution Time，以及預測錯的地方。',
       check: [
         '預測寫在執行之前',

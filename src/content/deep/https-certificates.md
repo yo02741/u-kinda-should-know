@@ -1,14 +1,10 @@
-## 從一個具體問題開始：週一早上的憑證過期
+## 週一早上的憑證過期
 
 週一早上七點半，一家醫院的對外預約網站開始出現瀏覽器警告「你的連線不是私人連線」，手機 App 直接顯示「無法連線」。原因是憑證在週日午夜到期。去年買憑證的同事已經調單位，續約提醒信寄到了他的信箱；新的憑證買好後，還要找到它被裝在哪幾個地方：nginx 一台、負載平衡器一台、還有一份被複製進某個 Java 程式的 keystore。
 
-同一場檢討會上，接著有人問：「乾脆買 EV 憑證，比較安全？」「萬用字元憑證能不能一張全院通用？」「內部系統也要買嗎？」
+## 憑證是一份簽了名的聲明
 
-這些問題都有明確的答案，但要先知道憑證是什麼、瀏覽器怎麼驗證它。這一課從機制講起，再回到「要買哪種、怎麼續、怎麼不再被到期日偷襲」。
-
-## 憑證是什麼
-
-一張 TLS 伺服器憑證（X.509 格式）是一份**被簽了名的聲明**，內容是：「這把公鑰屬於這些網域名稱，在這段期間內有效」。主要欄位：
+一張 TLS 伺服器憑證（X.509 格式）的內容是：「這把公鑰屬於這些網域名稱，在這段期間內有效」。主要欄位：
 
 | 欄位 | 內容 | 例子 |
 |---|---|---|
@@ -19,13 +15,12 @@
 | Issuer | 誰簽發的 | 某個 CA 的中繼憑證 |
 | Signature | 簽發者用自己的私鑰做的簽章 | |
 
-**私鑰不在憑證裡**。私鑰在申請時由伺服器端產生、一直留在伺服器上；送給 CA 的是 CSR（憑證簽署請求，內含公鑰與要申請的名字）。CA 驗證你有資格使用這些名字之後，簽好憑證寄回來。所以「換憑證」時，憑證和對應的私鑰要一起換；裝了新憑證卻配舊私鑰，服務會起不來（nginx 會報 `key values mismatch`）。
-
-瀏覽器現在只看 SAN 判斷名字是否相符；舊式的 CN 欄位已不被主流瀏覽器用於比對。
+- **私鑰不在憑證裡**。私鑰由伺服器端產生、一直留在伺服器上；送給 CA 的是 CSR（憑證簽署請求，內含公鑰與要申請的名字）。換憑證時憑證和對應的私鑰要一起換，否則 nginx 會報 `key values mismatch`。
+- **瀏覽器只看 SAN 判斷名字是否相符**；舊式的 CN 欄位已不被主流瀏覽器用於比對。
 
 ## 信任鏈：瀏覽器怎麼決定相信這張憑證
 
-瀏覽器和作業系統內建一份根憑證清單（trust store）。CA 不會直接用根憑證簽網站憑證，而是用根憑證簽一張**中繼憑證**，再用中繼憑證簽網站憑證：
+瀏覽器和作業系統內建一份根憑證清單（trust store）。CA 用根憑證簽一張**中繼憑證**，再用中繼憑證簽網站憑證：
 
 ```text
 根憑證（Root CA）               ← 內建在作業系統 / 瀏覽器的 trust store
@@ -35,15 +30,38 @@
 
 TLS 握手時，伺服器送出網站憑證**加上中繼憑證**（不需要送根憑證）。用戶端從網站憑證往上驗證每一層的簽章，直到接上一張它信任的根憑證。
 
-最常見的設定錯誤是**沒送中繼憑證**。桌機瀏覽器有時會用快取或自動下載補上中繼憑證，所以「我用 Chrome 看沒問題」；但 `curl`、Java、Python、手機 App 通常不會補，直接報錯：
+最常見的設定錯誤是**沒送中繼憑證**。桌機瀏覽器有時會用快取或自動下載補上，所以「我用 Chrome 看沒問題」；`curl`、Java、Python、手機 App 通常不會補，直接報錯：
 
 ```text
 curl: (60) SSL certificate problem: unable to get local issuer certificate
 ```
 
-nginx 的修法是把網站憑證和中繼憑證**依序**串在同一個檔案裡（網站憑證在前），`ssl_certificate` 指向這個檔案。CA 寄來的檔案通常有一份叫 fullchain 或 bundle 的就是這種格式。
+nginx 的修法是把網站憑證和中繼憑證**依序**串在同一個檔案裡（網站憑證在前），`ssl_certificate` 指向這個檔案。CA 寄來的檔案裡叫 fullchain 或 bundle 的就是這種格式。
 
-### trust store 不只一份
+## 看到期日與 SAN，續約後確認換上了
+
+```bash
+$ openssl s_client -connect booking.example.org:443 -servername booking.example.org </dev/null 2>/dev/null \
+    | openssl x509 -noout -dates -subject -ext subjectAltName
+notBefore=Sep  1 00:00:00 2026 GMT
+notAfter=Nov 30 23:59:59 2026 GMT
+subject=CN = booking.example.org
+X509v3 Subject Alternative Name: 
+    DNS:booking.example.org, DNS:www.example.org
+```
+
+第一段把服務實際送出的憑證取出來，第二段印出效期、主體與 SAN。
+
+自動續約要涵蓋三件事：拿到新憑證、放到所有用到它的地方、讓服務重新載入。另外要有一個**獨立於續約機制**的監控，從外部連到服務、讀出它實際送出的憑證到期日。最常見的兩個錯誤：
+
+| 現象 | 原因 | 處理 |
+|---|---|---|
+| 瀏覽器正常、`curl` / App 報 `unable to get local issuer certificate` | 沒送中繼憑證 | 改用 fullchain 檔案 |
+| 已續約，但瀏覽器顯示的到期日還是舊的 | 服務沒重新載入，或請求打到另一台還沒更新的機器 | reload 服務；用 `s_client` 對每一台後端分別檢查 |
+
+:::stop 讀到這裡可以先停：看得懂憑證欄位與信任鏈，會用 `openssl` 查一個服務的到期日與 SAN，知道續約要涵蓋哪三件事。後面依問題回來讀：要買哪種（DV / OV / EV、萬用字元、內部 CA、Let's Encrypt）、效期縮短的時程、certbot 與到期監控、`s_client` 的輸出怎麼讀、Kubernetes 的 cert-manager。
+
+## trust store 不只一份
 
 「信任哪些根憑證」由每個執行環境各自決定，全系統不只一份：
 
@@ -73,15 +91,13 @@ nginx 的修法是把網站憑證和中繼憑證**依序**串在同一個檔案�
 
 ## SAN 與萬用字元：一張憑證涵蓋哪些名字
 
-憑證涵蓋的名字就是 SAN 裡列的那些。萬用字元 `*` 只能出現在最左邊一段，而且只代表**剛好一段**：
+SAN 裡列的名字就是憑證涵蓋的範圍。萬用字元 `*` 只能出現在最左邊一段，而且只代表**剛好一段**：
 
 | 憑證的 SAN | `example.org` | `www.example.org` | `api.example.org` | `a.b.example.org` |
 |---|---|---|---|---|
 | `*.example.org` | ✗（apex 不涵蓋） | ✓ | ✓ | ✗（兩段） |
 | `*.example.org`, `example.org` | ✓ | ✓ | ✓ | ✗ |
 | `*.b.example.org` | ✗ | ✗ | ✗ | ✓ |
-
-這條規則可以直接跑一次看看：
 
 ```python run
 # 簡化版的主機名稱比對：萬用字元只能在最左邊一段、只代表一段
@@ -113,11 +129,11 @@ print("加上 apex 之後：", covered(san, "example.org"))
 - **風險集中**：同一把私鑰要複製到每一台用它的伺服器，任何一台外洩，所有子網域都受影響；換憑證時也要每一台都換。
 - **無法同時給多層子網域**：`*.example.org` 不能用在 `his.dept.example.org`。
 
-所以「一張萬用字元全院通用」在技術上做得到一部分，但私鑰散落在越多台機器，風險與換證工作量就越大。對外服務數量不多時，每個服務用自己的憑證、或用列了幾個名字的多網域（SAN）憑證，往往比較好管。
+私鑰散落在越多台機器，風險與換證工作量就越大。對外服務數量不多時，每個服務用自己的憑證，或用列了幾個名字的多網域（SAN）憑證，往往比較好管。
 
 ### 公開憑證會被公開記錄
 
-公開 CA 簽發的每張憑證都必須記錄在 **Certificate Transparency（CT）** 日誌裡，任何人都能查詢。結果是：憑證 SAN 裡的每個名字都是公開資訊。如果把 `his-db-prod.example.org` 這種內部主機名稱放進公開憑證，等於公告了內部架構。內部系統的名字適合用內部 CA，或改用萬用字元憑證避免逐一列出。
+公開 CA 簽發的每張憑證都必須記錄在 **Certificate Transparency（CT）** 日誌裡，任何人都能查詢，憑證 SAN 裡的每個名字都是公開資訊。把 `his-db-prod.example.org` 這種內部主機名稱放進公開憑證，等於公告了內部架構。內部系統的名字適合用內部 CA，或改用萬用字元憑證避免逐一列出。
 
 ## 公開 CA 與內部 CA
 
@@ -128,7 +144,7 @@ print("加上 apex 之後：", covered(san, "example.org"))
 | 適合 | 對外服務、使用者裝置無法統一管理的情境 | 只在內網使用的系統、伺服器之間的連線、內部 API |
 | 維運負擔 | 依 CA 規定的效期與驗證程序 | 自己保管根憑證私鑰、自己管撤銷與效期 |
 
-內部 CA 常見的實作有 Microsoft AD CS（Active Directory 憑證服務）、HashiCorp Vault 的 PKI、smallstep 的 step-ca 等。用內部 CA 的前提是**所有用戶端都裝了根憑證**：透過 AD 群組原則派送到 Windows 電腦很容易，但伺服器、容器、各種語言的執行環境（前一節那張表）都要各自處理。例如在 Debian 系的容器 image 裡：
+內部 CA 常見的實作有 Microsoft AD CS（Active Directory 憑證服務）、HashiCorp Vault 的 PKI、smallstep 的 step-ca 等。用內部 CA 的前提是**所有用戶端都裝了根憑證**：透過 AD 群組原則派送到 Windows 電腦很容易，但伺服器、容器、各種語言的執行環境（見「trust store 不只一份」的表）都要各自處理。例如在 Debian 系的容器 image 裡：
 
 ```dockerfile
 # 把內部根憑證加進系統的 CA bundle
@@ -164,7 +180,7 @@ Let's Encrypt 是免費的公開 CA，只發 DV 憑證，透過 **ACME** 協定�
 
 ## 效期越來越短
 
-公開憑證的最長效期由 CA/Browser Forum（CA 與瀏覽器廠商組成的組織）的基本要求規範。2020 年 9 月起，公開憑證最長約 398 天（13 個月）。2025 年，CA/Browser Forum 通過了分階段縮短的時程：
+公開憑證的最長效期由 CA/Browser Forum（CA 與瀏覽器廠商組成的組織）的基本要求規範。2020 年 9 月起最長約 398 天（13 個月）。2025 年通過了分階段縮短的時程：
 
 | 簽發日期 | 最長效期 |
 |---|---|
@@ -172,11 +188,9 @@ Let's Encrypt 是免費的公開 CA，只發 DV 憑證，透過 **ACME** 協定�
 | 2027 年 3 月 15 日起 | 100 天 |
 | 2029 年 3 月 15 日起 | 47 天 |
 
-（2026 年 11 月核對時，第一階段的 200 天已經生效；確切時程與細節以 CA/Browser Forum 的公告為準。）這代表「一年換一次、到時候手動處理」的流程會變成一年換八次以上。到期事故的根本解法是**自動續約加上獨立的到期監控**，光靠提醒不夠。
+（2026 年 11 月核對時，第一階段的 200 天已經生效；確切時程與細節以 CA/Browser Forum 的公告為準。）「一年換一次、到時候手動處理」的流程會變成一年換八次以上。
 
-## 續約：不靠人記得
-
-自動續約要涵蓋三件事：拿到新憑證、放到所有用到它的地方、讓服務重新載入。
+## 續約：certbot 與獨立的到期監控
 
 用 certbot 搭配 nginx 的典型做法：
 
@@ -191,14 +205,16 @@ sudo certbot renew --dry-run
 sudo certbot renew --deploy-hook "systemctl reload nginx"
 ```
 
-到期事故常見的原因不是「沒續約」，而是：
+到期事故常見的原因：
 
-- **續約了但服務沒重新載入**：nginx 在記憶體裡還用舊憑證。
-- **憑證有多份副本**：負載平衡器、另一台備援機、Java keystore、廠商設備，自動化只更新了其中一處。
-- **驗證方式失效**：防火牆規則改了，80 port 從外網連不到，HTTP-01 驗證失敗；DNS API 的金鑰過期，DNS-01 失敗。
-- **通知寄到沒人看的信箱**：而且不是每個 CA 都會寄到期提醒，Let's Encrypt 已停止寄送到期提醒信，必須自己監控。
+| 原因 | 發生什麼 |
+|---|---|
+| 續約了但服務沒重新載入 | nginx 在記憶體裡還用舊憑證 |
+| 憑證有多份副本 | 負載平衡器、另一台備援機、Java keystore、廠商設備，自動化只更新了其中一處 |
+| 驗證方式失效 | 防火牆規則改了，80 port 從外網連不到，HTTP-01 驗證失敗；DNS API 的金鑰過期，DNS-01 失敗 |
+| 通知寄到沒人看的信箱 | 不是每個 CA 都會寄到期提醒，Let's Encrypt 已停止寄送到期提醒信，必須自己監控 |
 
-所以要有一個**從外部、獨立於續約機制**的監控：直接連到服務，讀出它實際送出的憑證到期日。用 Prometheus 的 blackbox_exporter 可以拿到 `probe_ssl_earliest_cert_expiry` 這個指標，設定「剩不到 14 天就告警」。沒有監控系統的話，一個每天跑的腳本也可以：
+監控要直接連到服務，讀出它實際送出的憑證到期日。Prometheus 的 blackbox_exporter 有 `probe_ssl_earliest_cert_expiry` 這個指標，可以設定「剩不到 14 天就告警」。沒有監控系統的話，一個每天跑的腳本也可以：
 
 ```bash
 # 實際連到服務，取出它送的憑證，檢查 30 天（2592000 秒）內會不會到期
@@ -209,9 +225,7 @@ echo | openssl s_client -connect booking.example.org:443 -servername booking.exa
 
 `-checkend` 在期限內會到期時，印出 `Certificate will expire` 並以非 0 結束。
 
-## 用 openssl 看憑證
-
-### 看一個服務實際送出什麼
+## 用 openssl s_client 看信任鏈
 
 ```bash
 $ openssl s_client -connect booking.example.org:443 -servername booking.example.org </dev/null
@@ -256,21 +270,7 @@ Certificate chain
 
 其他常見的 `Verify return code`：`10 (certificate has expired)`；`19 (self-signed certificate in certificate chain)`，通常是內部 CA 的根憑證沒裝，可以加 `-CAfile example-root-ca.crt` 指定根憑證再試一次。`s_client` 預設**不檢查名字**是否相符，要加 `-verify_hostname booking.example.org`，不符時會出現 `verify error:num=62:hostname mismatch`。
 
-### 看憑證內容
-
-```bash
-$ openssl s_client -connect booking.example.org:443 -servername booking.example.org </dev/null 2>/dev/null \
-    | openssl x509 -noout -dates -subject -ext subjectAltName
-notBefore=Sep  1 00:00:00 2026 GMT
-notAfter=Nov 30 23:59:59 2026 GMT
-subject=CN = booking.example.org
-X509v3 Subject Alternative Name: 
-    DNS:booking.example.org, DNS:www.example.org
-```
-
-第一段把服務送的憑證取出來，第二段印出效期、主體與 SAN（`-ext` 需要 OpenSSL 1.1.1 以上）。也可以直接看檔案：`openssl x509 -in cert.pem -noout -dates -subject -ext subjectAltName`。`subject=` 那一行的空白與分隔格式依 OpenSSL 版本略有差異。
-
-:::stop 讀到這裡可以先停：會用 `openssl s_client` 看信任鏈、SAN 與到期日，也能設計自動續約加上獨立於續約的到期監控。後面的 cert-manager，在服務搬上 Kubernetes、憑證要放進 Secret 時再回來讀。
+看憑證內容的指令見「看到期日與 SAN，續約後確認換上了」。`-ext` 需要 OpenSSL 1.1.1 以上；也可以直接看檔案：`openssl x509 -in cert.pem -noout -dates -subject -ext subjectAltName`。`subject=` 那一行的空白與分隔格式依 OpenSSL 版本略有差異。
 
 ## Kubernetes 上的憑證：cert-manager
 
@@ -312,14 +312,12 @@ Ingress 的 `tls` 區段引用 `booking-tls`，Ingress controller 就會用這�
 
 cert-manager 解決了「拿到新憑證、放到正確位置」，但仍要監控：`kubectl get certificate -A` 的 `READY` 欄位為 `False` 時，用 `kubectl describe certificate <名稱>` 看事件，常見原因是 HTTP-01 驗證請求連不進來或 DNS 設定不對。
 
-## 常見錯誤
+## 其他常見錯誤
 
 | 現象 | 原因 | 處理 |
 |---|---|---|
-| 瀏覽器正常、`curl` / App 報 `unable to get local issuer certificate` | 沒送中繼憑證 | 改用 fullchain 檔案 |
 | 只有某些用戶端報錯，而且是內部系統 | 那些用戶端沒裝內部根憑證 | 在該執行環境的 trust store 加入根憑證 |
 | `no alternative certificate subject name matches` | SAN 沒有這個名字（常見是 apex 或多層子網域） | 重新申請，把需要的名字都列進 SAN |
-| 已續約，但瀏覽器顯示的到期日還是舊的 | 服務沒重新載入，或請求打到另一台還沒更新的機器 | reload 服務；用 `s_client` 對每一台後端分別檢查 |
 | nginx 啟動失敗：`key values mismatch` | 憑證與私鑰不是同一對 | 確認用的是同一次申請產生的私鑰 |
 | 用 `curl -k` 或關閉驗證「暫時」解決 | 憑證驗證被關掉，連線可被冒充 | 修正憑證本身，不要關驗證 |
 

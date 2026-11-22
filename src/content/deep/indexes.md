@@ -1,4 +1,4 @@
-## 從一個具體問題開始：上線半年後變慢的「我的訂單」
+## 上線半年後變慢的「我的訂單」
 
 「我的訂單」頁面背後只有一句查詢：
 
@@ -10,15 +10,15 @@ ORDER BY created_at DESC
 LIMIT 20;
 ```
 
-上線時 orders 只有幾千筆，回應時間幾毫秒。半年後表長到幾百萬筆，同一頁要 1 秒以上，資料庫 CPU 長期偏高，尖峰時連其他查詢也一起變慢。程式碼一行都沒改。
+上線時 orders 只有幾千筆，回應時間幾毫秒。半年後表長到幾百萬筆，同一頁要 1 秒以上，資料庫 CPU 長期偏高。程式碼一行都沒改。
 
-原因是這句查詢每次都要把 orders 從頭讀到尾，逐列檢查 `user_id`，最後才排序取 20 筆。資料量翻 100 倍，讀的量就翻 100 倍。修法是一行 `CREATE INDEX`，但要建對欄位、建對順序，並且知道怎麼確認資料庫用了它。
+這句查詢每次都把 orders 從頭讀到尾，逐列檢查 `user_id`，最後才排序取 20 筆。資料量翻 100 倍，讀的量就翻 100 倍。修法是一行 `CREATE INDEX`，再用 `EXPLAIN` 確認資料庫用了它。
 
-## 運作原理：B-tree 是一份排好序的目錄
+## B-tree 索引是一份排好序的目錄
 
-沒有索引時，資料庫只能 **Seq Scan**（循序掃描）：把資料表的每一頁都讀進來、每一列都檢查條件。成本和表的大小成正比。
+沒有索引時，資料庫只能 **Seq Scan**（循序掃描）：讀資料表的每一頁、檢查每一列。成本和表的大小成正比。
 
-B-tree 索引是把某個欄位的值**排序後**另外存一份，每個值旁邊記著那一列在表裡的位置（TID，「第幾頁第幾格」）。為了不用從頭找，排好序的值被組成一棵樹：
+B-tree 索引把某個欄位的值排序後另外存一份，每個值旁邊記著那一列在表裡的位置（TID，「第幾頁第幾格」），再組成一棵樹：
 
 ```text
                        [ 根頁：  … 3000 … 6000 … ]
@@ -30,17 +30,17 @@ B-tree 索引是把某個欄位的值**排序後**另外存一份，每個值旁
          └─ user_id = 42 → (頁 17, 第 3 格)、(頁 911, 第 8 格)…
 ```
 
-查 `user_id = 42`：從根頁開始，每一層比較分界值、往下走一頁，到葉頁就找到所有 42 的 TID，再去表裡讀那幾列。
+查 `user_id = 42`：從根頁開始，每一層比較分界值、往下走一頁，到葉頁拿到所有 42 的 TID，再去表裡讀那幾列。
 
-- 每一頁預設 8 KB，可以放幾百個分界值，所以樹很矮：幾百萬到幾億筆通常只有 3 到 4 層。查一個值只要讀幾頁索引，而不是幾萬頁資料。
-- 葉頁彼此串連、而且排好序，所以範圍查詢（`BETWEEN`、`>`、`<`）找到起點後往右讀就好；`ORDER BY` 這個欄位時，照索引順序讀出來就已經排好，不用另外排序。
-- 代價是每次 `INSERT`、更新索引欄位的 `UPDATE`、`DELETE`，都要同步維護每一棵索引樹。
+- 每一頁預設 8 KB，放幾百個分界值，所以樹很矮：幾百萬到幾億筆通常只有 3 到 4 層，查一個值只讀幾頁索引。
+- 葉頁排好序而且彼此串連，範圍查詢（`BETWEEN`、`>`、`<`）找到起點後往右讀；`ORDER BY` 這個欄位時不用另外排序。
+- 代價是每次 `INSERT`、`DELETE`、更新索引欄位的 `UPDATE`，都要同步維護每一棵索引樹。
 
-這兩種讀法的差別，可以在 [索引實驗室](#/lab/IndexLab) 看循序掃描和 B-tree 走訪的比較次數。
+兩種讀法的比較次數可以在 [索引實驗室](#/lab/IndexLab) 對照。
 
-## 讀 EXPLAIN
+## 用 EXPLAIN ANALYZE 讀查詢計畫
 
-`EXPLAIN` 顯示規劃器打算怎麼執行一句查詢；`EXPLAIN ANALYZE` 會**真的執行**它，並把實際的時間和列數附上。
+`EXPLAIN` 顯示規劃器打算怎麼執行一句查詢；`EXPLAIN ANALYZE` 會**真的執行**它，附上實際的時間和列數。
 
 ```text
 Bitmap Heap Scan on big_orders  (cost=4.37..41.62 rows=10 width=49) (actual time=0.049..0.073 rows=10.00 loops=1)
@@ -55,60 +55,27 @@ Planning Time: 0.224 ms
 Execution Time: 0.145 ms
 ```
 
+計畫是一棵樹，從縮排最深的節點往外讀：先 Bitmap Index Scan 從索引收集位置，再 Bitmap Heap Scan 去表裡讀。
+
 | 欄位 | 意思 |
 |---|---|
-| `cost=4.37..41.62` | 估計成本：產出第一列之前的成本 .. 產出全部列的成本。單位是規劃器自己的（約等於「循序讀一頁 = 1」），只能拿來比較同一句的不同計畫，不是毫秒 |
-| `rows=10`（前面那組） | **估計**這個節點會產出幾列 |
-| `width=49` | 估計每列的平均位元組數 |
-| `actual time=0.049..0.073` | 實際：第一列出來的時間 .. 全部列出來的時間（毫秒，每次 loop 的平均） |
-| `rows=10.00`（actual 那組） | **實際**產出幾列（每次 loop 的平均）。PostgreSQL 18 起顯示兩位小數 |
-| `loops=1` | 這個節點被執行幾次；Nested Loop 的內側常常是很多次，總時間要乘上 loops |
-| `Index Searches: 1` | 這個節點在索引裡從根往下找了幾次。PostgreSQL 18 新增的欄位；後面會看到 skip scan 時它大於 1 |
-| `Buffers: shared hit=10 read=2` | 讀了幾頁：hit 是在共享記憶體裡找到、read 是要去讀檔案。PostgreSQL 18 起 `EXPLAIN ANALYZE` 預設附這行，舊版要寫 `EXPLAIN (ANALYZE, BUFFERS)` |
+| `cost=4.37..41.62` | 估計成本（規劃器自己的單位，不是毫秒） |
+| `rows=10`（前面那組） | **估計**這個節點產出幾列 |
+| `actual time=…`、`rows=10.00` | **實際**的時間（毫秒）與列數 |
+| `Buffers: shared hit=10 read=2` | 讀了幾頁：hit 在共享記憶體裡找到、read 要去讀檔案 |
 
-計畫是一棵樹，**從最內層（縮排最深）往外讀**：上面的例子是先 Bitmap Index Scan 從索引收集位置，再 Bitmap Heap Scan 去表裡讀。
+| 節點 | 做什麼 |
+|---|---|
+| `Seq Scan` | 讀整張表，`Filter:` 逐列過濾 |
+| `Index Scan` | 沿索引找到 TID，逐一回表讀列 |
+| `Index Only Scan` | 要的欄位全在索引裡，只讀索引 |
+| `Bitmap Index Scan` + `Bitmap Heap Scan` | 先從索引收集 TID、依頁面排序，再把每一頁讀一次 |
 
-最常見的節點：
+估計的 rows 和實際的 rows 差十倍以上時，規劃器選的計畫很可能不好。先跑 `ANALYZE 表名` 更新統計再看一次。
 
-| 節點 | 做什麼 | 什麼時候出現 |
-|---|---|---|
-| `Seq Scan` | 讀整張表，`Filter:` 逐列過濾 | 沒有可用的索引；或要讀的列佔很大比例，循序讀比跳著讀便宜；或表很小 |
-| `Index Scan` | 沿索引找到 TID，逐一回表讀列 | 符合的列很少，或要照索引順序輸出（`ORDER BY … LIMIT`） |
-| `Index Only Scan` | 只讀索引不回表，因為要的欄位全在索引裡 | `SELECT` 的欄位都包含在索引中；`Heap Fetches:` 是仍需回表確認可見性的次數 |
-| `Bitmap Index Scan` + `Bitmap Heap Scan` | 先從索引收集所有 TID、依頁面排序，再把每一頁讀一次 | 符合的列不算少、而且散落在很多頁；或要合併多個索引（`BitmapAnd` / `BitmapOr`） |
-| `Nested Loop` / `Hash Join` / `Merge Join` | 三種 JOIN 演算法 | 外側少、內側有索引時常見 Nested Loop；兩邊都大時常見 Hash Join |
-| `Sort` / `Limit` / `Aggregate` | 排序、截斷、聚合 | 看 `Sort Method:` 有沒有寫 `external merge`（記憶體不夠，排序寫到磁碟） |
+## 建索引前後的計畫，以及索引沒被用的兩個常見原因
 
-讀計畫時最重要的一件事：**比對估計的 rows 和實際的 rows**。差了十倍以上，代表規劃器對資料的認識是錯的（統計資料過期、條件之間有相關性、函數讓它猜不到），它選出的計畫就很可能不好。先跑 `ANALYZE 表名` 更新統計再看一次。
-
-> `EXPLAIN ANALYZE` 會真的執行語句。分析 `UPDATE`、`DELETE` 時要包在交易裡：`BEGIN; EXPLAIN ANALYZE DELETE …; ROLLBACK;`。
-
-## 實際程式：建索引前後的計畫
-
-### 範例資料太小：規劃器不用索引是對的
-
-範例資料庫的 orders 只有 6 列，全部在同一頁裡。這時讀一頁就看完整張表，走索引反而要多讀索引頁：
-
-```sql run
--- 1. 沒有索引：只能 Seq Scan。rows=4 是猜的：這張表從沒 ANALYZE 過，規劃器用預設的估計
-EXPLAIN SELECT * FROM orders WHERE user_id = 2;
-
--- 2. 建了索引、也更新統計：仍然是 Seq Scan，因為整張表只有 1 頁
-CREATE INDEX orders_user_id_idx ON orders (user_id);
-ANALYZE orders;
-EXPLAIN SELECT * FROM orders WHERE user_id = 2;
-
--- 3. 只為了觀察：叫規劃器盡量別用 Seq Scan，看索引計畫長什麼樣（正式環境不要這樣設）
-SET enable_seqscan = off;
-EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 2;
-RESET enable_seqscan;
-```
-
-`enable_seqscan = off` 讓規劃器只要有別的路就不選 Seq Scan；沒有其他可行的計畫時照樣會用。它只適合用來觀察「如果走索引會怎樣」，不能拿來修效能問題。
-
-### 用 generate_series 做出 10 萬筆
-
-要看索引真正的效果，需要夠多資料。下面用 `generate_series` 產生 10 萬筆訂單：1 萬位使用者、每人 10 筆、散落在整張表裡；狀態的分佈刻意不均（pending 只有 1%）。
+用 `generate_series` 產生 10 萬筆訂單：1 萬位使用者、每人 10 筆、散落在整張表裡；狀態的分佈刻意不均（pending 只有 1%）。
 
 ```sql run
 CREATE TABLE big_orders AS
@@ -137,13 +104,65 @@ EXPLAIN ANALYZE SELECT * FROM big_orders WHERE id = 42;
 EXPLAIN ANALYZE SELECT id FROM big_orders WHERE id BETWEEN 1 AND 100;
 ```
 
-幾個細節：
+時間數字每次跑都不一樣，要看的是數量級和節點種類。開頭的「我的訂單」還有 `ORDER BY created_at`，要建複合索引 `(user_id, created_at)` 才能省掉排序（見選讀）。
+
+| 現象 | 原因 | 改法 |
+|---|---|---|
+| 建了索引仍是 Seq Scan | 表很小，或條件留下大部分列，循序讀比較便宜 | 不用改，這是對的決定 |
+| `WHERE lower(email) = 'a@x.com'` 不走 `(email)` 的索引 | 索引裡存的是 `email`，不是 `lower(email)` | 建表達式索引 `CREATE INDEX ON t (lower(email))` |
+
+:::stop 讀到這裡可以先停：會說出 B-tree 怎麼找到一列、讀 EXPLAIN ANALYZE 的節點與估計列數、比較建索引前後的計畫。後面是 EXPLAIN 的其他欄位、複合索引的欄位順序、選擇性與部分索引、索引沒被用的完整清單、寫入成本與錯誤訊息，查詢有多個條件、索引沒生效或寫入變慢時再回來讀。
+
+## EXPLAIN 的其他欄位與節點
+
+| 欄位 | 意思 |
+|---|---|
+| `cost` 的兩個數字 | 產出第一列之前的成本 .. 產出全部列的成本。單位約等於「循序讀一頁 = 1」，只能拿來比較同一句的不同計畫 |
+| `width=49` | 估計每列的平均位元組數 |
+| `actual time=0.049..0.073` | 第一列出來的時間 .. 全部列出來的時間（每次 loop 的平均） |
+| `rows=10.00`（actual 那組） | 每次 loop 的平均。PostgreSQL 18 起顯示兩位小數 |
+| `loops=1` | 這個節點被執行幾次；Nested Loop 的內側常常是很多次，總時間要乘上 loops |
+| `Index Searches: 1` | 這個節點在索引裡從根往下找了幾次。PostgreSQL 18 新增的欄位；後面會看到 skip scan 時它大於 1 |
+| `Buffers` | PostgreSQL 18 起 `EXPLAIN ANALYZE` 預設附這行，舊版要寫 `EXPLAIN (ANALYZE, BUFFERS)` |
+
+| 節點 | 什麼時候出現 |
+|---|---|
+| `Seq Scan` | 沒有可用的索引；或要讀的列佔很大比例，循序讀比跳著讀便宜；或表很小 |
+| `Index Scan` | 符合的列很少，或要照索引順序輸出（`ORDER BY … LIMIT`） |
+| `Index Only Scan` | `SELECT` 的欄位都包含在索引中；`Heap Fetches:` 是仍需回表確認可見性的次數 |
+| `Bitmap Index Scan` + `Bitmap Heap Scan` | 符合的列不算少、而且散落在很多頁；或要合併多個索引（`BitmapAnd` / `BitmapOr`） |
+| `Nested Loop` / `Hash Join` / `Merge Join` | 三種 JOIN 演算法。外側少、內側有索引時常見 Nested Loop；兩邊都大時常見 Hash Join |
+| `Sort` / `Limit` / `Aggregate` | 排序、截斷、聚合。看 `Sort Method:` 有沒有寫 `external merge`（記憶體不夠，排序寫到磁碟） |
+
+估計與實際的 rows 差很多的原因：統計資料過期、條件之間有相關性、函數讓規劃器猜不到。
+
+> `EXPLAIN ANALYZE` 會真的執行語句。分析 `UPDATE`、`DELETE` 時要包在交易裡：`BEGIN; EXPLAIN ANALYZE DELETE …; ROLLBACK;`。
+
+必讀那段 10 萬筆的計畫有兩個細節：
 
 - 建索引後 `user_id = 42` 用的是 Bitmap 掃描而不是 Index Scan：這 10 列分散在 10 個不同的頁，規劃器選擇先收集位置、依頁排序後再讀。照主鍵查一筆時就是單純的 Index Scan。
 - 最後一句是 Index Only Scan，但 `Heap Fetches: 100` 表示每一列仍然回表確認了可見性。資料表要經過 `VACUUM` 把頁面標成 all-visible，Index Only Scan 才會不回表。本站的 Playground 會把整個區塊當成一個交易執行，`VACUUM` 放在區塊裡會報 `VACUUM cannot run inside a transaction block`；在真的資料庫上單獨執行 `VACUUM big_orders;` 之後再看，Heap Fetches 會變成 0。
-- 時間數字每次跑都不一樣，要看的是數量級和節點種類。
 
-:::stop 讀到這裡可以先停：會讀 EXPLAIN ANALYZE 的節點、估計列數與 Buffers，也知道小表不走索引是正常的。後面的複合索引、選擇性與寫入成本，在查詢有多個條件或寫入變慢時再回來讀。
+## 小表不走索引是對的
+
+範例資料庫的 orders 只有 6 列，全部在同一頁裡。這時讀一頁就看完整張表，走索引反而要多讀索引頁：
+
+```sql run
+-- 1. 沒有索引：只能 Seq Scan。rows=4 是猜的：這張表從沒 ANALYZE 過，規劃器用預設的估計
+EXPLAIN SELECT * FROM orders WHERE user_id = 2;
+
+-- 2. 建了索引、也更新統計：仍然是 Seq Scan，因為整張表只有 1 頁
+CREATE INDEX orders_user_id_idx ON orders (user_id);
+ANALYZE orders;
+EXPLAIN SELECT * FROM orders WHERE user_id = 2;
+
+-- 3. 只為了觀察：叫規劃器盡量別用 Seq Scan，看索引計畫長什麼樣（正式環境不要這樣設）
+SET enable_seqscan = off;
+EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 2;
+RESET enable_seqscan;
+```
+
+`enable_seqscan = off` 讓規劃器只要有別的路就不選 Seq Scan；沒有其他可行的計畫時照樣會用。它只適合用來觀察「如果走索引會怎樣」，不能拿來修效能問題。
 
 ## 複合索引：欄位順序決定能服務哪些查詢
 
@@ -235,7 +254,6 @@ FROM pg_index WHERE indrelid = 'big_orders'::regclass ORDER BY 1;
 | `WHERE user_id = 42.0` | `bigint` 被提升成 `numeric` 來比較，索引的型別對不上 | 參數用跟欄位相同的型別；ORM 綁參數時特別注意 |
 | `WHERE id + 1 = 43` | 運算在欄位那一側 | 移到常數那一側：`WHERE id = 42` |
 | `WHERE created_at::date = '2026-03-01'` | 同樣是函數包住欄位 | 改成範圍：`created_at >= '2026-03-01' AND created_at < '2026-03-02'` |
-| 表很小，或條件留下大部分列 | 規劃器估算後 Seq Scan 比較便宜 | 不用改，這是對的決定 |
 | 估計列數離實際很遠 | 統計過期，規劃器以為條件會留很多列 | `ANALYZE 表名`；條件之間有相關性時考慮 `CREATE STATISTICS` |
 
 ```sql run
@@ -315,7 +333,7 @@ FROM pg_class c WHERE c.relname = 'w0' OR c.relname LIKE 'w4%' ORDER BY c.relnam
 ## 動手
 
 1. 到 [索引實驗室](#/lab/IndexLab) 調整資料量，看循序掃描和 B-tree 走訪的比較次數怎麼隨資料量成長。
-2. 在「用 generate_series 做出 10 萬筆」那段按「在 Playground 開啟」，把 `user_id = 42` 改成 `user_id < 5000`，看計畫從 Bitmap 變回 Seq Scan 的分界大概在哪裡。
+2. 在必讀的 10 萬筆那段按「在 Playground 開啟」，把 `user_id = 42` 改成 `user_id < 5000`，看計畫從 Bitmap 變回 Seq Scan 的分界大概在哪裡。
 3. 在複合索引那段把第一個索引改成 `(created_at, user_id)`，再跑「我的訂單」那句，比較兩種欄位順序的 `cost`、`Execution Time` 和 `Buffers`。
 4. 程式題：[幫外鍵欄位建索引](#/exercise/indexes-1)、[複合索引的欄位順序](#/exercise/indexes-2)。
 5. 設計情境 [分頁](#/scenario/pagination) 裡的 cursor 分頁，靠的就是 `(created_at, id)` 這類複合索引。
