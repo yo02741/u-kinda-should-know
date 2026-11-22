@@ -29,7 +29,7 @@ export default {
       keywords: ['Vite'],
       lab: null,
       reviewed: '2026-11',
-      related: ['config-12factor', 'spa-containers', 'environments-secrets'],
+      related: ['config-12factor', 'spa-runtime-config', 'environments-secrets'],
     },
     {
       id: 'bundles-chunks',
@@ -53,7 +53,7 @@ export default {
       keywords: ['Vite', 'Vue'],
       lab: null,
       reviewed: '2026-11',
-      related: ['spa-containers', 'nginx', 'http-caching'],
+      related: ['spa-containers', 'spa-runtime-config', 'nginx', 'http-caching'],
     },
     {
       id: 'rendering-modes',

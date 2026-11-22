@@ -6,7 +6,7 @@ export default {
   title: '多環境的設定放哪裡',
   en: 'Build-time vs runtime config',
   level: 2,
-  skills: ['env-config', 'vite-basics', 'spa-deploy', 'spa-containers', 'config-12factor', 'frontend-ci'],
+  skills: ['env-config', 'vite-basics', 'spa-deploy', 'spa-runtime-config', 'config-12factor', 'frontend-ci'],
   week: 13,
   lab: 'EnvConfigScenarioLab',
   related: ['first-k8s-service'],

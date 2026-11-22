@@ -142,7 +142,7 @@ bundle 與 `config.js` 都是公開的靜態檔案，Network 分頁點開就看�
 
 不管哪一種，程式裡只從一個模組讀設定，缺欄位時給預設值並在 Console 警告；不要每個元件各自去讀 `window.__CLINIC_CONFIG__`。
 
-伺服器那一側怎麼提供設定檔（nginx、K8s 的 ConfigMap），見 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [環境設定與 12-factor](#/skill/config-12factor)。
+伺服器那一側怎麼提供設定檔（nginx、K8s 的 ConfigMap），見 [前端的執行期設定](#/skill/spa-runtime-config) 與 [環境設定與 12-factor](#/skill/config-12factor)。
 
 ## 檔案擺放：`config.js`、`runtime-config.js` 與型別宣告
 

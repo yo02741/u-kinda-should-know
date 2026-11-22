@@ -1,9 +1,9 @@
-// 程式題：p11-p2（container-registry）
+// 程式題：p11-p2（registry-retention、registry-airgap；原屬 container-registry）
 // Python 題的測試碼接在使用者的程式之後執行，直接呼叫使用者定義的函式與常數。
 // 測試碼寫在 template literal 裡：Python 的反斜線要寫成兩個，`${` 要跳脫。
 export default [
   {
-    id: 'container-registry-1', skill: 'container-registry', kind: 'python', level: 2,
+    id: 'container-registry-1', skill: 'registry-retention', kind: 'python', level: 2,
     title: '模擬 Harbor 的保留規則，並估算垃圾回收後釋放的空間',
     prompt: 'Harbor 的保留規則只看推送時間、拉取時間與 tag 名稱，不知道哪個映像正在叢集裡跑。實作 `plan_retention(artifacts, today, keep_latest, pulled_within_days, keep_tag_patterns, layer_sizes, referenced_elsewhere=())`：先算出 Harbor 的規則會保留哪些 artifact，再加一道「部署中的不刪」的安全網，最後估算垃圾回收後能釋放多少空間。\n\n每個 artifact 有 `digest`、`tags`（清單，可以是空的）、`pushed`、`last_pulled`（`YYYY-MM-DD` 字串，`last_pulled` 可以是 `None`）、`deployed`（布林）、`layers`（用到的 layer 名稱）。`today` 也是 `YYYY-MM-DD` 字串，`layer_sizes` 是每個 layer 的大小（bytes）。\n\nHarbor 的規則：\n\n- 沒有 tag 的 artifact（untagged）不適用下面三條規則，也不占「最近 N 個」的名額\n- 保留依 `pushed` 由新到舊的前 `keep_latest` 個（測試資料的推送日期不會重複）\n- 保留 `last_pulled` 距 `today` 不超過 `pulled_within_days` 天的（剛好等於也保留）\n- 保留任何一個 tag 符合 `keep_tag_patterns` 任一個樣式的（用 `fnmatch` 比對）；一個 tag 符合，整個 artifact 保留\n- 三條規則是 OR，符合任何一條就保留\n\n安全網：`deployed` 是 `True` 的一律保留；只靠安全網才保留的，列進 `at_risk`。\n\n回傳 `{"keep": [...], "delete": [...], "freed_bytes": 整數, "at_risk": [...]}`，清單裡放 digest、依輸入的順序。`freed_bytes` 是被刪的 artifact 用到、但沒有任何保留的 artifact 用到、也不在 `referenced_elsewhere` 裡的 layer 大小總和，同一個 layer 只算一次。',
     starter: `from datetime import date
@@ -164,7 +164,7 @@ assert _r["delete"] == [] and _r["freed_bytes"] == 0, "沒有要刪的，就沒�
     ],
   },
   {
-    id: 'container-registry-2', skill: 'container-registry', kind: 'python', level: 3,
+    id: 'container-registry-2', skill: 'registry-airgap', kind: 'python', level: 3,
     title: '把 Dockerfile 的外部映像改指院內的代理快取',
     prompt: '院內的 Harbor 替三個外部 registry 各建了一個代理快取專案（`PROXIES`）。Dockerfile 裡的外部映像要改成經由代理快取拉取。實作兩個函式。\n\n`to_internal(ref)`：把一個映像名稱改成院內位址。\n\n- 第一段（第一個 `/` 之前）含有 `.` 或 `:`，或是 `localhost`，才是 registry；否則 registry 是 `docker.io`，整個字串都是映像路徑\n- `index.docker.io` 與 `docker.io` 都是 Docker Hub\n- Docker Hub 上只有一段名稱的映像（官方映像）要補 `library/`：`python:3.12-slim` 改成 `harbor.example.org/dockerhub-proxy/library/python:3.12-slim`\n- 結果是 `harbor.example.org/<代理專案>/<映像路徑>`，tag 與 digest 原樣保留；原本沒有 tag 就不要補\n- 已經是 `harbor.example.org` 的不改；registry 不在 `PROXIES` 裡就丟 `ValueError`（例如 `registry.k8s.io` 的映像要另外同步）\n\n`rewrite_dockerfile(text)`：逐行改寫，回傳新的內容，行數不變。\n\n- `FROM` 開頭的行（不分大小寫，前面可以有空白，映像前可以有 `--platform=…` 這類旗標）：改寫映像名稱；行尾的 `AS <名稱>` 定義一個階段名稱\n- `COPY` 開頭、帶 `--from=<來源>` 的行：來源是外部映像才改寫\n- 不改：`scratch`、前面定義過的階段名稱（不分大小寫）、純數字的階段編號、含 `$` 的變數\n- 其他行（包括 `RUN echo "FROM …"` 這種字串）原樣保留',
     starter: `import re

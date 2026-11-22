@@ -102,7 +102,7 @@ for (const t of TRACKS) {
 // 深入內容（src/content/deep/<skill-id>.md）：檔名對得到技能、至少三個 ## 段落、篇幅足夠、
 // 不用禁用措辭、連結是 https、程式碼區塊有收尾、標 run 的區塊只能是 python / sql / js，
 // 或在沙箱 iframe 跑的 html（```html run）與 Vue module（```js run vue）
-const STOP_MAX = { 'spa-containers': 3, 'k8s-rbac-tenancy': 3, 'k8s-networking': 3 }   // 篇幅最長、有多個獨立交付物的課
+const STOP_MAX = {}   // 每課一個停靠點；有多個獨立交付物的課要分割成多課
 const BANNED = ['為什麼要學', '給前端工程師', '你工作上', '你已經會', '身為前端']
 const deepDir = resolve(content, 'deep')
 const deepFiles = existsSync(deepDir) ? readdirSync(deepDir).filter((f) => f.endsWith('.md')) : []

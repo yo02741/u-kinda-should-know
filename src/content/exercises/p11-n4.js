@@ -1,8 +1,8 @@
-// 程式題：p11-n4（k8s-operations）
+// 程式題：p11-n4（k8s-operations、k8s-node-maintenance；題目 id 沿用分割前的 k8s-operations-*）
 // Python 題的程式碼與測試用 template literal 寫；裡面不要出現反引號、`${` 與反斜線。
 export default [
   {
-    id: 'k8s-operations-1', skill: 'k8s-operations', kind: 'python', level: 3,
+    id: 'k8s-operations-1', skill: 'k8s-node-maintenance', kind: 'python', level: 3,
     title: '這次 drain 會不會被 PDB 擋住',
     prompt: '實作 `drain_check(node, pods, pdbs, ignore_daemonsets=False, delete_emptydir_data=False, force=False) -> dict`，在執行 `kubectl drain` 之前判斷這次會不會被擋住。\n\n`pods` 是叢集裡所有的 Pod，每筆有 `name`、`namespace`、`node`、`labels`、`owner`（`ReplicaSet`、`StatefulSet`、`DaemonSet` 或 `None`）、`emptydir`（布林）、`ready`（布林）。`pdbs` 每筆有 `name`、`namespace`、`selector`（label 的鍵值；起始碼的 `selects` 已經寫好比對），以及 `min_available` 或 `max_unavailable` 其中之一，值是整數或 `"50%"` 這種字串。\n\n**1. 參數檢查**（只看 `node` 上的 Pod）：\n\n- `owner` 是 `DaemonSet`：沒有 `ignore_daemonsets` → 錯誤 `daemonset`。DaemonSet 的 Pod 不驅逐，也不做下面兩項檢查\n- `owner` 是 `None` 而且沒有 `force` → `no-controller`\n- `emptydir` 是 `True` 而且沒有 `delete_emptydir_data` → `emptydir`\n\n`errors` 是 `(Pod 名稱, 原因)` 的清單，依 tuple 排序。\n\n**2. PDB**：只列出選到「這個節點上要驅逐的 Pod」的 PDB（DaemonSet 的 Pod 不算要驅逐）。\n\n- `expected` 是這個 PDB 在整個叢集選到的 Pod 數，`healthy` 是其中 `ready` 的數量，`k` 是其中在這個節點上要驅逐的數量\n- `desired`：`min_available` 直接用；`max_unavailable` 則是 `expected - max_unavailable`。百分比先乘上 `expected` 再**無條件進位**（1 個 Pod 的 `"50%"` 是 1）\n- `allowed = max(0, healthy - desired)`\n- `expected - desired <= 0` → `stuck`（全部健康也不允許任何中斷）；否則 `allowed >= k` → `ok`；否則 → `wait`（要等替代的 Pod 在別的節點 Ready）\n\n**3. `result`**：有任何 `errors` → `error`；否則有 `stuck` → `stuck`；否則有 `wait` → `wait`；否則 `ok`。有 `errors` 時 PDB 照樣要算。\n\n回傳 `{"errors": [...], "pdbs": {PDB 名稱: 狀態}, "result": ...}`。這是簡化的模型：假設其他節點放得下替代的 Pod，並以 PDB 選到的 Pod 數當成預期數量。',
     starter: `import math

@@ -144,7 +144,7 @@ Vite 在動態 import（包含路由懶載入）失敗時，在 `window` 上發�
 - 重新載入會丟掉畫面上還沒送出的表單，先把草稿存進 sessionStorage。
 - 限制自動重載的次數。新版本身有問題、chunk 一直載不到時，無條件重載會變成無限重新整理。
 
-另一個方向的做法是讓伺服器保留前幾版的 assets（例如部署時不刪舊檔、定期清理），這要伺服器或部署流程配合，見 [前端與 nginx 上 K8s](#/skill/spa-containers) 的「滾動更新時的 chunk 404」。
+另一個方向的做法是讓伺服器保留前幾版的 assets（例如部署時不刪舊檔、定期清理），這要伺服器或部署流程配合，見 [前端的執行期設定](#/skill/spa-runtime-config) 的「滾動更新時的 chunk 404」。
 
 ```js
 // main.js：放在 createApp 之前
@@ -164,7 +164,7 @@ window.addEventListener('vite:preloadError', (event) => {
 
 ## 其他主機與部署完的檢查
 
-nginx、物件儲存加 CDN、GitHub Pages、Firebase Hosting 都放得了 SPA，差別在能不能做到必讀那張表的每一列。Firebase Hosting、Netlify 這類平台用設定檔的 rewrite 規則做 fallback，原則相同：確認不存在的 assets 不會被改寫成 `index.html`。`/api` 的轉發、`config.js`、容器與 K8s 的部分見 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
+nginx、物件儲存加 CDN、GitHub Pages、Firebase Hosting 都放得了 SPA，差別在能不能做到必讀那張表的每一列。Firebase Hosting、Netlify 這類平台用設定檔的 rewrite 規則做 fallback，原則相同：確認不存在的 assets 不會被改寫成 `index.html`。容器與 K8s 的部分見 [前端與 nginx 上 K8s](#/skill/spa-containers)，`config.js` 見 [前端的執行期設定](#/skill/spa-runtime-config)，`/api` 的轉發見 [前端與 API 的路徑分流](#/skill/spa-api-routing) 與 [nginx 反向代理](#/skill/nginx)。
 
 ```bash
 BASE=https://portal.example/clinic

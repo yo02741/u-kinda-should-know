@@ -1,4 +1,4 @@
-// 程式題：p11-p1（container-operations）
+// 程式題：p11-p1（container-operations、container-limits-signals）
 // 設定檔題的測試碼是 JS：使用者內容是 `source`，`lines` 是去掉 # 註解與空行的各行。
 // 測試碼用 String.raw 寫；測試碼裡不要出現 `${` 與反引號。
 const R = String.raw
@@ -283,7 +283,7 @@ assert all(v == [] for v in _r.values()), f"沒有問題的容器被列進去了
     ],
   },
   {
-    id: 'container-operations-2', skill: 'container-operations', kind: 'config', level: 2, file: 'compose.yaml',
+    id: 'container-operations-2', skill: 'container-limits-signals', kind: 'config', level: 2, file: 'compose.yaml',
     title: '補齊 compose 的維運設定',
     prompt: '這份 `compose.yaml` 跑批價繳費系統的三個服務，能跑，但缺了維運設定：日誌會長到磁碟滿、記憶體沒有上限、崩潰或主機重開後不會回來、`payment-socket` 每次更新都切斷交易。\n\n已知：`payment-socket` 的程式已經改成會處理 SIGTERM，收到後最多等 20 秒把手上的交易做完；`billing-api` 的 gunicorn 用預設的 `--graceful-timeout`（30 秒）。\n\n修改成：\n\n- **三個服務都有日誌輪替**：`logging.driver` 用 `json-file` 並設 `options` 的 `max-size`（例如 `"50m"`）與 `max-file`（至少 2）；或改用 `driver: local`\n- **三個服務都有記憶體上限**：`mem_limit` 或 `deploy.resources.limits.memory`，寫成 `512m`、`1g` 這類格式，至少 64m\n- **三個服務都有重啟策略**：`restart` 用 `unless-stopped`、`always` 或 `on-failure`，不能是 `no`\n- **`payment-socket`**：`init: true`，`stop_grace_period` 至少 30 秒（寫成 `30s`、`1m` 這類格式）\n- **`billing-api`**：`stop_grace_period` 比 gunicorn 的 30 秒長\n- 服務名稱與映像不要改',
     starter: `services:

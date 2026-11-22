@@ -1,4 +1,4 @@
-// 程式題：p11-p3（spa-containers）
+// 程式題：p11-p3（spa-containers、spa-api-routing）
 // 設定檔題的測試碼是 JS：使用者內容是 `source`，`lines` 是去掉 # 註解與空行的各行。
 // 測試碼用 String.raw 寫；測試碼裡不要出現 `${` 與反引號。
 import { NGINX_SIM } from './nginx-sim.js'
@@ -218,6 +218,117 @@ assert(r.target === 'http://clinic-api:9696', 'proxy_pass 維持 http://clinic-a
 const names = inherited(r.chain, 'proxy_set_header').map((d) => (d.args[0] || '').toLowerCase())
 for (const h of ['host', 'x-forwarded-for', 'x-forwarded-proto']) assert(names.includes(h), '/api/ 少了 proxy_set_header ' + h)
 assert(!r.headers['cache-control'], '/api/ 的回應不要由 nginx 加 Cache-Control，交給後端決定（現在會加上 ' + r.headers['cache-control'] + '）')` },
+    ],
+  },
+  {
+    id: 'spa-api-routing-1', skill: 'spa-api-routing', kind: 'python', level: 2,
+    title: 'HTTPRoute 的規則選擇與前綴改寫',
+    prompt: '實作 `route(rules, path)`，模擬 HTTPRoute 怎麼選規則、後端收到什麼路徑。`rules` 是一串規則，每條有 `type`（`Exact` 或 `PathPrefix`）、`value`、`backend`，以及選填的 `rewrite`（`URLRewrite` 的 `ReplacePrefixMatch`）。回傳 `(backend, 後端收到的路徑)`。\n\n- 比對只看路徑，不看 `?` 後面的查詢字串；轉送時查詢字串原樣保留\n- `Exact`：路徑和 `value` 完全相同\n- `PathPrefix`：一段一段比。`/api` 符合 `/api`、`/api/`、`/api/patients`，不符合 `/api-docs`\n- 多條規則符合時，`Exact` 先於 `PathPrefix`；`PathPrefix` 之間 `value` 字元數多的優先。和規則的書寫順序無關\n- 規則有 `rewrite` 時，把比對到的前綴換成 `rewrite` 的值：`/api/patients` 搭 `rewrite: \"/\"` 變成 `/patients`，`/api` 變成 `/`\n- 沒有規則符合時回傳 `(None, path)`\n\n起始碼照書寫順序找第一條、用字串前綴比對：`/` 寫在前面時每個請求都到 `clinic-web`，反過來寫，`/api-docs/` 又會被送到後端。',
+    starter: `# HTTPRoute 的規則：type 是 Exact 或 PathPrefix；rewrite（選填）是 URLRewrite 的 ReplacePrefixMatch
+SPLIT = [
+    {"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+    {"type": "PathPrefix", "value": "/api", "backend": "clinic-api"},
+]
+STRIP = [
+    {"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+    {"type": "PathPrefix", "value": "/api", "backend": "clinic-api", "rewrite": "/"},
+]
+
+
+def route(rules, path):
+    # TODO：現在照書寫順序找第一條、用字串前綴比對，查詢字串沒處理，改寫也只是字串取代
+    for r in rules:
+        if path.startswith(r["value"]):
+            sent = path.replace(r["value"], r["rewrite"]) if "rewrite" in r else path
+            return r["backend"], sent
+    return None, path
+
+
+for name, rules in [("不改寫", SPLIT), ("去掉 /api", STRIP)]:
+    print(name)
+    for req in ["/patients/123", "/api/patients?page=2", "/api", "/api-docs/"]:
+        print(f"  {req:<24} {route(rules, req)}")
+`,
+    solution: `# HTTPRoute 的規則：type 是 Exact 或 PathPrefix；rewrite（選填）是 URLRewrite 的 ReplacePrefixMatch
+SPLIT = [
+    {"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+    {"type": "PathPrefix", "value": "/api", "backend": "clinic-api"},
+]
+STRIP = [
+    {"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+    {"type": "PathPrefix", "value": "/api", "backend": "clinic-api", "rewrite": "/"},
+]
+
+
+def segments(route_path):
+    return [s for s in route_path.split("/") if s]
+
+
+def matches(rule, route_path):
+    if rule["type"] == "Exact":
+        return route_path == rule["value"]
+    prefix = segments(rule["value"])                 # PathPrefix：一段一段比
+    return segments(route_path)[:len(prefix)] == prefix
+
+
+def route(rules, path):
+    route_path, _, query = path.partition("?")       # 比對只看路徑，不看查詢字串
+    hits = [r for r in rules if matches(r, route_path)]
+    if not hits:
+        return None, path
+    # 優先序：Exact 先，再來是字元數最多的 PathPrefix；和書寫順序無關
+    best = max(hits, key=lambda r: (r["type"] == "Exact", len(r["value"])))
+    if "rewrite" not in best:
+        return best["backend"], path
+    rest = route_path[len(best["value"].rstrip("/")):]   # 比對到的前綴後面剩下的部分
+    new = (best["rewrite"].rstrip("/") + rest) or "/"
+    return best["backend"], new + ("?" + query if query else "")
+
+
+for name, rules in [("不改寫", SPLIT), ("去掉 /api", STRIP)]:
+    print(name)
+    for req in ["/patients/123", "/api/patients?page=2", "/api", "/api-docs/"]:
+        print(f"  {req:<24} {route(rules, req)}")
+`,
+    hints: [
+      '先用 `path.partition("?")` 把路徑與查詢字串分開，比對只用路徑。',
+      '`PathPrefix` 把兩邊都用 `/` 切成段、去掉空字串，再比較前幾段是否相同；`"/api-docs/".startswith("/api")` 是 True，但第一段 `api-docs` 不等於 `api`。',
+      '符合的規則用 `max(..., key=lambda r: (r["type"] == "Exact", len(r["value"])))` 選一條。改寫時取路徑在前綴之後剩下的部分，接在 `rewrite` 後面；結果是空字串就用 `/`。',
+    ],
+    tests: [
+      { name: '長的前綴優先，和規則的書寫順序無關', code: `_a = [{"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+      {"type": "PathPrefix", "value": "/api", "backend": "clinic-api"}]
+for _rules in (_a, _a[::-1]):
+    assert route(_rules, "/api/patients") == ("clinic-api", "/api/patients"), f"/api/patients 應該由 /api 那條接走：{route(_rules, '/api/patients')}"
+    assert route(_rules, "/patients/123") == ("clinic-web", "/patients/123"), f"/patients/123：{route(_rules, '/patients/123')}"` },
+      { name: 'PathPrefix 一段一段比：/api 不符合 /api-docs、/apiary', code: `_rules = [{"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+          {"type": "PathPrefix", "value": "/api", "backend": "clinic-api"}]
+for _p in ("/api", "/api/", "/api/patients"):
+    assert route(_rules, _p)[0] == "clinic-api", f"{_p} 應該到 clinic-api：{route(_rules, _p)}"
+for _p in ("/api-docs/", "/apiary"):
+    assert route(_rules, _p)[0] == "clinic-web", f"{_p} 不符合 PathPrefix /api，應該到 clinic-web：{route(_rules, _p)}"` },
+      { name: '比對不看查詢字串，轉送時保留', code: `_rules = [{"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+          {"type": "PathPrefix", "value": "/api", "backend": "clinic-api"},
+          {"type": "Exact", "value": "/api/board", "backend": "board"}]
+assert route(_rules, "/api/patients?page=2") == ("clinic-api", "/api/patients?page=2"), f"{route(_rules, '/api/patients?page=2')}"
+assert route(_rules, "/api/board?ward=3") == ("board", "/api/board?ward=3"), f"Exact 比對不含查詢字串：{route(_rules, '/api/board?ward=3')}"` },
+      { name: 'Exact 先於 PathPrefix', code: `_rules = [{"type": "PathPrefix", "value": "/api", "backend": "prefix"},
+          {"type": "Exact", "value": "/api", "backend": "exact"}]
+for _r in (_rules, _rules[::-1]):
+    assert route(_r, "/api")[0] == "exact", f"/api 兩條都符合，Exact 優先：{route(_r, '/api')}"
+    assert route(_r, "/api/patients")[0] == "prefix", f"/api/patients 不符合 Exact /api：{route(_r, '/api/patients')}"` },
+      { name: 'ReplacePrefixMatch：只換比對到的前綴，保留查詢字串，結果至少是 /', code: `_rules = [{"type": "PathPrefix", "value": "/", "backend": "clinic-web"},
+          {"type": "PathPrefix", "value": "/api", "backend": "clinic-api", "rewrite": "/"}]
+assert route(_rules, "/api/patients?page=2") == ("clinic-api", "/patients?page=2"), f"{route(_rules, '/api/patients?page=2')}"
+assert route(_rules, "/api") == ("clinic-api", "/"), f"/api 去掉前綴後是 /：{route(_rules, '/api')}"
+assert route(_rules, "/api/api/x") == ("clinic-api", "/api/x"), f"只換開頭比對到的那一段：{route(_rules, '/api/api/x')}"
+assert route(_rules, "/patients/123") == ("clinic-web", "/patients/123"), f"沒有 rewrite 的規則原樣轉送：{route(_rules, '/patients/123')}"
+_sub = [{"type": "PathPrefix", "value": "/clinic/api", "backend": "clinic-api", "rewrite": "/api"}]
+assert route(_sub, "/clinic/api/patients") == ("clinic-api", "/api/patients"), f"{route(_sub, '/clinic/api/patients')}"
+assert route(_sub, "/clinic/api") == ("clinic-api", "/api"), f"{route(_sub, '/clinic/api')}"` },
+      { name: '沒有規則符合：回傳 (None, 原路徑)', code: `_rules = [{"type": "PathPrefix", "value": "/api", "backend": "clinic-api"}]
+assert route(_rules, "/patients/123") == (None, "/patients/123"), f"{route(_rules, '/patients/123')}"
+assert route(_rules, "/api-docs/") == (None, "/api-docs/"), f"{route(_rules, '/api-docs/')}"` },
     ],
   },
 ]

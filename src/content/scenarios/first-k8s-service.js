@@ -7,7 +7,7 @@ export default {
   en: 'Choosing the first service for Kubernetes',
   level: 2,
   week: 18,
-  skills: ['k8s-readiness', 'k8s-config-probes', 'k8s-networking', 'k8s-storage', 'container-operations', 'k8s-operations', 'change-management'],
+  skills: ['k8s-readiness', 'k8s-config-probes', 'k8s-networking', 'k8s-egress', 'k8s-storage', 'container-limits-signals', 'container-runtimes', 'k8s-operations', 'k8s-node-maintenance', 'change-management'],
   lab: 'FirstK8sServiceScenarioLab',
   summary: '院方明年導入地端 K8s，四個要搬的服務各有包袱：無狀態的掛號前端與 API、寫本機磁碟的報表服務、不處理 SIGTERM 的付款長連線。第一批先搬風險低的、先搬最痛的、一次全搬，還是先只建平台？',
   situation: '青嶺醫院（虛構）明年導入地端 Kubernetes，資訊室 5 個人要挑第一批搬上去的服務，沒有人維運過叢集。候選有五個：門診掛號前端（nginx + Vue 靜態檔，無狀態，白天流量高，壞了有紙本掛號可以替代）；掛號 API（Flask + gunicorn，無狀態，即時查院內 Informix）；報表服務（夜間批次產生約 2,000 份 PDF，寫在本機磁碟，CPU 吃重）；付款 socket 服務（繳費機與刷卡機約 60 條長連線，程式不處理 SIGTERM，帳務不能錯）；院內 Informix 資料庫（有狀態，廠商支援條款不涵蓋容器環境，不搬）。以上數字皆為示意。',

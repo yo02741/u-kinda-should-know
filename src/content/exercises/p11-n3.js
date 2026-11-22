@@ -138,7 +138,7 @@ const allowed = (group, resource, verb) => rules().some((r) => grants(r, group, 
 
 export default [
   {
-    id: 'k8s-rbac-tenancy-1', skill: 'k8s-rbac-tenancy', kind: 'config', level: 2, file: 'deployer-rbac.yaml',
+    id: 'k8s-rbac-tenancy-1', skill: 'k8s-identity', kind: 'config', level: 2, file: 'deployer-rbac.yaml',
     title: '替 CI 的部署帳號收斂權限',
     prompt: '測試叢集的 `clinic-staging` 由 GitLab CI 部署。現在的部署帳號 `gitlab-deployer` 用 ClusterRoleBinding 綁了 `cluster-admin`：任何一個 job 都能讀所有 namespace 的 Secret、進任何容器、刪掉整個 namespace。\n\n改成只能做部署需要的事。CI 會執行 `kubectl apply`、`kubectl rollout status` 與 `kubectl wait --for=condition=complete job/…`。\n\n- 保留 ServiceAccount `gitlab-deployer`（namespace `clinic-staging`）\n- 拿掉 ClusterRoleBinding，改成 `clinic-staging` 裡的 RoleBinding，把 `gitlab-deployer` 接到一個寫在這個檔案裡的 Role（用 ClusterRole 加 RoleBinding 也可以；不要指到內建的 `cluster-admin`、`admin`、`edit`）\n- `deployments`（`apps`）、`jobs`（`batch`）、`services` 與 `configmaps`（core，寫成 `""`）都要能 `get`、`create`、`patch`；`deployments` 與 `jobs` 另外要能 `list`、`watch`\n- 不能對 `secrets` 做任何動作，不能碰 `pods/exec`、`pods/attach`\n- 規則裡不能有 `*`，不能給 `delete`、`deletecollection`、`escalate`、`bind`、`impersonate`\n- `create`、`update`、`patch` 這類寫入動作只能給上面四種資源；要看 Pod 與 events 的狀態可以另外給唯讀的 `get`、`list`、`watch`',
     starter: `# 現況：部署帳號直接綁 cluster-admin

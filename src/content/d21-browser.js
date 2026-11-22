@@ -77,7 +77,7 @@ export default {
       keywords: ['JavaScript', 'Chrome DevTools'],
       lab: null,
       reviewed: '2026-11',
-      related: ['cors-cookies', 'spa-containers', 'nginx'],
+      related: ['cors-cookies', 'spa-api-routing', 'nginx'],
     },
     {
       id: 'urls-history',

@@ -25,14 +25,14 @@
 <!-- sync:stats -->
 | 內容 | 數量 |
 |---|---|
-| 路線 | 3（前端 90 課；後端 115 課；AI 35 課） |
+| 路線 | 3（前端 90 課；後端 127 課；AI 35 課） |
 | 前端的領域 | 9（瀏覽器與網頁怎麼運作；HTML 與 CSS 版面；JavaScript 與 TypeScript；元件與框架；UI 元件詞彙；呼叫後端；建置與部署；品質；用 AI 寫前端） |
 | 後端的領域 | 9（語言與工程實踐；網路、HTTP 與 API 設計；資料儲存；驗證與授權；資安；容器與部署；CI/CD 與交付；演算法與系統設計；DevOps 與基礎建設） |
 | AI的領域 | 2（AI 時代的開發與 Agent 安全；知識系統） |
-| 技能（課） | 240，每課有重點卡（摘要、重點、自我檢核、官方文件）與**深入內容**（從一個具體問題開始 → 運作原理 → 實際程式 → 常見錯誤與錯誤訊息 → 動手；範例可一鍵在 Playground 執行） |
+| 技能（課） | 252，每課有重點卡（摘要、重點、自我檢核、官方文件）與**深入內容**（從一個具體問題開始 → 運作原理 → 實際程式 → 常見錯誤與錯誤訊息 → 動手；範例可一鍵在 Playground 執行） |
 | 互動實驗室 | 53，依領域列在下方 |
-| 程式題 | 282（Python 127 / SQL 38 / config 30 / JS 23 / HTML 15 / CSS 13 / Vue 36），含實作路線的 35 道驗收題；解答全部經真實執行環境驗證 |
-| 選擇題 | 720（每課 3 題，含程式碼判讀與情境題） |
+| 程式題 | 283（Python 128 / SQL 38 / config 30 / JS 23 / HTML 15 / CSS 13 / Vue 36），含實作路線的 35 道驗收題；解答全部經真實執行環境驗證 |
+| 選擇題 | 756（每課 3 題，含程式碼判讀與情境題） |
 | 設計情境 | 39（API 設計 8；資料與身分 4；高流量 7；維運與基礎建設 7；AI 與 Agent 安全 5；畫面與互動 3；資料與狀態 3；建置與上線 2） |
 | 前端的實作路線 | 從零做完一個門診掛號前端：7 個階段，每階段有說明與在瀏覽器裡跑的驗收題 |
 | 後端的實作路線 | 從零做完一個門診掛號後端：10 個階段，每階段有說明與在瀏覽器裡跑的驗收題 |
@@ -44,7 +44,7 @@
 後端以 Python 與 PostgreSQL 為主，MongoDB、Redis 作對照；AI 路線的範例也用 Python；前端以 Vue 3 為主，React 作對照。
 
 <!-- sync:route -->
-### 建議學習路線（3 條、共 84 站）
+### 建議學習路線（3 條、共 85 站）
 
 各路線首頁路線圖的站點。★ 表示附互動實驗室。站點定義在 `src/content/roadmap.js` 的 `PATHS`（`label` 是地圖上的短站名，`note` 是下表的「內容」）。
 
@@ -102,7 +102,7 @@
 | 48 | 驗收 AI 產出的前端 | 用 AI 寫前端 | 指令、每個狀態、三個寬度、只用鍵盤、Console 與 Network，最後寫成測試。 |
 | 49 | 審 AI 的改動 | 用 AI 寫前端 | 先看 --stat 與測試的 diff，再讀邏輯；大元件先補特徵測試再拆。 |
 
-#### 後端（23 站）
+#### 後端（24 站）
 
 | 站 | 課 | 領域 | 內容 |
 |---|---|---|---|
@@ -117,18 +117,19 @@
 | 9 | RBAC 與 ABAC 授權模型★ | 驗證與授權 | 用角色與屬性決定誰能做什麼。 |
 | 10 | 注入攻擊：SQL 與它的親戚★ | 資安 | SQL 注入的原理與參數化查詢。 |
 | 11 | Docker：image、container、layer★ | 容器與部署 | image、container、layer 與 build 快取。 |
-| 12 | 容器的日常維運：日誌、資源上限、訊號與執行環境 | 容器與部署 | 日誌輪替、記憶體上限、SIGTERM 與執行環境。 |
-| 13 | CI 管線：lint、test、build★ | CI/CD 與交付 | lint、test、build 三段，GitHub Actions 與 GitLab CI 對照。 |
-| 14 | 效能量測與壓測：p95、飽和點、找瓶頸★ | 演算法與系統設計 | 量 p95、找飽和點、定位瓶頸。 |
-| 15 | 網路通不通：從 DNS 到防火牆★ | DevOps 與基礎建設 | 連不上時，從 DNS 一層一層往下查。 |
-| 16 | HTTPS 憑證：要買哪種、怎麼續★ | DevOps 與基礎建設 | 憑證鏈、憑證種類與自動續約。 |
-| 17 | 導入 Kubernetes 前要準備什麼★ | DevOps 與基礎建設 | 導入 Kubernetes 之前要先備齊的東西。 |
-| 18 | Kubernetes 實作：把服務寫成 manifest | DevOps 與基礎建設 | 把服務寫成 manifest：Deployment、Service、Ingress。 |
-| 19 | Kubernetes 網路：Service、NetworkPolicy 與連到叢集外★ | DevOps 與基礎建設 | Service、NetworkPolicy 與連到叢集外的舊系統。 |
-| 20 | FinOps：雲端與 AI 工具的計費結構★ | DevOps 與基礎建設 | 雲端與 AI 工具的計費結構。 |
-| 21 | 舊系統整合與逐步替換 | 演算法與系統設計 | 逐步替換舊系統，每一步都能回退。 |
-| 22 | 可重跑的批次管線：增量、冪等、回補 | DevOps 與基礎建設 | 增量、冪等、回補：重跑不會重複寫入。 |
-| 23 | 測試品質：覆蓋率、假綠燈與突變測試★ | 語言與工程實踐 | 用突變測試檢查測試有沒有驗到東西。 |
+| 12 | 容器的日常維運：查問題、結束碼與日誌 | 容器與部署 | 查出事的容器、結束碼與日誌輪替。 |
+| 13 | 容器的資源上限與優雅關機：OOM、重啟策略與 SIGTERM | 容器與部署 | 記憶體上限、OOM、重啟策略與 SIGTERM。 |
+| 14 | CI 管線：lint、test、build★ | CI/CD 與交付 | lint、test、build 三段，GitHub Actions 與 GitLab CI 對照。 |
+| 15 | 效能量測與壓測：p95、飽和點、找瓶頸★ | 演算法與系統設計 | 量 p95、找飽和點、定位瓶頸。 |
+| 16 | 網路通不通：從 DNS 到防火牆★ | DevOps 與基礎建設 | 連不上時，從 DNS 一層一層往下查。 |
+| 17 | HTTPS 憑證：要買哪種、怎麼續★ | DevOps 與基礎建設 | 憑證鏈、憑證種類與自動續約。 |
+| 18 | 導入 Kubernetes 前要準備什麼★ | DevOps 與基礎建設 | 導入 Kubernetes 之前要先備齊的東西。 |
+| 19 | Kubernetes 實作：把服務寫成 manifest | DevOps 與基礎建設 | 把服務寫成 manifest：Deployment、Service、Ingress。 |
+| 20 | Kubernetes 網路：Pod IP、Service 與連進叢集 | DevOps 與基礎建設 | Pod IP、Service 與從院內連進叢集。 |
+| 21 | FinOps：雲端與 AI 工具的計費結構★ | DevOps 與基礎建設 | 雲端與 AI 工具的計費結構。 |
+| 22 | 舊系統整合與逐步替換 | 演算法與系統設計 | 逐步替換舊系統，每一步都能回退。 |
+| 23 | 可重跑的批次管線：增量、冪等、回補 | DevOps 與基礎建設 | 增量、冪等、回補：重跑不會重複寫入。 |
+| 24 | 測試品質：覆蓋率、假綠燈與突變測試★ | 語言與工程實踐 | 用突變測試檢查測試有沒有驗到東西。 |
 
 #### AI（12 站）
 
@@ -149,7 +150,7 @@
 <!-- /sync:route -->
 
 <!-- sync:lessons -->
-### 技能課程（20 領域、240 課）
+### 技能課程（20 領域、252 課）
 
 每課有重點卡（摘要、範例技術、重點、自我檢核清單、官方文件連結）與深入內容。★ 表示附互動實驗室。
 
@@ -168,7 +169,7 @@
 | 08. 品質：測試、效能、無障礙 | 無障礙基礎；元件的鍵盤操作與 ARIA；前端測試的分層；單元測試（Vitest）；元件測試的寫法；Playwright E2E；lint 與型別檢查；Core Web Vitals★；執行時效能；錯誤監控 |
 | 09. 用 AI 寫前端 | 把畫面描述成文字；AI 寫前端的常見錯誤；AI 給的過時寫法；給截圖與線框；先拆元件再寫；驗收 AI 產出的前端；給 AI 的專案規範；讓 AI 接 API 不猜欄位；審 AI 的改動 |
 
-#### 後端（9 領域、115 課）
+#### 後端（9 領域、127 課）
 
 | 領域 | 課程 |
 |---|---|
@@ -177,10 +178,10 @@
 | 03. 資料儲存 | SQL 基礎（SELECT 到 GROUP BY）；JOIN 七兄弟★；資料建模與正規化；Schema 設計實戰（從需求到資料表）；索引與查詢計畫★；全文檢索；交易、ACID 與隔離等級★；鎖與死結；子查詢、CTE 與視窗函數；ORM 與 migration；資料庫維運（備份還原、連線池、慢查詢）；從舊資料庫同步資料（批次、CDC、雙寫與對帳）；MongoDB 文件模型★；MongoDB 查詢、聚合與索引；Redis 與快取策略★；關聯式 vs 非關聯式怎麼選 |
 | 04. 驗證與授權 | 驗證基礎（Session vs Token）；JWT 解剖★；OAuth 2.0 與 OpenID Connect★；RBAC 與 ABAC 授權模型★；驗證授權落地（middleware 與 dependency）；帳號生命週期（註冊、驗證、重設密碼、鎖定）；API key、服務間驗證、MFA 與 SSO；企業身分（LDAP、AD、SAML 與 SCIM） |
 | 05. 資安 | OWASP Top 10 地圖；注入攻擊（SQL 與它的親戚）★；密碼儲存（編碼、雜湊、加密）★；密碼學工具箱（雜湊、HMAC、加密、亂數）★；XSS、CSRF 與安全標頭★；輸入驗證與檔案上傳；秘密管理；日誌與稽核紀錄裡的個資；依賴與供應鏈安全★；資安維運（弱點管理、修補與邊界防護） |
-| 06. 容器與部署 | Linux 與 shell 基礎；Docker（image、container、layer）★；容器的日常維運（日誌、資源上限、訊號與執行環境）；幫 Python 專案寫好 Dockerfile；私有映像倉庫（Harbor、映像同步與離線環境）；docker-compose 開發環境★；nginx 反向代理★；前端與 nginx 上 K8s（靜態檔、/api 轉發與執行期設定）；負載平衡；環境設定與 12-factor；應用伺服器與程序管理；物件儲存（bucket、預簽網址與生命週期）；雲端與主機基礎 |
+| 06. 容器與部署 | Linux 與 shell 基礎；Docker（image、container、layer）★；容器的日常維運（查問題、結束碼與日誌）；容器的資源上限與優雅關機（OOM、重啟策略與 SIGTERM）；容器執行環境（containerd、crictl、非 root 與 Docker Desktop 授權）；幫 Python 專案寫好 Dockerfile；私有映像倉庫（Harbor 的專案、機器人帳號與 CI 推送）；映像倉庫的清理與把關（保留規則、垃圾回收、不可變 tag 與弱點掃描）；外部映像與斷網環境（代理快取、叢集拉取與映像搬運）；docker-compose 開發環境★；nginx 反向代理★；前端與 nginx 上 K8s（靜態檔映像與快取）；前端的執行期設定（同一個映像跑多個環境）；前端與 API 的路徑分流（nginx 當入口或 HTTPRoute）；負載平衡；環境設定與 12-factor；應用伺服器與程序管理；物件儲存（bucket、預簽網址與生命週期）；雲端與主機基礎 |
 | 07. CI/CD 與交付 | Git 工作流與分支策略；CI 管線（lint、test、build）★；環境、secrets 與 artifact；部署策略與資料庫遷移★；可觀測性（log、metrics、trace）★；LLM 應用的可觀測性；健康檢查、備份與事故處理 |
 | 08. 演算法與系統設計 | Big-O 與後端常見複雜度★；後端常用資料結構；限流演算法★；LRU 與快取淘汰；並發問題（race condition 與死結）；訊息佇列與背景工作；事件驅動系統的一致性；排程工作（cron、重複執行與遺漏）；效能量測與壓測（p95、飽和點、找瓶頸）★；擴展（無狀態、負載平衡、讀寫分離）；分散式基礎（CAP、一致性與時間）；系統設計思考框架；舊系統整合與逐步替換 |
-| 09. DevOps 與基礎建設 | DevOps 會議在講什麼（詞彙對照）；網路通不通（從 DNS 到防火牆）★；HTTPS 憑證（要買哪種、怎麼續）★；硬體資源與容量規劃★；FinOps（雲端與 AI 工具的計費結構）★；GitLab CI/CD 實戰；導入 Kubernetes 前要準備什麼★；Kubernetes 實作（把服務寫成 manifest）；Kubernetes 實作（設定、探針與資源）；Kubernetes 網路（Service、NetworkPolicy 與連到叢集外）★；Kubernetes 儲存（PV、PVC 與有狀態服務）；Kubernetes 排錯（Pending、CrashLoopBackOff、連不到）★；Helm、Kustomize 與 GitOps；Kubernetes 權限與多租戶（RBAC、namespace 與配額）；Kubernetes 叢集維運（發行版、升級、節點維護與備份）；地端、雲端還是混合雲；數據中台之前（資料治理）；可重跑的批次管線（增量、冪等、回補）；維度模型（事實表、維度表與緩慢變動維度）；SLI、SLO 與錯誤預算★；事故處理、on-call 與 postmortem；AIOps（讓 agent 調查告警但不亂動）；受監管環境的變更管理 |
+| 09. DevOps 與基礎建設 | DevOps 會議在講什麼（詞彙對照）；網路通不通（從 DNS 到防火牆）★；HTTPS 憑證（要買哪種、怎麼續）★；硬體資源與容量規劃★；FinOps（雲端與 AI 工具的計費結構）★；GitLab CI/CD 實戰；導入 Kubernetes 前要準備什麼★；Kubernetes 實作（把服務寫成 manifest）；Kubernetes 實作（設定、探針與資源）；Kubernetes 網路（Pod IP、Service 與連進叢集）；Kubernetes NetworkPolicy（先全擋，再逐條放行）★；Kubernetes 連到叢集外的舊系統（SNAT 與防火牆放行）；Kubernetes 儲存（PV、PVC 與 StorageClass）；Kubernetes 有狀態服務（StatefulSet、儲存選型與備份）；Kubernetes 排錯（Pending、CrashLoopBackOff、連不到）★；Helm、Kustomize 與 GitOps；Kubernetes 權限（RBAC、Role 與 RoleBinding）；Kubernetes 身分（OIDC、ServiceAccount 與 CI 部署帳號）；Kubernetes 多租戶（namespace、配額、Pod Security 與稽核日誌）；Kubernetes 叢集維運（發行版與升級）；Kubernetes 節點維護與備份（drain、PDB、etcd 快照與憑證）；地端、雲端還是混合雲；數據中台之前（資料治理）；可重跑的批次管線（增量、冪等、回補）；維度模型（事實表、維度表與緩慢變動維度）；SLI、SLO 與錯誤預算★；事故處理、on-call 與 postmortem；AIOps（讓 agent 調查告警但不亂動）；受監管環境的變更管理 |
 
 #### AI（2 領域、35 課）
 
@@ -258,8 +259,8 @@
 <!-- sync:practice -->
 ### 練習題
 
-- **程式題 282 道**（Python 127、SQL 38、config 30、JavaScript 23、HTML 15、CSS 13、Vue 36）：在瀏覽器裡執行並跑測試：SQL 跑 PGlite、Python 跑 Pyodide、JS 跑 Web Worker；config 題（Dockerfile、compose、nginx、Kubernetes manifest、`.gitlab-ci.yml`、GitHub Actions）由 JS 檢查器逐條驗證；HTML、CSS、Vue 題在沙箱 iframe 裡執行（自架的 Vue 3.5.45、Pinia 4.1.0、Vue Router 5.5.1，import `element-plus` 的題目另外載入 Element Plus 2.14.8，標了 `tailwind` 的題目另外載入 Tailwind CSS 4.3.5（`@tailwindcss/browser`）；`fetch` 由假的門診 API 回應），測試透過 DOM 檢查畫面與行為，CSS 題在 390、768、1280 等寬度下各檢查一次。
-- **選擇題 720 道**：每課 3 題，含程式碼判讀與情境題。
+- **程式題 283 道**（Python 128、SQL 38、config 30、JavaScript 23、HTML 15、CSS 13、Vue 36）：在瀏覽器裡執行並跑測試：SQL 跑 PGlite、Python 跑 Pyodide、JS 跑 Web Worker；config 題（Dockerfile、compose、nginx、Kubernetes manifest、`.gitlab-ci.yml`、GitHub Actions）由 JS 檢查器逐條驗證；HTML、CSS、Vue 題在沙箱 iframe 裡執行（自架的 Vue 3.5.45、Pinia 4.1.0、Vue Router 5.5.1，import `element-plus` 的題目另外載入 Element Plus 2.14.8，標了 `tailwind` 的題目另外載入 Tailwind CSS 4.3.5（`@tailwindcss/browser`）；`fetch` 由假的門診 API 回應），測試透過 DOM 檢查畫面與行為，CSS 題在 390、768、1280 等寬度下各檢查一次。
+- **選擇題 756 道**：每課 3 題，含程式碼判讀與情境題。
 - **複習頁** `#/review`：跨課混合抽 10 或 20 題，範圍可選全部、讀過的課、指定領域或上次答錯的題；交卷後列出各領域答對率，每題附回到該課的連結，可以只重做答錯的。錯題與成績只存在瀏覽器，不同步到帳號。
 <!-- /sync:practice -->
 
@@ -282,16 +283,16 @@
 <!-- sync:k8s-track -->
 | 週 | 主題 | 課 |
 |---|---|---|
-| K1 | 容器與映像 | Docker（image、container、layer）；幫 Python 專案寫好 Dockerfile；容器的日常維運（日誌、資源上限、訊號與執行環境） |
-| K2 | 前端、nginx 與 compose | nginx 反向代理；前端與 nginx 上 K8s（靜態檔、/api 轉發與執行期設定）；docker-compose 開發環境 |
-| K3 | 映像倉庫與供應鏈 | 私有映像倉庫（Harbor、映像同步與離線環境）；依賴與供應鏈安全；資安維運（弱點管理、修補與邊界防護） |
+| K1 | 容器與映像 | Docker（image、container、layer）；幫 Python 專案寫好 Dockerfile；容器的日常維運（查問題、結束碼與日誌）；容器的資源上限與優雅關機（OOM、重啟策略與 SIGTERM）；容器執行環境（containerd、crictl、非 root 與 Docker Desktop 授權） |
+| K2 | 前端、nginx 與 compose | nginx 反向代理；前端與 nginx 上 K8s（靜態檔映像與快取）；前端的執行期設定（同一個映像跑多個環境）；前端與 API 的路徑分流（nginx 當入口或 HTTPRoute）；docker-compose 開發環境 |
+| K3 | 映像倉庫與供應鏈 | 私有映像倉庫（Harbor 的專案、機器人帳號與 CI 推送）；映像倉庫的清理與把關（保留規則、垃圾回收、不可變 tag 與弱點掃描）；外部映像與斷網環境（代理快取、叢集拉取與映像搬運）；依賴與供應鏈安全；資安維運（弱點管理、修補與邊界防護） |
 | K4 | Kubernetes 是什麼，導入前要準備什麼 | 導入 Kubernetes 前要準備什麼；地端、雲端還是混合雲；硬體資源與容量規劃 |
 | K5 | 第一個服務上叢集 | Kubernetes 實作（把服務寫成 manifest）；Kubernetes 實作（設定、探針與資源） |
 | K6 | 排錯 | Kubernetes 排錯（Pending、CrashLoopBackOff、連不到） |
-| K7 | 網路與連到院內舊系統 | Kubernetes 網路（Service、NetworkPolicy 與連到叢集外）；網路通不通（從 DNS 到防火牆）；HTTPS 憑證（要買哪種、怎麼續） |
-| K8 | 儲存與有狀態服務 | Kubernetes 儲存（PV、PVC 與有狀態服務）；健康檢查、備份與事故處理 |
-| K9 | 權限與多租戶 | Kubernetes 權限與多租戶（RBAC、namespace 與配額）；秘密管理；企業身分（LDAP、AD、SAML 與 SCIM） |
-| K10 | 部署流程與叢集維運 | Helm、Kustomize 與 GitOps；GitLab CI/CD 實戰；部署策略與資料庫遷移；Kubernetes 叢集維運（發行版、升級、節點維護與備份）；受監管環境的變更管理；可觀測性（log、metrics、trace） |
+| K7 | 網路與連到院內舊系統 | Kubernetes 網路（Pod IP、Service 與連進叢集）；Kubernetes NetworkPolicy（先全擋，再逐條放行）；Kubernetes 連到叢集外的舊系統（SNAT 與防火牆放行）；網路通不通（從 DNS 到防火牆）；HTTPS 憑證（要買哪種、怎麼續） |
+| K8 | 儲存與有狀態服務 | Kubernetes 儲存（PV、PVC 與 StorageClass）；Kubernetes 有狀態服務（StatefulSet、儲存選型與備份）；健康檢查、備份與事故處理 |
+| K9 | 權限與多租戶 | Kubernetes 權限（RBAC、Role 與 RoleBinding）；Kubernetes 身分（OIDC、ServiceAccount 與 CI 部署帳號）；Kubernetes 多租戶（namespace、配額、Pod Security 與稽核日誌）；秘密管理；企業身分（LDAP、AD、SAML 與 SCIM） |
+| K10 | 部署流程與叢集維運 | Helm、Kustomize 與 GitOps；GitLab CI/CD 實戰；部署策略與資料庫遷移；Kubernetes 叢集維運（發行版與升級）；Kubernetes 節點維護與備份（drain、PDB、etcd 快照與憑證）；受監管環境的變更管理；可觀測性（log、metrics、trace） |
 <!-- /sync:k8s-track -->
 
 每週標題下列出該週對應的設計情境；情境頁的「第 N 週」可直接跳回課綱。全文在 `docs/CURRICULUM.md`。
@@ -329,7 +330,7 @@
 src/
   content/         內容（純資料，改這裡不用碰元件）
     tracks.js        路線定義（前端、後端、AI）：名稱、說明、課綱檔、精選實驗室；站名與 repo 網址（SITE）
-    roadmap.js       領域索引、每條路線的學習路線 PATHS（84 站）與關鍵字 KEYWORDS、查詢 helper（domainsOf、stationsOf、displayNo…）
+    roadmap.js       領域索引、每條路線的學習路線 PATHS（85 站）與關鍵字 KEYWORDS、查詢 helper（domainsOf、stationsOf、displayNo…）
     dN-<id>.js       每個領域一檔的「索引」，track 決定所屬路線；檔名用全站唯一的 no（後端 1–9、AI 10–11、前端 21–29），畫面上顯示路線內的順序。skills[] 各有 id / title / en / level / summary / example / keywords / lab / related（跟著主 chunk）
     body/dN-<id>.js  每個領域一檔的「內文」：以技能 id 為 key 的 points / checklist / refs / map（技能頁才懶載入，每領域一個 chunk）
     deep/<skill-id>.md   每課的深入內容（markdown，技能頁逐課懶載入；格式見 docs/CONTRIBUTING-lessons.md）

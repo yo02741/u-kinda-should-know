@@ -8,7 +8,7 @@
 4. 環境不同的值（API 前綴、環境名稱、除錯開關）在執行時從 `config.js` 讀，換環境不用重新建置。
 5. 部署後還開著舊版的頁面，載入不到舊 chunk 時重新載入一次。
 
-dev server、`vite build`、`vite preview` 各做什麼在 [Vite：開發與建置](#/skill/vite-basics)；`VITE_` 變數在建置時被換成字串、`config.js` 怎麼讀在 [建置時設定與執行時設定](#/skill/env-config)；`base`、fallback、兩種快取與部署後的 chunk 404 在 [SPA 的部署](#/skill/spa-deploy)。nginx 放進容器、上 Kubernetes 的部分在 [前端與 nginx 上 K8s](#/skill/spa-containers)。
+dev server、`vite build`、`vite preview` 各做什麼在 [Vite：開發與建置](#/skill/vite-basics)；`VITE_` 變數在建置時被換成字串、`config.js` 怎麼讀在 [建置時設定與執行時設定](#/skill/env-config)；`base`、fallback、兩種快取與部署後的 chunk 404 在 [SPA 的部署](#/skill/spa-deploy)。nginx 放進容器、上 Kubernetes 的部分在 [前端與 nginx 上 K8s](#/skill/spa-containers)、[前端的執行期設定](#/skill/spa-runtime-config) 與 [前端與 API 的路徑分流](#/skill/spa-api-routing)。
 
 ## 設計決策與取捨
 

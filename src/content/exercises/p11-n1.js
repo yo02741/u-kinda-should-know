@@ -1,4 +1,4 @@
-// 程式題：p11-n1（k8s-networking）
+// 程式題：p11-n1（k8s-network-policy；題目 id 沿用分割前的 k8s-networking-*）
 // 設定檔題的測試碼是 JS：使用者內容是 `source`，`lines` 是去掉 # 註解與空行的各行。
 // 測試碼用 String.raw 寫；測試碼裡不要出現 `${` 與反引號。
 const R = String.raw
@@ -218,7 +218,7 @@ function expectConn(src, dst, proto, port, want, hint) {
 
 export default [
   {
-    id: 'k8s-networking-1', skill: 'k8s-networking', kind: 'config', level: 2, file: 'networkpolicy.yaml',
+    id: 'k8s-networking-1', skill: 'k8s-network-policy', kind: 'config', level: 2, file: 'networkpolicy.yaml',
     title: '替 clinic namespace 補一組 NetworkPolicy',
     prompt: '`clinic` namespace 裡有三種 Pod：`app: clinic-web`、`app: clinic-api`（監聽 8000）、`app: clinic-db`（PostgreSQL，監聽 5432）。叢集的 DNS Pod 在 `kube-system`，label 是 `k8s-app: kube-dns`。\n\n資安稽核要求：\n\n- `clinic` 裡的 Pod，進、出兩個方向都預設拒絕\n- api 能連 db 的 TCP 5432，其他 port 不行\n- api 能查 DNS：UDP 與 TCP 的 53，而且只能連到 `kube-system` 裡帶 `k8s-app: kube-dns` 的 Pod（DNS 開給 `clinic` 裡所有的 Pod 也可以）\n- 除此之外都擋：其他 namespace 的 Pod 連不進來、web 不能直接連 db、api 與 db 都不能連到叢集外\n\n起始碼是第一次嘗試的結果，有兩個問題：預設拒絕只擋了一個方向；db 的規則把 `namespaceSelector` 和 `podSelector` 寫成了兩個元素。修正它們並補上缺的規則。\n\n- 每一份都是 `networking.k8s.io/v1` 的 NetworkPolicy，`metadata.namespace` 是 `clinic`，文件之間用 `---` 分隔\n- 檢查器會用一組 Pod（含 `reports` namespace 裡一個也掛了 `k8s-app: kube-dns` 的 Pod）實際算出每條連線放不放行',
     starter: `# clinic namespace：api 要能連 db 的 5432、能查 DNS，其他都擋
@@ -377,7 +377,7 @@ expectConn('api', '8.8.8.8', 'UDP', 53, false, 'DNS 不要用 ipBlock（例如 0
     ],
   },
   {
-    id: 'k8s-networking-2', skill: 'k8s-networking', kind: 'python', level: 3,
+    id: 'k8s-networking-2', skill: 'k8s-network-policy', kind: 'python', level: 3,
     title: '實作 NetworkPolicy 評估器：誰會被隔離、來源選不選得到',
     prompt: '實作課文那個 NetworkPolicy 評估器裡判斷 ingress 的兩個函式。資料格式和課文的模擬相同：Pod 是 `{"name", "ns", "labels"}`；`ns_labels` 是每個 namespace 的 label；policy 是 dict，欄位對應 YAML（`ns`、`podSelector`、`policyTypes`、`ingress`），selector 只用 matchLabels 的寫法（一個 dict）。這題不處理 `ipBlock`。\n\n- `isolates(policy, pod)`：這份 policy 有沒有讓 `pod` 的 **ingress** 變成白名單。三個條件都要成立：policy 和 pod 在同一個 namespace；`podSelector` 選到 pod；`policyTypes` 包含 `"Ingress"`。沒寫 `policyTypes` 時，Kubernetes 一定把 Ingress 算進去（就算這份 policy 只有 egress 規則）\n- `peer_matches(peer, policy_ns, src, ns_labels)`：`from` 裡的一個元素選不選得到來源 Pod `src`\n  - 同時有 `namespaceSelector` 與 `podSelector`：兩個都要符合（AND）\n  - 只有 `namespaceSelector`：那些 namespace 裡的所有 Pod\n  - 只有 `podSelector`：只看 policy 自己的 namespace（`policy_ns`）\n  - 兩個都沒有：回傳 `False`\n\n`matches()`、`ports_match()`、`ingress_allowed()` 已經寫好，不用改：`ingress_allowed()` 回傳 `(放行與否, 放行它的 policy 名稱)`，沒有任何 policy 隔離目的 Pod 時回傳 `(True, None)`。\n\n起始碼照直覺寫，跑起來有兩個結果不對：monitoring 裡的除錯 Pod 連得到 api；只有 egress 規則的 `allow-dns` 卻讓 web 的 ingress 被擋了。',
     starter: `def matches(selector, labels):

@@ -271,7 +271,7 @@ assert(String(m.readOnly) !== 'true', '程式要寫檔，這個掛載不能是 r
     ],
   },
   {
-    id: 'k8s-storage-2', skill: 'k8s-storage', kind: 'config', level: 3, file: 'audit-store.yaml',
+    id: 'k8s-storage-2', skill: 'k8s-statefulset', kind: 'config', level: 3, file: 'audit-store.yaml',
     title: '把需要固定名稱與各自資料的服務改成 StatefulSet',
     prompt: '院內的稽核紀錄服務 `audit-store` 跑 3 個節點：每個節點把自己那一份資料存在 `/var/lib/audit`，三份資料不能共用；啟動時從環境變數 `PEERS` 讀所有節點的位址（逗號分隔的 `主機:7400`，包含自己），節點重建後要用同一個名字回來。\n\n現在寫成 Deployment 加一個共用的 PVC：Pod 名稱每次重建都不同；`PEERS` 只寫了 Service 的名稱，每次連線會分到任一個 Pod；三個 Pod 搶同一個 ReadWriteOnce 的 PVC。\n\n改成：\n\n- 用 `StatefulSet`（`apps/v1`）取代 Deployment，名稱 `audit-store`、3 個副本，`selector` 與 Pod 範本的 label 一致\n- 一個 headless Service（`clusterIP: None`），名稱和 StatefulSet 的 `serviceName` 相同，`selector` 選得到 Pod\n- 用 `volumeClaimTemplates` 讓每個副本有自己的 PVC：`ReadWriteOnce`、`storageClassName: longhorn`、容量至少 10Gi；容器把它掛在 `/var/lib/audit`\n- 刪掉共用的 PVC，Pod 範本的 `volumes` 也不能再參照任何 PVC\n- `PEERS` 列出 3 個 Pod 各自的 DNS 名稱與 port：`audit-store-0.<headless Service 名稱>:7400`，依此類推（也可以寫完整的 `.clinic.svc.cluster.local`）\n- 所有物件都在 `clinic` namespace',
     starter: `apiVersion: v1

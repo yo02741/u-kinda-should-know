@@ -138,7 +138,7 @@ axios 對應的設定是 `withCredentials: true`。即使三方面都設好，co
 
 ## 正式環境：同網域的 `/api`，或跨來源
 
-同網域時反向代理依路徑分流：`https://clinic.example/` 給前端的靜態檔，`https://clinic.example/api/` 轉給後端，同一份建置結果不用改。nginx 的寫法與 Kubernetes 上的做法見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
+同網域時反向代理依路徑分流：`https://clinic.example/` 給前端的靜態檔，`https://clinic.example/api/` 轉給後端，同一份建置結果不用改。nginx 的寫法與 Kubernetes 上的做法見後端的 [前端與 API 的路徑分流](#/skill/spa-api-routing) 與 [nginx 反向代理](#/skill/nginx)。
 
 API 一定要放在另一個網域（例如 `https://api.clinic.example` 同時服務手機 App）時，就得跨來源：後端設定 CORS 白名單，要帶 cookie 時前端加 `credentials: 'include'`，API 的網址用建置時的環境變數傳入，不寫死在程式裡。
 
