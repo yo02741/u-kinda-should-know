@@ -2113,8 +2113,9 @@ _rows = [{"id": 41, "name": "王小明", "national_id": "A123456789"}, {"id": 42
 _e = audit({"sub": "u_lin", "scope": "clinic:read"}, "appointments", _rows)
 assert _e["user"] == "u_lin" and _e["table"] == "appointments" and _e["row_count"] == 2 and _e["allowed"] is True, _e
 _s = _json.dumps(_e, ensure_ascii=False, default=str)
-for _leak in ("王小明", "A123456789", "B234567890", "41"):
+for _leak in ("王小明", "A123456789", "B234567890"):
     assert _leak not in _s, (_leak, _s)
+assert "id" not in _e and 41 not in _e.values() and 42 not in _e.values(), _e
 _t = _dt.fromisoformat(_e["ts"])
 assert _t.tzinfo is not None and _t.utcoffset().total_seconds() == 0 and abs((_dt.now(_tz.utc) - _t).total_seconds()) < 60, _e["ts"]
 assert audit({"sub": "u_lin"}, "sessions", [])["row_count"] == 0` },
