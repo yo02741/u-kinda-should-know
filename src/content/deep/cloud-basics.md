@@ -138,9 +138,9 @@ for src, dst, port in [("internet", "lb", 443), ("lb", "app-1", 8000), ("app-1",
 - **區域**（region）：一個地理區域，例如 Google Cloud 的 `asia-east1` 位於台灣。資料放在哪個區域，就實際存在那裡的機房。
 - **可用區**（availability zone，AZ）：區域內彼此獨立的機房群，各自有電力、冷卻與網路，之間用低延遲的專線相連。一個 AZ 失效時，其他 AZ 應該不受影響。
 
-選區域時看：離使用者近（延遲）、法規與資料落地的要求、需要的服務在那個區域有沒有提供（不是每個區域都有全部服務）、價格（同一個服務在不同區域價格不同）。
+選區域看四件事：離使用者近不近（延遲）、法規與資料落地的要求、需要的服務那個區域有沒有、價格（同一個服務各區域不同）。
 
-資源有不同的範圍：
+資源的範圍：
 
 | 範圍 | 例子 | 意思 |
 |---|---|---|
@@ -148,19 +148,17 @@ for src, dst, port in [("internet", "lb", 443), ("lb", "app-1", 8000), ("app-1",
 | 區域 | 多 AZ 的受管資料庫、負載平衡器、物件儲存 bucket、Google Cloud 與 Azure 的子網 | 業者在區域內的多個 AZ 之間處理備援 |
 | 全域 | IAM、多數 DNS 服務 | 不屬於特定區域 |
 
-**高可用的基本做法是跨 AZ**：至少兩個 AZ 各有一份 API、資料庫有另一個 AZ 的備援、負載平衡器同時接到兩邊。跨區域（multi-region）的成本與複雜度高很多，多數服務用不到。另外要知道，跨 AZ 的流量在部分業者是要收費的。
+**高可用的基本做法是跨 AZ**：至少兩個 AZ 各有一份 API、資料庫有另一個 AZ 的備援、負載平衡器同時接到兩邊。跨區域（multi-region）的成本與複雜度高很多，多數服務用不到。跨 AZ 的流量在部分業者要收費。
 
 ## VPC 的位址規劃與私有子網對外
 
 私有位址通常從這三段裡選（RFC 1918）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`。在 AWS，一個子網屬於單一 AZ，所以每一種子網要在每個 AZ 各建一個。Google Cloud 的子網是區域範圍、跨所有可用區。
 
-規劃位址時要注意：
+- **不要和會互連的網路重疊**。之後用 VPN 接公司網路、和另一個 VPC 對接（peering）時，範圍重疊就接不起來，要重新規劃位址、搬遷資源。
+- **預留空間**。Kubernetes 這類平台可能讓每個 Pod 拿一個 VPC 位址，消耗很快。
+- **扣掉保留位址**。每個子網有幾個位址被業者保留（AWS 是 5 個）。
 
-- **不要和會互連的網路重疊**。之後要用 VPN 接公司網路、和另一個 VPC 對接（peering）時，位址範圍重疊就接不起來，事後要重新規劃位址、搬遷資源。
-- **預留空間**。Kubernetes 這類平台可能讓每個 Pod 拿一個 VPC 位址，位址消耗很快。
-- 每個子網會有幾個位址被業者保留（AWS 是每個子網 5 個），實際可用的比 CIDR 算出來的少。
-
-下面用標準函式庫的 `ipaddress` 規劃子網並檢查重疊，可以直接執行：
+用標準函式庫的 `ipaddress` 規劃子網並檢查重疊：
 
 ```python run
 import ipaddress
@@ -188,30 +186,18 @@ print("10.20.33.7 在哪個子網？", [n for n, net in plan.items() if ipaddres
 
 私有子網裡的 API 要拉 image、呼叫金流 API，需要 NAT gateway。NAT gateway 通常按存在的時數加上經過的流量計費，而且每個 AZ 各一個才有高可用。流量大的對象（例如同區域的物件儲存、image registry）可以改走 **VPC endpoint**，流量不經過 NAT，也不離開業者的網路；AWS 的 S3 gateway endpoint 本身不另外收費，其他類型的 endpoint 依業者計費。
 
-## Network ACL 與連線逾時的排查
+## Network ACL、負載平衡器、物件儲存
 
-掛在子網上的 **Network ACL**：無狀態（回程要另外允許）、有允許也有拒絕、依編號順序比對。多數情況下用安全群組就夠，NACL 保持預設。Google Cloud 的 VPC firewall rules 與 Azure 的 NSG 都支援允許與拒絕規則並有優先順序，概念介於兩者之間。
-
-連線逾時通常代表中間被擋了，refused 代表封包到了。完整的排查順序見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting)。
-
-## 負載平衡器
-
-雲端的負載平衡器是受管服務：業者負責它本身的高可用與擴充，你設定規則。
-
-- **L7（HTTP / HTTPS）**：AWS 的 ALB、Google Cloud 的 Application Load Balancer 這類。可以依網域與路徑分派、終結 TLS，而且通常能掛受管憑證、自動續約。
-- **L4（TCP / UDP）**：AWS 的 NLB 這類，只轉送連線，延遲低、可以處理非 HTTP 的協定。
-
-它放在公開子網、跨多個 AZ，後面的 API 放在私有子網。設定時要確認：
-
-- **健康檢查**打哪個路徑、預期什麼狀態碼；後端的 `/ready` 該檢查什麼見 [應用伺服器與程序管理](#/skill/process-servers)。
-- **閒置逾時**：負載平衡器對閒置連線的逾時，要和後端的 keep-alive 搭配（後端較長），否則會有零星的 502。
-- **真實客戶端 IP**：後端看到的來源是負載平衡器，要從 `X-Forwarded-For` 取得，並只信任負載平衡器加的部分。
-
-演算法、TLS 終結的位置與真實 IP 的信任邊界見 [負載平衡](#/skill/load-balancing)。
+| 元件 | 雲端上的樣子 | 細節在哪一課 |
+|---|---|---|
+| Network ACL | 掛在子網上：無狀態（回程要另外允許）、有允許也有拒絕、依編號順序比對。多數情況用安全群組就夠，NACL 保持預設。Google Cloud 的 VPC firewall rules 與 Azure 的 NSG 都支援允許與拒絕規則並有優先順序，概念介於兩者之間 | 連線逾時的排查順序：[網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting) |
+| L7 負載平衡器（AWS 的 ALB、Google Cloud 的 Application Load Balancer） | 受管服務，放在公開子網、跨多個 AZ。依網域與路徑分派、終結 TLS，通常能掛受管憑證、自動續約 | 健康檢查、閒置逾時與 keep-alive、`X-Forwarded-For` 的信任邊界：[負載平衡](#/skill/load-balancing)；`/ready` 該檢查什麼：[應用伺服器與程序管理](#/skill/process-servers) |
+| L4 負載平衡器（AWS 的 NLB） | 只轉送連線，延遲低、可以處理非 HTTP 的協定 | 同上 |
+| 物件儲存（S3、Cloud Storage、Blob Storage） | 上傳的檔案、報表、備份、前端靜態檔放這裡，不放虛擬機的磁碟：容量不用預先規劃、多台 API 都讀得到、耐久性由業者負責。前端靜態檔再加一層 CDN，減少直接對外的流量 | presigned URL、版本控制、生命週期：[物件儲存：bucket、預簽網址與生命週期](#/skill/object-storage) |
 
 ## 受管資料庫
 
-把 PostgreSQL 裝在自己的虛擬機上，備份、修補、監控、故障切換都是自己的事。受管資料庫把這些變成設定：
+受管資料庫把備份、修補、監控、故障切換變成設定：
 
 | 功能 | 做什麼 | 要注意 |
 |---|---|---|
@@ -223,11 +209,7 @@ print("10.20.33.7 在哪個子網？", [n for n, net in plan.items() if ipaddres
 
 仍然是你的責任：schema 與索引、慢查詢、連線數（見 [應用伺服器與程序管理](#/skill/process-servers) 的連線池計算）、資料的存取權限、規格選擇與成本。
 
-網路上：資料庫放在隔離或私有子網、**關閉公開存取**、安全群組只允許 `app-sg`。連線用 TLS，帳密放在秘密管理服務，不寫在程式碼或 image 裡（見 [環境設定與 12-factor](#/skill/config-12factor)）。
-
-## 物件儲存
-
-使用者上傳的檔案、報表、備份、前端的靜態檔，放在物件儲存（S3、Cloud Storage、Blob Storage），而不是虛擬機的磁碟：容量不用預先規劃、多台 API 都讀得到、耐久性由業者負責。瀏覽器透過 presigned URL 直接上傳下載，檔案不經過 API；bucket 預設私有、開啟版本控制與生命週期規則。細節見 [物件儲存：bucket、預簽網址與生命週期](#/skill/object-storage)。前端靜態檔通常再加一層 CDN，減少從儲存直接對外的流量。
+連線用 TLS，帳密放在秘密管理服務，不寫在程式碼或 image 裡（見 [環境設定與 12-factor](#/skill/config-12factor)）。
 
 ## IAM 與最小權限
 
@@ -236,8 +218,6 @@ IAM（Identity and Access Management）決定誰可以對哪個資源做什麼�
 - **身分**：人（使用者，最好透過公司的單一登入）、工作負載（角色 / service account）。
 - **政策**：一份允許或拒絕的規則，列出動作、資源與條件。
 - **判斷規則**（以 AWS 為例）：預設全部拒絕；有允許才可以；明確的拒絕永遠優先於允許。
-
-幾條基本原則：
 
 1. **主帳號（root / 帳單擁有者）只用來做極少數的帳號層級操作**：開 MFA、不建立存取金鑰、日常不登入。
 2. **工作負載用角色，不用長期金鑰**。虛擬機、容器、函式可以掛一個角色，平台自動提供會過期、會輪換的短效憑證（AWS 的 instance profile 與 task role、Google Cloud 的 attached service account、Kubernetes 上的 workload identity）。開頭那組寫在 `.env` 的管理員金鑰，主機被入侵就是整個帳號被接管。
@@ -258,7 +238,7 @@ IAM（Identity and Access Management）決定誰可以對哪個資源做什麼�
 
 4. **權限不夠時，從錯誤訊息補上缺的那一個動作**，而不是直接換成 `*`。
 
-下面模擬這套判斷規則（預設拒絕、允許、明確拒絕優先，萬用字元比對），可以直接執行：
+模擬這套判斷規則（預設拒絕、允許、明確拒絕優先，萬用字元比對）：
 
 ```python run
 from fnmatch import fnmatchcase
@@ -294,7 +274,7 @@ for action, resource in checks:
 
 ## 成本的主要來源
 
-雲端帳單的結構大致是這幾類，各家計價細節不同，估算時以官方價格計算器為準：
+各家計價細節不同，估算時以官方價格計算器為準：
 
 | 類別 | 怎麼計費 | 常見的意外 |
 |---|---|---|
@@ -327,7 +307,6 @@ for action, resource in checks:
 | 建立資源時回報超過配額 | 帳號在該區域的配額（vCPU 數、IP 數…）到頂 | 申請提高配額；新帳號的預設配額通常偏低 |
 | 多 AZ 資料庫切換後，API 一段時間全部錯誤 | 連線池裡還是連到舊主機的斷線連線 | 連線池開啟取用前檢查（例如 SQLAlchemy 的 `pool_pre_ping`），並設定重試 |
 | 帳單出現陌生區域的大量運算費用 | 存取金鑰外洩，被拿去開機器 | 立刻停用金鑰、檢查稽核 log；改用角色、移除長期金鑰；業者偵測到外洩時也可能自動限制該金鑰 |
-| 資料庫 log 滿是 `password authentication failed for user "postgres"` | 資料庫對網際網路開放 | 關閉公開存取、安全群組只允許應用程式 |
 
 ## 動手
 
