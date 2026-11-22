@@ -64,7 +64,6 @@ Cache-Control: public, max-age=31536000, immutable
 |---|---|---|
 | `(!) Some chunks are larger than 500 kB after minification.` | 所有頁面或大型套件都進了同一個 chunk | 路由懶載入、把大套件留在用到它的頁面；不要只調高 `chunkSizeWarningLimit` |
 | 首頁的 Network 分頁出現報表頁的程式 | 某個共用檔案靜態 import 了報表用的模組 | 找出那個 import，改成動態 `import()` 或搬進報表頁 |
-
 | 使用者一直拿到舊版 | `index.html` 被快取 | `index.html` 設 `no-cache`，只有帶 hash 的檔案長效快取 |
 
 :::stop 讀到這裡可以先停：會用路由懶載入把頁面移出首頁，說得出帶 hash 的檔名為什麼能長效快取。後面的共用 chunk、tree-shaking、改名的連鎖、vendor 切法與建置報表，在首頁的 chunk 仍然太大或每次部署所有檔名都變時再回來讀。
@@ -208,12 +207,10 @@ chunk 過大的警告全文：
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-
 | `lodash` 整包進了 bundle，只用了一個函式 | CommonJS 套件拿不掉沒用的部分 | 改用 `lodash-es` 的具名 import，或原生寫法 |
 | 每次部署，所有檔案都換了檔名 | vendor 沒有切出來，和自己的程式混在一起 | 設定 vendor chunk |
 | `TypeError: manualChunks is not a function` | Vite 8 用了 `manualChunks` 的物件寫法 | 改用 `codeSplitting.groups` |
 | 設定了 `rolldownOptions`，建置結果沒變 | 專案是 Vite 6 | 照版本寫：Vite 6 用 `rollupOptions` |
-
 | 帶 hash 的檔案每次都重新下載 | 伺服器沒給長效快取標頭，或 DevTools 勾著 `Disable cache` | 檢查 Response Headers；驗快取時取消勾選 `Disable cache` |
 
 ## 動手

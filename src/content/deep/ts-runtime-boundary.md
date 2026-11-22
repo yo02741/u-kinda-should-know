@@ -135,11 +135,11 @@ export type Appointment = z.infer<typeof Appointment>
   → at [0].checkedInAt
 ```
 
-每一條都有路徑，回報給後端時直接指得出是哪個欄位。幾個要知道的行為（都在 4.6.7 實測）：
+每一條都有路徑，回報給後端時直接指得出是哪個欄位。以下行為都在 4.6.7 實測：
 
-- `parse()` 不符時丟出 `ZodError`；`safeParse()` 不丟錯，回傳 `{ success: true, data }` 或 `{ success: false, error }`。在 API 層用 `safeParse` 比較好控制畫面。
+- `parse()` 不符時丟出 `ZodError`；在 API 層用不丟錯的 `safeParse` 比較好控制畫面。
 - `z.object()` 預設會把沒宣告的欄位拿掉，回傳的 `data` 裡沒有它們；`z.strictObject()` 把多餘的欄位當錯誤（`Unrecognized key: "b"`）；`z.looseObject()` 保留。
-- `.nullable()` 是「值可以是 `null`」，`.optional()` 是「欄位可以不存在」，對應 TypeScript 的 `string | null` 與 `note?: string`。
+- `.optional()` 是「欄位可以不存在」，對應 TypeScript 的 `note?: string`；`.nullable()` 對應 `string | null`。
 - `z.coerce.number()`、`z.coerce.date()` 先轉型再檢查；`.catch(值)` 在檢查失敗時改用預設值。`z.infer` 推出的是轉換後的型別，轉換前的型別用 `z.input`。
 
 Valibot 1 是寫法不同、bundle 較小的替代品。zod 4 與 Valibot 1 都實作了 Standard Schema 介面（schema 上有 `~standard` 屬性），表單函式庫這類工具可以同時接受兩者。
@@ -150,7 +150,7 @@ Valibot 1 是寫法不同、bundle 較小的替代品。zod 4 與 Valibot 1 都�
 
 - **整份資料都要對**：`z.array(Appointment).safeParse()`，任何一筆不符就進錯誤畫面。適合金額、權限這類錯了會出事的資料。
 - **逐筆檢查**：每一筆各自 `safeParse`，通過的顯示、不通過的略過並回報。一筆壞資料不會讓整個清單消失。
-- **欄位有預設值**：`z.enum(['booked', 'checked-in', 'cancelled', 'unknown']).catch('unknown')`，沒看過的狀態變成 `'unknown'`，畫面顯示「其他」。實測 `'no-show'` 會得到 `'unknown'`。
+- **欄位有預設值**：必讀那個 schema 的 `.catch('unknown')`，沒看過的狀態變成 `'unknown'`，畫面顯示「其他」。實測 `'no-show'` 會得到 `'unknown'`。
 
 不論選哪一種，失敗都要回報（錯誤監控或 `POST /api/client-errors`），否則前端默默略過，沒有人知道後端改了格式。
 
@@ -314,16 +314,12 @@ if (!result.success) {
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-| `TypeError: Cannot read properties of undefined (reading '…')`，stack 指向元件 | API 欄位改名或少了，錯誤在使用時才出現 | 在 API 層驗證，錯誤會在拿到資料的地方出現 |
-| `TS18046: 'u' is of type 'unknown'.` | `unknown` 沒有先檢查就使用 | 先 `safeParse` 或 `typeof` |
 | `Invalid input: expected number, received string`（zod） | 回應的型別和 schema 不同 | 確認是後端改了還是 schema 寫錯，對照 Network 分頁的回應 |
 | `Invalid option: expected one of …`（zod） | 出現沒看過的列舉值 | 和後端確認；需要容錯時用 `.catch()` |
-| 回應裡的欄位不見了 | `z.object()` 預設移除沒宣告的欄位 | 把欄位加進 schema，或改用 `z.looseObject()` |
 | 錯誤監控只收到 `[object Object]` | 把 `ZodError` 物件直接轉成字串 | 用 `z.prettifyError()` 或 `error.issues` |
 | `TS2532: Object is possibly 'undefined'.` 一次冒出很多 | 剛打開 `noUncheckedIndexedAccess` | 逐一處理沒有資料的情況，不要用 `!` 壓掉 |
-| 拼錯的 `import.meta.env.XXX` 沒有報錯 | Vite 預設把沒宣告的鍵當成 `any` | `env.d.ts` 宣告欄位並開 `strictImportMetaEnv` |
 
-AI 產生的 API 程式常直接寫 `return (await res.json()) as Appointment[]`，或寫一個只檢查一兩個欄位的型別守衛，看起來有型別、執行時沒有任何保護。審查時找 `as`、`any` 與 `x is` 這三種寫法。
+審 AI 產生的 API 程式時找 `as`、`any` 與 `x is` 這三種寫法：看起來有型別，執行時沒有任何保護。
 
 ## 動手
 

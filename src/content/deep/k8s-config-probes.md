@@ -146,7 +146,7 @@ $ kubectl get secret booking-secrets -n booking -o jsonpath='{.data.DB_PASSWORD}
 S3cret-2024!
 ```
 
-base64 是編碼，不是加密，目的只是讓值可以放二進位內容。能讀這個 namespace 的 Secret 的人、能在這個 namespace 建 Pod 的人（把 Secret 掛進去再印出來），都拿得到明文。Secret 和 ConfigMap 在實作上的差別是：可以用 RBAC 分開授權、`kubectl describe` 不會印出值、掛成檔案時放在記憶體檔案系統。要真的保護它，需要 RBAC、etcd 的靜態加密，以及不讓原文進 Git，細節在 [秘密管理](#/skill/secrets)。
+base64 是編碼，不是加密，目的只是讓值可以放二進位內容。能讀這個 namespace 的 Secret 的人、能在這個 namespace 建 Pod 的人（把 Secret 掛進去再印出來），都拿得到明文。Secret 和 ConfigMap 在實作上的差別是：可以用 RBAC 分開授權、`kubectl describe` 不會印出值、掛成檔案時放在記憶體檔案系統。要保護它，需要 RBAC、etcd 的靜態加密，以及不讓原文進 Git，細節在 [秘密管理](#/skill/secrets)。
 
 ## 探針的欄位預設值、探測方式與 startupProbe
 
@@ -166,7 +166,7 @@ base64 是編碼，不是加密，目的只是讓值可以放二進位內容。�
 
 ## liveness 檢查資料庫：一次抖動變成全面重啟
 
-下面模擬 4 個 Pod、資料庫中斷 35 秒，印出 Service 後端（endpoints）的變化：
+模擬 4 個 Pod、資料庫中斷 35 秒，印出 Service 後端（endpoints）的變化：
 
 ```python run
 # readiness：每 5 秒一次、連續 3 次失敗移出、成功 1 次加回
@@ -272,7 +272,7 @@ for current, usage, request in cases:
     print(f"副本 {current}、平均用量 {usage}m、requests {request}m → 使用率 {util:.0f}% → 期望副本 {final}  {note}")
 ```
 
-第一、二組的實際用量一樣，只因為 requests 不同，一個擴到 6 個、一個完全不動。使用 HPA 前要知道的事：
+第一、二組的實際用量一樣，只因為 requests 不同，一個擴到 6 個、一個完全不動。
 
 - 叢集要有提供資源指標的元件（通常是 metrics-server），否則 HPA 拿不到數字。
 - 目標 Deployment 的容器**一定要寫 CPU requests**，不然算不出使用率。
@@ -291,7 +291,7 @@ for current, usage, request in cases:
 | 3 | 程式收到 SIGTERM：停止接新請求，把進行中的請求做完，關閉連線，結束 |
 | 4 | 從第 1 步起算超過 `terminationGracePeriodSeconds`（預設 30 秒）還沒結束，送 SIGKILL |
 
-第 1 步的兩件事是並行的。「從後端移除」要傳到每個節點與 Ingress controller 才生效，這需要一點時間；如果程式收到 SIGTERM 立刻關閉，這段時間內送來的請求就會失敗。常見做法是用 `preStop` 先等幾秒：
+「從後端移除」要傳到每個節點與 Ingress controller 才生效，這需要一點時間；如果程式收到 SIGTERM 立刻關閉，這段時間內送來的請求就會失敗。常見做法是用 `preStop` 先等幾秒：
 
 ```yaml
     spec:
@@ -400,15 +400,14 @@ spec:
 
 | 訊息或現象 | 原因 | 處理 |
 |---|---|---|
-| 狀態 `CreateContainerConfigError`，Events 有 `secret "booking-secrets" not found` | `env` 參照的 Secret 或 ConfigMap 不存在，或在別的 namespace | 建立它，或修正名稱；鍵名不存在時訊息會是 `couldn't find key …` |
-| `Readiness probe failed: HTTP probe failed with statuscode: 503` | `/ready` 回報還不能服務；Pod 是 `Running` 但 `READY 0/1` | 看程式的 log：依賴連不上，或還在啟動 |
+| 狀態 `CreateContainerConfigError`，Secret 明明建了 | Secret 或 ConfigMap 在別的 namespace；或鍵名不存在（訊息是 `couldn't find key …`） | 修正 namespace、名稱或鍵名 |
+| `Readiness probe failed: HTTP probe failed with statuscode: 503` | `/ready` 回報還不能服務 | 看程式的 log：依賴連不上，或還在啟動 |
 | `Readiness probe failed: … connect: connection refused` | 探針的 port 寫錯，或程式還沒開始監聽 | 對照 `containerPort` 與程式實際監聽的 port |
 | `Liveness probe failed: … context deadline exceeded`，接著容器被重啟 | 探測逾時：`timeoutSeconds` 預設只有 1 秒，或端點做了太慢的事 | liveness 端點不要碰外部依賴；必要時調大逾時 |
 | 容器啟動到一半就被重啟，反覆發生 | liveness 在啟動完成前就開始判定 | 加 `startupProbe` |
 | `Last State: Terminated`、`Reason: OOMKilled`、`Exit Code: 137` | 記憶體超過 limits | 先分辨是 limits 太小還是洩漏，見 [Kubernetes 排錯](#/skill/k8s-troubleshooting) |
 | `container has runAsNonRoot and image will run as root` | 映像以 root 執行 | 在 Dockerfile 建立非 root 使用者，並設定 `runAsUser` |
 | `kubectl get hpa` 的 TARGETS 顯示 `<unknown>` | 沒有指標來源，或容器沒寫 CPU requests | `kubectl describe hpa` 的 Events 會說明是哪一種 |
-| 改了 ConfigMap，程式還是讀到舊值 | 環境變數只在容器啟動時讀一次 | `kubectl rollout restart` |
 | 每次部署都有少量 502 | 沒有優雅關機，或沒有 `preStop` 等待 | 處理 SIGTERM、加 `preStop`、確認 PID 1 是應用程式 |
 
 ## 動手

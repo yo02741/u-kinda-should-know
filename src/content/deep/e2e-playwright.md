@@ -106,7 +106,6 @@ test('分頁列的結構', async ({ page }) => {
 |---|---|---|
 | `Error: locator.click: Error: strict mode violation: getByRole('tab', { name: /已/ }) resolved to 2 elements:` | locator 對到不只一個 | 照訊息列出的 `aka` locator 改寫，或先縮小範圍 |
 | `TimeoutError: locator.click: Timeout 1500ms exceeded.`，Call log 是 `element is not enabled` | 元素是停用的 | 先完成讓它啟用的步驟（例如選時段），或這就是要抓的錯 |
-
 | `Error: expect(locator).toHaveText(expected) failed`，`Error: Test ended.` | 斷言沒有 `await` | 補 `await`；eslint-plugin-playwright 的 `playwright/missing-playwright-await` 會抓 |
 
 :::stop 讀到這裡可以先停：會用 `getByRole`、web-first assertion 與 `page.route` 寫出不靠固定等待的測試。後面的 strict mode、自動等待的條件、斷言一覽、設定檔、fixture、trace、截圖比對與指令，在要建立設定檔或追 CI 上的偶發失敗時再回來讀。
@@ -132,7 +131,7 @@ Error: locator.click: Error: strict mode violation: getByRole('tab', { name: /�
 
 ## 自動等待：每種動作檢查哪些條件
 
-`click()`、`fill()`、`check()` 這類動作，操作之前會先等元素達到可以操作的狀態，條件不成立就隔一段時間重試，直到動作的逾時（預設沒有個別上限，受整個測試的 30 秒限制）：
+條件不成立就隔一段時間重試，直到動作的逾時（預設沒有個別上限，受整個測試的 30 秒限制）：
 
 | 動作 | 等待的條件（1.65.1 原始碼） |
 |---|---|
@@ -165,11 +164,7 @@ Dialog 開著時去點背景的 tab：
       - <dialog open="" aria-labelledby="cancel-title">…</dialog> intercepts pointer events
 ```
 
-有了自動等待，`waitForTimeout(1000)` 這類固定等待就沒有存在的理由：慢的機器上不夠，快的機器上浪費時間。
-
 ## web-first assertion 一覽
-
-常用的幾個：
 
 | 斷言 | 檢查 |
 |---|---|
@@ -184,7 +179,7 @@ Dialog 開著時去點背景的 tab：
 | `toMatchAriaSnapshot()` | 一整段 accessibility tree 的角色、名稱與狀態 |
 | `toHaveScreenshot()` | 截圖和基準圖相同 |
 
-不是 locator 的值（例如自己計數的 API 呼叫次數）用 `await expect.poll(() => calls).toBe(2)` 重試。web-first assertion 一定要 `await`，漏寫時測試函式先結束了，訊息是 `Error: Test ended.`。
+不是 locator 的值（例如自己計數的 API 呼叫次數）用 `await expect.poll(() => calls).toBe(2)` 重試。
 
 ## `page.route`：`fulfill`、`abort`、`continue` 與註冊順序
 
@@ -196,11 +191,11 @@ await page.route('**/api/appointments', (route) =>
 await page.route('**/api/sessions/*/slots', (route) => route.abort('failed'))          // 網路錯誤
 ```
 
-`route.fulfill` 直接回應，請求不會送出去；`route.abort` 模擬連線失敗；`route.continue` 放行（可以改標頭）。同一個網址註冊了好幾個 route 時，後註冊的先執行，可以在單一測試裡覆蓋 `beforeEach` 設好的預設回應。
+第三種是 `route.continue`：放行（可以改標頭）。同一個網址註冊了好幾個 route 時，後註冊的先執行，可以在單一測試裡覆蓋 `beforeEach` 設好的預設回應。
 
 用 `page.route` 固定回應的測試穩定、能造出任何狀態；代價是前後端的契約不在測試範圍裡。關鍵流程另外對真的測試環境跑一支，確認欄位與狀態碼對得上。
 
-必讀的第三個測試在 `beforeEach` 已經註冊過同一個網址之後，再註冊一次 `route.abort`，所以拿到的是網路錯誤。只用鍵盤完成流程、Dialog 的焦點回復這類測試，寫法見 [元件的鍵盤操作與 ARIA](#/skill/a11y-components)；多種狀態與寬度的驗收測試見 [驗收 AI 產出的前端](#/skill/ai-acceptance)。
+只用鍵盤完成流程、Dialog 的焦點回復這類測試，寫法見 [元件的鍵盤操作與 ARIA](#/skill/a11y-components)；多種狀態與寬度的驗收測試見 [驗收 AI 產出的前端](#/skill/ai-acceptance)。
 
 ## 設定檔：誰啟動網站、跑哪些瀏覽器
 
@@ -319,10 +314,8 @@ npx playwright install                      # 下載這個版本對應的瀏覽�
 
 | 訊息 | 原因 | 修法 |
 |---|---|---|
-
 | Call log 裡出現 `<dialog open="">…</dialog> intercepts pointer events` | 有別的元素蓋在上面：Dialog、固定的頁首、Cookie 橫幅 | 先關掉蓋住的東西；若是 bug（手機寬度下按鈕被底部提示列蓋住），修版面 |
 | `Test timeout of 30000ms exceeded.`，Call log 只有 `waiting for getByRole('button', { name: '報到' })` | 頁面上沒有這個角色與名稱的元素 | 用 trace 的快照或 `error-context.md` 的 ARIA snapshot 看實際的名稱 |
-
 | `Error: expect(locator).toMatchAriaSnapshot(expected) failed`，底下是 `- Expected` 與 `+ Received` 的差異 | 結構或狀態和預期不同 | 讀差異：多了一個 tab、`[selected]` 跑到別的 tab 上 |
 | `Error: A snapshot doesn't exist at …-chromium-linux.png, writing actual.` | 第一次跑截圖比對 | 檢查產生的圖，確認後 commit；CI 上要用同一種環境產生 |
 | `Error: browserType.launch: Executable doesn't exist at …`，加上 `Looks like Playwright was just installed or updated.` | 沒有下載這個版本的瀏覽器 | `npx playwright install`；CI 上加 `--with-deps` 一併裝系統套件 |

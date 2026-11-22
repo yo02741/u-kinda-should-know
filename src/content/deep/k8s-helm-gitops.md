@@ -282,8 +282,6 @@ helm rollback booking-api 3 -n booking-prod                    # 回到 revision
 
 值的優先順序由低到高：chart 的 `values.yaml`、`-f` 指定的檔案（寫在後面的蓋過前面的）、`--set`。每個環境一個 values 檔，相當於 Kustomize 的 overlay。
 
-幾個行為：
-
 - 樣板處理的是**文字**，不理解 YAML 結構。縮排錯誤要 render 之後才會出現，所以改樣板後先跑 `helm template` 看結果。
 - release 的紀錄存在叢集裡（預設是 release 所在 namespace 的 Secret），`helm history` 與 `helm rollback` 靠它運作。
 - `helm rollback` 回復的是 manifest，不包含資料庫的 schema 變更，和 `kubectl rollout undo` 一樣（見 [部署策略與資料庫遷移](#/skill/cd-strategies)）。
@@ -303,8 +301,6 @@ helm rollback booking-api 3 -n booking-prod                    # 回到 revision
 常見的分工：**自己團隊的服務**、環境之間差異不多，用 Kustomize 就夠，少學一套樣板語法；**別人發行的軟體**（cert-manager、Ingress controller、監控元件）通常以 Helm chart 提供，就用 Helm 安裝；要給很多團隊共用、參數很多的內部範本，Helm 比較合適。兩者可以並存。不論用哪一種，都在 CI 裡先 render 出最終的 YAML 並檢查，不要到套用時才知道結果。
 
 ## GitOps：Git 是唯一的期望狀態
-
-manifest 有了，接著是「誰把它套用到叢集」。兩種模式：
 
 ```text
 push 式
@@ -363,13 +359,9 @@ terraform plan      # 比對「設定檔」「state」與「實際的資源」�
 terraform apply     # 執行 plan 列出的變更，並更新 state
 ```
 
-三個概念：
-
 - **plan 與 apply 分開**：plan 只列出差異，不動任何東西；審查的對象是 plan 的輸出。這和 `kubectl diff` 之後才 `apply` 是同一個想法。
 - **state**：Terraform 用一個 state 檔記錄「設定裡的每個資源對應到實際的哪一個」。state 可能含有機密，不進 Git；多人協作時放在有鎖定機制的遠端儲存，避免兩個人同時 apply。
 - **drift**：有人在主控台手動改了資源，下一次 plan 會把差異列出來。Terraform 只在執行時比對，不像 GitOps 的控制器持續調和。
-
-分工通常是：
 
 | 層 | 例子 | 用什麼管 |
 |---|---|---|
@@ -403,7 +395,6 @@ GitOps 要求所有期望狀態都在 Git，但 Secret 的 YAML 只是 base64，
 | `Error: UPGRADE FAILED: another operation (install/upgrade/rollback) is in progress` | 上一次 Helm 操作被中斷，release 卡在 pending 狀態 | `helm history` 看狀態，rollback 到上一個成功的 revision |
 | `error converting YAML to JSON: yaml: line 23: did not find expected key` | 樣板 render 出來的 YAML 縮排不對 | `helm template` 輸出結果，看那一行 |
 | `nil pointer evaluating interface {}.tag` | 樣板取用的值在 values 裡不存在（上一層就是空的） | 檢查 values 檔的鍵名與層級 |
-| 用 `kubectl edit` 改的設定，過幾分鐘又變回去 | GitOps 控制器把它調和回 Git 的內容 | 改 Git，不要改叢集 |
 | 應用程式一直顯示「不同步」 | 有別的元件也在改同一個欄位，例如 HPA 改 `replicas` | manifest 不要寫 `replicas`，或設定讓控制器忽略那個欄位 |
 | `Error: Error acquiring the state lock` | 另一個 Terraform 程序正在執行，或上次異常中斷沒有釋放鎖 | 確認沒有人在跑之後再解鎖 |
 | 秘密被 commit 進設定 repo | 把 Secret 的 YAML 直接放進 Git | 當成已外洩處理：輪替；從歷史移除不能取代輪替 |

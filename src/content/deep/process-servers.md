@@ -90,7 +90,7 @@ gunicorn 與 uvicorn 都內建這個流程，前提是**它們收得到 SIGTERM*
 - **`FATAL:  sorry, too many clients already`**：所有副本的連線總數超過資料庫的 `max_connections`。重算 worker × 連線池 × 副本，縮小連線池或加連線池代理。
 - **`[CRITICAL] WORKER TIMEOUT (pid:2481)`**：同步 worker 處理單一請求超過 `--timeout`（預設 30 秒），被 master 殺掉重開。找慢的請求（慢查詢、沒設逾時的外部呼叫），長工作改背景執行。
 
-:::stop 讀到這裡可以先停：會用 gunicorn 或 uvicorn 啟動多個 worker，算得出 worker 數與連線池上限，會設定優雅關機的寬限期。後面的 worker 內部模型、健康檢查、行程管理與完整錯誤表，在服務變慢、部署時出現 502 或要決定由誰管行程時再回來讀。
+:::stop 讀到這裡可以先停：會用 gunicorn 或 uvicorn 啟動多個 worker，算得出 worker 數與連線池上限，會設定優雅關機的寬限期。後面的 worker 內部模型、健康檢查、行程管理與其他錯誤訊息，在服務變慢、部署時出現 502 或要決定由誰管行程時再回來讀。
 
 ## 框架、介面、伺服器，以及為什麼不用開發伺服器
 
@@ -137,12 +137,10 @@ worker 估算那段的第一組結果是每個副本 3 個 worker，總共 9 個
 
 ## 優雅關機的模擬與其他逾時設定
 
-各層的寬限期設定：
-
-| 層 | 設定 | 預設 | 開頭的問題 |
-|---|---|---|---|
-| 應用伺服器 | gunicorn `--graceful-timeout`；uvicorn `--timeout-graceful-shutdown` | gunicorn 30 秒 | 請求最長 15 秒，設 20 秒 |
-| 容器 / 平台 | `docker stop -t`、compose 的 `stop_grace_period`、Kubernetes 的 `terminationGracePeriodSeconds`、systemd 的 `TimeoutStopSec` | Docker 10 秒、Kubernetes 30 秒、systemd 90 秒 | Docker 的 10 秒比應用程式的寬限期短，要調成 25 秒以上 |
+| 層 | 寬限期的設定 | 預設 |
+|---|---|---|
+| 應用伺服器 | gunicorn `--graceful-timeout`；uvicorn `--timeout-graceful-shutdown` | gunicorn 30 秒 |
+| 容器 / 平台 | `docker stop -t`、compose 的 `stop_grace_period`、Kubernetes 的 `terminationGracePeriodSeconds`、systemd 的 `TimeoutStopSec` | Docker 10 秒、Kubernetes 30 秒、systemd 90 秒 |
 
 應用伺服器收到 SIGTERM 時的完整步驟（訊號的差別見 [Linux 與 shell 基礎](#/skill/linux-basics)）：
 
@@ -151,7 +149,7 @@ worker 估算那段的第一組結果是每個副本 3 個 worker，總共 9 個
 3. **清理**：關閉資料庫連線池、把緩衝的 log 與指標送出、結束背景工作。
 4. **以退出碼 0 結束**。
 
-下面模擬優雅關機：伺服器在收到 SIGTERM 後不再接新請求、等手上的請求做完，超過寬限期的才被中斷。可以直接執行（時間縮小成秒的十分之一）：
+模擬這四步，超過寬限期的請求被中斷（時間縮小成秒的十分之一）：
 
 ```python run
 import asyncio
@@ -209,9 +207,9 @@ await deploy(grace=2.0)    # 全部做完
 
 ### 其他跟行程壽命有關的設定
 
-- **worker 逾時**：gunicorn 的 `--timeout`（預設 30 秒）。同步 worker 處理一個請求超過這個時間，master 會殺掉它並重開，log 出現 `WORKER TIMEOUT`，客戶端通常看到 502。它是保護機制，不是用來容忍慢請求的。
+- **worker 逾時**：gunicorn 的 `--timeout` 觸發 `WORKER TIMEOUT` 時，客戶端通常看到 502。它是保護機制，不是用來容忍慢請求的。
 - **定期回收 worker**：`--max-requests 1000 --max-requests-jitter 100`，每個 worker 處理一定數量的請求後重開，抑制緩慢的記憶體洩漏；jitter 讓 worker 不會同時重開。這是止痛藥，洩漏本身還是要找。
-- **keep-alive**：應用伺服器對閒置連線的保留時間（uvicorn `--timeout-keep-alive` 預設 5 秒、gunicorn `--keep-alive` 預設 2 秒）。前面有負載平衡器時，它的閒置逾時通常比這長，負載平衡器可能把請求送進一條剛被後端關掉的連線，造成零星的 502。原則是後端的 keep-alive 比前面代理的閒置逾時長，見 [負載平衡](#/skill/load-balancing)。
+- **keep-alive**：應用伺服器對閒置連線的保留時間（uvicorn `--timeout-keep-alive` 預設 5 秒、gunicorn `--keep-alive` 預設 2 秒）。前面有負載平衡器時，它的閒置逾時通常比這長，會有零星的 502；後端的 keep-alive 要調得比前面代理的閒置逾時長，原因見 [負載平衡](#/skill/load-balancing)。
 
 ## 健康檢查：`/health` 與 `/ready`
 
@@ -296,15 +294,13 @@ gunicorn 的訊號：`TERM` 優雅關機、`INT` / `QUIT` 快速關機、`HUP` �
 
 **在容器裡**：容器平台（Docker 的 restart policy、compose、Kubernetes）就是行程管理員。容器裡只跑**一個主要的應用伺服器行程**，不要再塞 systemd 或 supervisord；要多個 worker，由應用伺服器自己 fork；要更多容量，加容器副本。log 寫 stdout、由平台收集。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| `[CRITICAL] WORKER TIMEOUT (pid:2481)` | 同步 worker 處理單一請求超過 `--timeout` | 找慢的請求（慢查詢、沒設逾時的外部呼叫）；長工作改背景執行 |
 | `Worker (pid:2481) was sent SIGKILL! Perhaps out of memory?` | worker 被強制殺掉，多半是記憶體超過上限 | 量每個 worker 的 RSS，減少 worker 數或修記憶體使用 |
 | `[ERROR] Connection in use: ('0.0.0.0', 8000)` | gunicorn 要聽的埠已被占用 | `ss -ltnp` 找出占用者；常見是舊的行程沒停乾淨 |
 | `[Errno 98] error while attempting to bind on address ('0.0.0.0', 8000): address already in use` | uvicorn 的同一種錯誤 | 同上 |
-| `FATAL:  sorry, too many clients already` | 所有副本的連線總數超過資料庫的 `max_connections` | 重算 worker × 連線池 × 副本；縮小連線池或加連線池代理 |
 | `QueuePool limit of size 5 overflow 10 reached, connection timed out, timeout 30.00` | SQLAlchemy：這個 worker 的連線都在用，等不到 | 找沒歸還連線的地方（交易太長、沒關 session）；確認並行量 |
 | 部署時固定出現一陣 502 | 行程在負載平衡器知道前就停了，或被 SIGKILL 中斷 | 用 exec form 收 SIGTERM、寬限期由內而外遞增、停止前先等移除生效 |
 | 零星、難重現的 502，log 有 `upstream prematurely closed connection` | 前面代理重用了被後端關掉的 keep-alive 連線 | 後端的 keep-alive 調得比代理的閒置逾時長 |

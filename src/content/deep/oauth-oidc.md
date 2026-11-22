@@ -109,7 +109,7 @@ Cache-Control: no-store
 
 ### scope：要多少給多少
 
-`scope` 是空白分隔的字串，代表 client 要求的權限，例如 `openid email contacts.readonly`。授權伺服器可能只核准一部分，token 回應裡的 `scope` 才是實際拿到的。原則：
+`scope` 是空白分隔的字串，代表 client 要求的權限，例如 `openid email contacts.readonly`。授權伺服器可能只核准一部分，token 回應裡的 `scope` 才是實際拿到的。
 
 - 只要求現在需要的，之後需要更多再要（incremental authorization），同意畫面越短，使用者越願意按同意。
 - Resource Server 要檢查 token 的 scope 涵蓋這個操作，不足時回 `403`，並在 `WWW-Authenticate` 帶 `error="insufficient_scope"`（RFC 6750）。
@@ -196,7 +196,7 @@ ID token 另外三項檢查：`aud` 有多個值時，`azp` 要等於自己的 `
 
 ### 用什麼當使用者識別碼
 
-`sub` 在同一個提供者內唯一且不會重新指派；email 會改、可能被別人註冊、不同提供者之間更沒有保證。開頭的第二個問題就是用 email 當識別碼造成的。要用 email 做「既有帳號連結」時，至少要求 `email_verified` 為 `true`，而且只信任你確定會驗證 email 的提供者；更保守的做法是要求使用者先用原本的方式登入，再手動連結。
+`sub` 在同一個提供者內唯一且不會重新指派；email 會改、可能被別人註冊、不同提供者之間更沒有保證。要用 email 做「既有帳號連結」時，至少要求 `email_verified` 為 `true`，而且只信任你確定會驗證 email 的提供者；更保守的做法是要求使用者先用原本的方式登入，再手動連結。
 
 ### access token 和 ID token 不要混用
 
@@ -209,7 +209,7 @@ ID token 另外三項檢查：`aud` 有多個值時，`azp` 要等於自己的 `
 
 ## 實際程式：模擬授權伺服器與 client 的 callback
 
-下面用 Python 標準函式庫寫一個極小的授權伺服器與 client，跑一次正常流程，再跑四種會失敗的情況。為了專注在流程，ID token 在這裡用字典代替（真實環境要驗 JWT 簽章，見 [JWT 解剖](#/skill/jwt)）。
+用 Python 標準函式庫寫一個極小的授權伺服器與 client，跑一次正常流程與四種會失敗的情況。ID token 用字典代替（真實環境要驗 JWT 簽章，見 [JWT 解剖](#/skill/jwt)）。
 
 ```python run
 import secrets, hashlib, base64
@@ -299,7 +299,7 @@ attempt("redirect_uri 不一致", lambda: callback(s4, back4, redirect_uri="http
 attempt("未註冊的 redirect_uri", lambda: authorize(**{**start_login({}), "redirect_uri": "https://evil.example.net/cb"}, user="alice"))
 ```
 
-第 3 個案例在 state 那一關就被擋下；就算 client 忘了檢查 state，攻擊者的 code 綁的是攻擊者的 `code_challenge`，受害者 session 裡的 verifier 也換不到 token。
+第 3 個案例在 state 那一關就被擋下；就算 client 忘了檢查 state，PKCE 也會擋下（原因見 state 那一節）。
 
 實務上 client 端不要自己寫這些：用經過認證的 OIDC client 函式庫（OpenID Foundation 有列出通過認證的實作），它會處理 discovery、JWKS 快取、ID token 驗證。自己要負責的是：設定正確的 `redirect_uri`、把 state / nonce / verifier 存在伺服器端 session、拿到 `(iss, sub)` 之後建立自己的 session。
 

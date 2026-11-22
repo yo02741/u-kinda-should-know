@@ -125,7 +125,7 @@ grep -rnE "as any|: any|@ts-ignore|@ts-expect-error" src/   # 找被壓掉的錯
 ```
 
 - create-vite 的 Vue + TS 範本把檢查放在建置指令裡：`"build": "vue-tsc -b && vite build"`。
-- `interface` 在執行時不存在，`x instanceof Appointment` 會得到 `TS2693: 'Appointment' only refers to a type, but is being used as a value here.`。
+- `interface` 在執行時不存在，把它當成值用（`x instanceof Appointment`、當參數傳）會得到 `TS2693: 'Appointment' only refers to a type, but is being used as a value here.`；改用欄位判斷，例如 `'status' in x`。
 - API 回應的形狀不會被自動檢查。寫了 `as Appointment[]`，伺服器回了別的東西，執行時照樣跑下去，錯在更後面才出現。
 
 ## 註記與推論
@@ -144,11 +144,11 @@ const list = [1, 2]    // 推論成 number[]
 
 ## `interface` 與 `type`
 
-兩者都能描述物件的形狀，Vue 的 `defineProps<…>()` 兩種都接受。差別：
+兩者都能描述物件的形狀，Vue 的 `defineProps<…>()` 兩種都接受。
 
 - `type` 可以替任何型別取名字，包括字串 literal 的 union、tuple、函式型別；`interface` 只描述物件。
 - 擴充：`interface Staff extends Person { … }`；`type` 用 intersection `type Staff = Person & { … }`。
-- 同名的 `interface` 會自動合併成一個（第二個宣告補上的欄位變成必填）；同名的 `type` 會報 `TS2300: Duplicate identifier`。
+- 同名的 `interface` 會自動合併成一個（第二個宣告補上的欄位變成必填）；同名的 `type` 會報 `TS2300: Duplicate identifier`，要改名。
 
 多數團隊的慣例是物件形狀用 `interface`、union 與其他組合用 `type`，選一種一致就好。
 
@@ -212,7 +212,7 @@ const appointments = ref<Appointment[]>([])         // Vue 的 ref
 const pending: Promise<Appointment[]> = loadList()  // Promise 的結果型別
 ```
 
-常見的 `api.get<Appointment[]>('/api/appointments')` 也是泛型，但它只是「告訴編譯器回應是這個形狀」，沒有檢查。回應真的長那樣，要在執行時驗證（例如用 zod 這類驗證套件）。
+常見的 `api.get<Appointment[]>('/api/appointments')` 也是泛型，同樣只是「告訴編譯器回應是這個形狀」，沒有檢查；執行時怎麼驗證（例如用 zod 這類驗證套件）見 [型別只存在於編譯時](#/skill/ts-runtime-boundary)。
 
 ## `as`、`!`、`any` 與 `unknown`
 
@@ -223,7 +223,7 @@ const pending: Promise<Appointment[]> = loadList()  // Promise 的結果型別
 | `any` | 關掉這個值的所有檢查，而且會傳染給用到它的地方 | 沒有任何保護 |
 | `unknown` | 「還不知道是什麼」，用之前一定要先縮小範圍 | 和 `any` 一樣是任何值，但編譯器逼你檢查 |
 
-`as` 遇到明顯不相容的型別會擋下：`'12' as number` 報 `TS2352: Conversion of type 'string' to type 'number' may be a mistake…`；寫成 `'12' as unknown as number` 就過了，執行時仍然是字串。看到 `as unknown as` 或 `as any`，多半是有人在繞過型別檢查。
+`as` 遇到明顯不相容的型別會擋下：`'12' as number` 報 `TS2352: Conversion of type 'string' to type 'number' may be a mistake…`；寫成 `'12' as unknown as number` 就過了，執行時仍然是字串；需要轉換就用 `Number()`。看到 `as unknown as` 或 `as any`，多半是有人在繞過型別檢查。
 
 `unknown` 適合接住來源不確定的值，例如 `JSON.parse` 的結果：直接 `u.toUpperCase()` 會報 `TS18046: 'u' is of type 'unknown'.`，先 `typeof u === 'string'` 才能用。
 
@@ -244,18 +244,9 @@ TypeScript 7.0（npm 上的 7.0.2 在 2026 年 7 月發布）是用 Go 重寫的
 | 錯誤代碼與訊息 | 意思 | 修法 |
 |---|---|---|
 | `TS18048: 'x.note' is possibly 'undefined'.` | 選填欄位或 `find` 的結果可能不存在 | `?.`、`??` 或先判斷 |
-| `TS7006: Parameter 'x' implicitly has an 'any' type.` | 參數沒寫型別 | 補上型別 |
-| `TS2339: Property 'focus' does not exist on type 'Element'.` | 這個型別沒有這個屬性 | 用更精確的型別，例如 `querySelector<HTMLInputElement>` |
 | `TS2551: Property 'patientname' does not exist on type 'Appointment'. Did you mean 'patientName'?` | 欄位名稱打錯 | 照建議改 |
-| `TS2352: Conversion of type 'string' to type 'number' may be a mistake…` | `as` 的兩個型別不相容 | 需要轉換就用 `Number()`，不要改成 `as unknown as` |
-| `TS2693: 'Appointment' only refers to a type, but is being used as a value here.` | 把型別當成執行時的值（`instanceof`、當參數傳） | 改用欄位判斷，例如 `'status' in x` |
-| `TS18046: 'u' is of type 'unknown'.` | `unknown` 沒縮小範圍就使用 | 先 `typeof` 或用驗證函式 |
-| `TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled.` | 用了 `enum` 這類執行時還留著的語法 | 改成字串 literal 的 union |
-| `TS2300: Duplicate identifier 'Patient'.` | 同名的 `type` 宣告了兩次 | 改名，或改用會合併的 `interface` |
 
 型別不相容的 `TS2322` 最常見，訊息會列出兩邊的型別，例如 `Type 'string' is not assignable to type 'number'.`。目標型別是 union 時，TypeScript 6 與 7 列出成員的順序可能不同，比對 CI 輸出時不要依賴順序。
-
-最容易漏掉的錯沒有訊息：`!`、`as`、`any` 讓編譯通過，問題留到執行時。審 AI 的改動時，這三個要一個一個看。
 
 ## 動手
 

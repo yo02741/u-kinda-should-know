@@ -78,9 +78,7 @@ export default defineConfig({
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | `Could not resolve "./components/button.vue" from "src/App.vue"`（只在 CI 出現） | import 路徑的大小寫和檔名不同，macOS 與 Windows 不分大小寫 | 路徑照檔名寫；CI 用 Linux 跑 build |
-
 | 設定了 vendor 切分，建置結果沒有 vendor chunk | Vite 6 專案寫了 Vite 8 的 `rolldownOptions`，被忽略 | 照安裝的版本寫設定 |
-
 | 正式環境用 `vite preview`，快取與 404 都不對 | preview 不是正式環境的伺服器 | 用 nginx、CDN 或其他靜態檔伺服器 |
 
 :::stop 讀到這裡可以先停：會分辨 `vite`、`vite build`、`vite preview` 各做什麼，寫出最小的 `vite.config.js`。後面的依賴預打包、HMR、preview 與正式環境的差別、Vite 6 與 8 的對照、建置輸出與錯誤訊息表，在存檔後整頁重載、升級主版本或 CI 建置失敗時再回來讀。
@@ -185,9 +183,7 @@ dist/assets/vendor-C8Rcc4dC.js    86.58 kB │ gzip: 33.61 kB
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `[plugin:vite:import-analysis] Failed to resolve import "…" from "src/…". Does the file exist?` | dev server 找不到 import 的檔案或套件：路徑打錯、套件沒安裝 | 檢查路徑；`npm ls <套件>` 確認有裝 |
-
 | Vite 8 建置失敗：`TypeError: manualChunks is not a function`，前面有 `Invalid type: Expected Function but received Object` | 用了 Rollup 的物件寫法 `manualChunks: { vendor: [...] }` | 改用 `codeSplitting.groups` |
 | `Port 5173 is in use, trying another one...` | 另一個 dev server 還開著 | 關掉它，或用 `--port`；需要固定埠時加 `--strictPort` |
 | 存檔後整頁重新載入，表單的內容不見 | 改到的檔案沒有 HMR 邊界（例如 `main.js`、被很多地方 import 的設定檔） | 正常行為；常改的值放進元件或 store |

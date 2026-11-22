@@ -105,7 +105,7 @@ MCP server 收到每一個請求都要依序檢查：
 
 ## 角色：MCP server 是受保護資源
 
-MCP 規範的 Authorization 章節（[modelcontextprotocol.io](https://modelcontextprotocol.io) 的 specification）以 OAuth 2.1 為基礎，把角色對應成這樣：
+MCP 規範的 Authorization 章節（[modelcontextprotocol.io](https://modelcontextprotocol.io) 的 specification）把角色對應成這樣：
 
 | OAuth 角色 | 在 MCP 裡是誰 | 例子 |
 |---|---|---|
@@ -114,17 +114,11 @@ MCP 規範的 Authorization 章節（[modelcontextprotocol.io](https://modelcont
 | Authorization Server | 簽發 token 的身分系統 | 公司 IdP 或專用授權伺服器 |
 | Resource Owner | 使用者 | 在瀏覽器上按「同意」的人 |
 
-幾個先講清楚的前提：
-
 - 授權在 MCP 裡是選用的；規範的授權流程是針對 **HTTP 傳輸**。用 stdio 在本機啟動的 MCP server 不走這套流程，憑證通常由環境提供（這時 token 怎麼存，見 [CLI 與 Agent 的 token 存哪裡](#/skill/cli-token-storage)）。
 - MCP client 多半是**公開客戶端**：裝在使用者電腦上，藏不住 client secret，所以授權碼流程一定要搭配 PKCE（細節見 [Device Code、PKCE、Client Credentials](#/skill/oauth-device-pkce)）。
 - 規範會隨版本調整細節（例如 client 註冊的方式）。下面講的是穩定的骨架；實作時以官方最新版為準。
 
 ## 發現流程逐步：metadata、client 註冊、授權請求
-
-### ① ② 被拒絕，同時拿到線索
-
-上面那個 401 的 `resource_metadata` 參數由 RFC 9728 定義，指向這個受保護資源的 metadata。這個 401 是整條鏈的起點。
 
 ### ③ 受保護資源 metadata：我信任哪個授權伺服器
 
@@ -142,7 +136,7 @@ Host: tickets.example.com
 }
 ```
 
-`resource` 是這個 MCP server 的**資源識別碼**，後面申請 token 時要原封不動放進 `resource` 參數。client 要確認它和自己連的網址相符，避免被別的 server 冒用身分。
+`resource` 的值，後面申請 token 時要原封不動放進 `resource` 參數。client 要確認它和自己連的網址相符，避免被別的 server 冒用身分。
 
 ### ④ 授權伺服器 metadata：去哪登入、去哪換 token
 
@@ -164,7 +158,7 @@ Host: auth.example.com
 }
 ```
 
-RFC 8414 定義了這份文件的位置與欄位。client 從這裡拿到所有端點，不需要寫死；`code_challenge_methods_supported` 裡有 `S256`，代表支援 PKCE。
+RFC 8414 定義了這份文件的位置與欄位。`code_challenge_methods_supported` 裡有 `S256`，代表支援 PKCE。
 
 ### ⑤ client 註冊
 
@@ -193,7 +187,7 @@ Content-Type: application/json
 
 ### ⑥ ⑦ 授權碼 + PKCE，加上 resource
 
-授權請求與 token 請求都要帶 `resource` 參數（RFC 8707 Resource Indicators），值就是第 ③ 步拿到的資源識別碼：
+`resource` 參數（RFC 8707 Resource Indicators）的值就是第 ③ 步拿到的資源識別碼：
 
 ```http
 GET /authorize?response_type=code
@@ -222,10 +216,9 @@ grant_type=authorization_code
 
 授權伺服器把使用者導回 `redirect_uri` 時，回應除了 `code` 與 `state`，可能還有 `iss`（RFC 9207）。2026-07-28 版要求 client 有收到 `iss` 就跟第 ④ 步記下的 issuer 逐字比對，不符就不拿這個 code 去換 token；這擋的是「授權碼其實來自另一個授權伺服器」的混淆攻擊。
 
-`resource` 的作用是讓授權伺服器把 token 的 `aud` 設成這個 MCP server。拿到的 token 只對 `tickets.example.com/mcp` 有效；開頭那個「天氣 server 的 token 打開工單 server」的事件，靠的就是這一步加上 server 端的 audience 檢查來擋。
+拿到的 token 只對 `tickets.example.com/mcp` 有效；開頭那個「天氣 server 的 token 打開工單 server」的事件，靠的就是這一步加上 server 端的 audience 檢查來擋。
 
 ## JWKS 與金鑰輪替
-
 
 授權伺服器把簽章用的公鑰以 JWK Set（RFC 7517）公布在 `jwks_uri`：
 
@@ -241,19 +234,11 @@ grant_type=authorization_code
 }
 ```
 
-JWT header 裡的 `kid` 指出用哪一把簽的。輪替的順序是：
-
-1. 授權伺服器產生新金鑰 `2026-11`，**先**加進 JWKS，但還不用它簽。
-2. 等所有資源伺服器的 JWKS 快取都更新過（快取時間過了）。
-3. 開始用 `2026-11` 簽新 token。
-4. 舊 token 全部過期之後，才把 `2026-10` 從 JWKS 移除。
-
-資源伺服器這一側：JWKS 要快取（不能每個請求都去抓），遇到不認得的 `kid` 時重新抓一次，並且限制重抓頻率，否則攻擊者送一堆亂編 `kid` 的 token 就能讓你一直打授權伺服器。
+JWT header 裡的 `kid` 指出用哪一把簽的。輪替時新金鑰 `2026-11` **先**加進 JWKS，等所有資源伺服器的 JWKS 快取都更新過（快取時間過了）才開始用它簽；舊 token 全部過期之後，才把 `2026-10` 移除。各階段的對照表，以及資源伺服器快取 JWKS、遇到不認得的 `kid` 重抓一次並限流的做法，見 [JWT 解剖](#/skill/jwt)。
 
 如果授權伺服器發的是不透明的 token（隨機字串，不是 JWT），資源伺服器無法自己驗，要呼叫授權伺服器的 introspection 端點（RFC 7662）查詢，檢查項目一樣：有效、`aud`、`scope`。
 
 ## 401 與 403 的錯誤回應
-
 
 ```http
 HTTP/1.1 401 Unauthorized
@@ -282,9 +267,7 @@ MCP client ──Bearer T（aud=tickets.example.com/mcp）──▶ MCP server �
 - **稽核分不清是誰**。下游看到的是使用者的 token，不知道請求是經過某個 MCP server、由 agent 發出的。
 - **權限混淆**（confused deputy）。MCP server 用使用者給它的憑證去做事，沒有自己的身分，出事時無法限縮。
 
-正確的做法有兩種：
-
-| 做法 | 下游看到的身分 | 適合 |
+| 正確的做法 | 下游看到的身分 | 適合 |
 |---|---|---|
 | MCP server 用**自己的憑證**（例如 Client Credentials 拿的服務 token），自己在應用層記錄「代表哪個使用者」 | MCP server 這個服務 | 下游不需要知道是哪個使用者，或由 MCP server 負責使用者層級的授權 |
 | **Token Exchange**（RFC 8693）：MCP server 拿收到的 token 向授權伺服器換一個 `aud` 是下游的新 token | 使用者，經由 MCP server | 下游需要依使用者授權，而且要能分辨中間經過誰 |
@@ -308,7 +291,7 @@ MCP server 用自己的 client 身分認證（`Authorization: Basic`），授權
 
 ## 實際程式：用 JWKS 驗一個 ES256 token
 
-下面在瀏覽器的 WebCrypto 裡完整跑一次：授權伺服器產生 ES256 金鑰、公布 JWKS、簽 token；MCP server 用 JWKS 驗證，並依序檢查 `alg`、`kid`、簽章、`iss`、`aud`、`exp`、`scope`。最後模擬一次金鑰輪替。
+在瀏覽器的 WebCrypto 裡完整跑一次：授權伺服器產生 ES256 金鑰、公布 JWKS、簽 token；MCP server 用 JWKS 驗證，並依序檢查 `alg`、`kid`、簽章、`iss`、`aud`、`exp`、`scope`。最後模擬一次金鑰輪替。
 
 ```js run
 const enc = new TextEncoder(), dec = new TextDecoder()
@@ -385,8 +368,6 @@ try { await verify(rotated, 'tickets.write', now); console.log('✔ 新金鑰簽
 | token 端點回 `{"error":"invalid_target"}` | `resource` 值不是授權伺服器認得的資源（RFC 8707 定義的錯誤碼） | 用受保護資源 metadata 裡的 `resource` 原值；注意結尾斜線、大小寫、路徑都要一致 |
 | 某個時間點起所有請求都 `invalid_token`，log 寫找不到 `kid` | 授權伺服器輪替金鑰，資源伺服器的 JWKS 快取沒更新、或不支援未知 `kid` 時重抓 | 實作「未知 kid 重抓一次」；授權伺服器要先公布再使用新金鑰 |
 | 偶發的「token 尚未生效」或「已過期」 | 機器時鐘不同步，`nbf`、`iat`、`exp` 判斷錯 | 主機跑 NTP；驗證時給幾十秒的容許誤差，不要給到幾分鐘 |
-| 403 `insufficient_scope` | token 沒有這個工具要的 scope | client 依 `WWW-Authenticate` 的 `scope` 重新授權；server 端回應要帶出需要的 scope |
-| 下游 API 收到使用者的 MCP token | token passthrough | 改用 MCP server 自己的憑證或 Token Exchange |
 
 還有一個不會報錯的設計錯誤：**一個 MCP server 接受 audience 是「整個公司」的 token**（例如 `aud` 寫成 `https://example.com`）。這等於所有服務共用一種 token，任何一個服務外洩，全部都能被打。每個 MCP server 都該有自己的資源識別碼。
 

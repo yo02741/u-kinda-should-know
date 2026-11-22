@@ -98,7 +98,6 @@ Baseline 標示在 MDN 每個功能頁上方：
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
 | `<dialog>` 開了，背景還點得到、Esc 沒反應 | 用 `dialog.show()` 或 `open` 屬性開啟，不是 modal | 改用 `showModal()`；Console 執行 `$0.matches(':modal')` 確認 |
-
 | `TypeError: scheduler.yield is not a function`，只在 Safari | 把 Limited availability 的 API 當成唯一寫法 | 功能偵測，退回 `setTimeout` |
 
 :::stop 讀到這裡可以先停：會用 Baseline 判斷一個功能能不能直接用，把自己拼的 modal 換成原生 `<dialog>`。後面是舊寫法與現在寫法的完整對照表、讓 agent 先查再寫的設定、`structuredClone` 與錯誤訊息表，審 AI 產出或替 coding agent 定規範時再回來查。
@@ -107,13 +106,11 @@ Baseline 標示在 MDN 每個功能頁上方：
 
 `<dialog>` 在 2022 年 3 月就已經是主要瀏覽器都支援的功能，到 2024 年 9 月變成 Baseline Widely available。模型從大量既有程式學習，網路上的 modal 教學與元件庫原始碼，多數寫在 `<dialog>` 普及之前。Modern Web Guidance 的 README 也直接寫明這一點：訓練資料裡舊寫法的量遠多於新寫法，模型就算知道某個 API 存在，也常常用錯或不用。
 
-AI 被要求「用新的寫法」時，可能把只有 Chrome 支援的 API 當成唯一的寫法，結果在 Safari 上直接 `TypeError`。過時與太新是同一個問題的兩面：程式沒有對照專案實際要支援的瀏覽器。
+AI 被要求「用新的寫法」時，可能把只有 Chrome 支援的 API 當成唯一的寫法，結果在 Safari 上直接 `TypeError`。兩種情況都是程式沒有對照專案實際要支援的瀏覽器。
 
 ## Baseline 的來源與專案的瀏覽器目標
 
-Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，web-features 的 `data.json` 可以直接查。
-
-專案規範寫「瀏覽器目標：Baseline Widely available」時，Widely available 的功能直接用；寫「Baseline 2024」時，2024 年以前變成 Newly available 的功能都在範圍內。院內有舊電腦時，Baseline 不夠，要寫出具體版本（見 [瀏覽器支援與 Baseline](#/skill/browser-support)）。
+Baseline 的狀態可以直接查 web-features 的 `data.json`。專案規範寫「Baseline 2024」時，2024 年以前變成 Newly available 的功能都在範圍內。院內有舊電腦時，Baseline 不夠，要寫出具體版本（見 [瀏覽器支援與 Baseline](#/skill/browser-support)）。
 
 ## 對照表：舊寫法與現在的寫法
 
@@ -172,8 +169,6 @@ Baseline 是 W3C WebDX 社群小組的 web-features 計畫訂的標示，web-fea
 | `el.innerHTML = 使用者輸入` | 純文字用 `textContent`；一定要放 HTML 時用 DOMPurify 消毒，支援的瀏覽器用 Sanitizer API 的 `setHTML()` | Sanitizer API 是 Limited（Chrome 146、Firefox 148 起） | `sanitize-untrusted-html` |
 | 靠 code review 抓 `innerHTML` | CSP 的 `require-trusted-types-for 'script'` 加 Trusted Types 政策 | Newly（2026-02） | `trusted-types` |
 | `event.origin.includes('example.org')` 判斷訊息來源 | `new URL(...).origin` 完整比對，先排除 `'null'` | `URL` Widely | `validate-origins` |
-
-表裡的「現在的寫法」不一定比較短，但都把行為交給瀏覽器：焦點、inert、捲動、排程由瀏覽器處理，自己的程式少了一批要維護、要測的分支。
 
 Invoker Commands（`<button command="show-modal" commandfor="notice">`）連必讀範例裡那一行 JavaScript 都可以省，但它是 Newly available（2025-12），目標是 Widely available 時要功能偵測並載入 polyfill，或維持 `showModal()`。
 
@@ -267,10 +262,7 @@ JSON 的版本把 `Date` 變成字串、`Set` 變成空物件；`structuredClone
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-
 | `<dialog>` 開著時 axe 或 DevTools 顯示重複的 dialog 角色 | AI 在原生 `<dialog>` 上又加了 `role="dialog"`、`aria-modal="true"` | 拿掉兩個屬性 |
-| 開關 Dialog 時整頁左右跳一下 | 開啟時把 `body` 設成 `overflow: hidden`，捲軸消失 | 拿掉；用 `overscroll-behavior` 當加分寫法 |
-
 | `TypeError: Object.groupBy is not a function`，只在舊電腦 | 功能是 Widely available，但院內電腦的版本比 Baseline 舊 | 規範寫出具體版本；改寫或 polyfill（見 [瀏覽器支援與 Baseline](#/skill/browser-support)） |
 | `DataCloneError: … could not be cloned.` | `structuredClone` 的對象裡有函式、DOM 節點或 Vue 的 Proxy | 只拷貝資料；Vue 的響應式物件先用 `toRaw()` |
 | `npx modern-web-guidance` 一直沒有回應 | 沙箱沒放行網路，套件下載不到 | 先放行該指令的網路存取；離線時改查 MDN |

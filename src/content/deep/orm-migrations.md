@@ -28,7 +28,6 @@ ORM（Object-Relational Mapping）把資料表映射成類別、把列映射成�
 |---|---|
 | 映射（mapping） | `class Order` 對應 `orders` 表，`relationship()` 對應外鍵關係 |
 | Identity map | 同一個 session 裡，同一個主鍵只有一個 Python 物件；再取一次不一定再查 |
-
 | 延遲載入（lazy loading） | 關聯屬性第一次被讀取時才發 SELECT，N+1 的來源 |
 
 延遲載入**在迴圈裡**觸發才是問題。N 是多少要看關聯方向：`o.user` 是多對一，SQLAlchemy 發 SELECT 前先查 identity map，同一個使用者只查一次，50 張訂單來自 20 位使用者就是 1 + 20 句。一對多的 `user.orders` 每個使用者都得查一次，是 1 + N。
@@ -216,8 +215,6 @@ def get_session():
         yield session
 ```
 
-幾個容易誤會的地方：
-
 - **`flush` 不是 `commit`**：flush 把變更送進資料庫，只有同一個交易看得到；commit 才讓別人看得到。
 - **`expire_on_commit` 預設是 True**：commit 之後屬性全部過期，下次讀取會再查資料庫；session 已經關了就會失敗。物件要拿到 session 外使用時，設成 False 或先轉成 dict / pydantic model。
 - **長壽的 session 是陷阱**：全域共用的 session 會一直握著舊交易的快照、identity map 越長越大、連線不歸還；它也不是執行緒安全的。
@@ -226,7 +223,7 @@ def get_session():
 
 ## 可安全上線的 migration
 
-在一張很大、很忙的表上執行 DDL，最大的風險不是執行多久，而是**鎖**。多數 `ALTER TABLE` 要拿 `ACCESS EXCLUSIVE` 鎖，這個鎖會擋住包括 SELECT 在內的所有操作。可以直接看到：
+在一張很大、很忙的表上執行 DDL，最大的風險不是執行多久，而是**鎖**。多數 `ALTER TABLE` 要拿 `ACCESS EXCLUSIVE` 鎖，這個鎖會擋住包括 SELECT 在內的所有操作：
 
 ```sql run
 -- 在交易裡做 DDL，然後看這張表上被拿了什麼鎖（ROLLBACK 之後一切復原）
@@ -252,7 +249,7 @@ ROLLBACK;
 | 加欄位帶 DEFAULT | PostgreSQL 11 起常數 DEFAULT 不重寫表；volatile 函數（如 `clock_timestamp()`）仍會重寫整張表 | 用常數 DEFAULT |
 | 欄位改成 NOT NULL | `SET NOT NULL` 要在 ACCESS EXCLUSIVE 鎖下掃整張表確認沒有 NULL | 先加 `CHECK (col IS NOT NULL) NOT VALID`，再 `VALIDATE CONSTRAINT`，最後 `SET NOT NULL`（PostgreSQL 12 起看到已驗證的 CHECK 就跳過掃描） |
 | 加外鍵 | 驗證既有資料時鎖住兩張表 | `ADD CONSTRAINT … NOT VALID`，修好髒資料後再 `VALIDATE CONSTRAINT` |
-| 加索引 | `CREATE INDEX` 期間擋住所有寫入 | `CREATE INDEX CONCURRENTLY`：不擋寫入，但較慢、不能在交易區塊內執行 |
+| 加索引 | `CREATE INDEX` 期間擋住所有寫入 | `CREATE INDEX CONCURRENTLY`（見「大表加索引」） |
 | 改欄位名、改型別 | 新舊程式碼同時在跑時，其中一方一定找不到欄位 | expand–contract（下面說明） |
 | 大量回填資料 | 一句 UPDATE 千萬列：長交易、大量 WAL、表膨脹 | 分批（每批幾千列）、每批獨立 commit |
 
@@ -260,7 +257,7 @@ ROLLBACK;
 
 ### 加一個必填欄位：nullable → 回填 → 約束
 
-下面在範例資料庫的 `users` 上加一個必填的 `display_name`，每一步在正式環境都是獨立的、可以中斷的步驟：
+在範例資料庫的 `users` 上加必填的 `display_name`；每一步在正式環境都是獨立、可以中斷的步驟：
 
 ```sql run
 -- 步驟 1：加可為 NULL 的欄位（只改目錄，瞬間完成）
@@ -336,7 +333,7 @@ def downgrade() -> None:
 
 ## Migration 與部署順序
 
-規則只有一條：**每一次 migration 都要跟正在跑的程式碼相容**。實務上的順序：
+**每一次 migration 都要跟正在跑的程式碼相容**：
 
 1. **加東西（expand）先跑 migration，再部署程式**。新欄位、新表、新索引先存在，舊程式不受影響，新程式上線時就用得到。
 2. **刪東西（contract）先部署程式，再跑 migration**。先讓程式完全不用某個欄位，下一次部署才刪它。
@@ -358,11 +355,7 @@ def downgrade() -> None:
 | `CREATE INDEX CONCURRENTLY cannot run inside a transaction block` | PostgreSQL | 在交易裡（包含 Alembic 預設的 migration 交易）執行 CONCURRENTLY | Alembic 用 `autocommit_block()` |
 | `canceling statement due to lock timeout` | PostgreSQL | `lock_timeout` 內拿不到鎖 | 這是設計好的保護；找出擋住的長查詢（`pg_stat_activity`），離峰再試 |
 
-沒有錯誤訊息但同樣常見的情況：
-
-- **N+1 只在資料多時才慢**，要在測試裡數查詢次數才抓得到回歸。
-- **autogenerate 把改名變成刪欄 + 加欄**，沒 review 就套用，資料直接消失。
-- **staging 很快、正式環境很久**：表的大小差好幾個量級，回填與驗證時間也是。
+沒有錯誤訊息的情況：staging 很快、正式環境很久，因為表的大小差好幾個量級，回填與驗證時間也是。
 
 ## 動手
 

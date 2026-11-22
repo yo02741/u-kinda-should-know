@@ -174,7 +174,7 @@ for title, selector in cases:
 [導入 Kubernetes 前要準備什麼](#/skill/k8s-readiness) 講過各物件的角色；探針、資源與設定注入在 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
 
 - **label**：貼在物件上的鍵值對，本身沒有意義，由使用的人決定。
-- **`selector` 與 `template.metadata.labels`**：`apps/v1` 要求 selector 必填，而且 template 的 label 必須符合 selector，否則套用時被拒絕。selector 建立後不可變更；要改只能刪掉 Deployment 重建。
+- **`selector`**：`apps/v1` 要求必填；建立後不可變更，要改只能刪掉 Deployment 重建。
 - **`template`**：只有這一段的內容變了（image、環境變數、label、資源設定等），Deployment 才會建立新的 ReplicaSet 開始滾動更新。只改 `replicas` 是擴縮，不是更新。
 - **`image` 用固定 tag**：`latest` 有兩個問題。第一，registry 上的 `latest` 換了內容，manifest 一個字都沒變，`kubectl apply` 回 `unchanged`，不會有任何更新；之後某個 Pod 因故重建才拉到新內容，同一個 Deployment 裡就跑著不同版本。第二，回退時沒有「上一個 tag」可以指。tag 與 digest 的差別見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
 - **`containerPort`**：主要是說明用途，沒寫也不會讓 port 連不到；但寫了並取名字（`name: http`），Service 的 `targetPort` 就可以用名字指過來，之後改 port 號只要改一個地方。
@@ -197,7 +197,7 @@ for title, selector in cases:
 
 另一種策略是 `type: Recreate`：先把舊的全部關掉，再開新的，中間會停機。只在新舊版本不能同時存在時使用。換版方式之間的取捨見 [部署策略與資料庫遷移](#/skill/cd-strategies)。
 
-下面的模擬把每一步的新舊副本數印出來。它簡化了真實的 controller：假設新 Pod 建立後下一步就通過 readiness、被刪的舊 Pod 立刻消失。
+模擬每一步的新舊副本數。它簡化了真實的 controller：假設新 Pod 建立後下一步就通過 readiness、被刪的舊 Pod 立刻消失。
 
 ```python run
 import math
@@ -286,7 +286,6 @@ spec:
 - **`ingressClassName`**：叢集裡要先有 Ingress controller，這個值要對到它的 class（`kubectl get ingressclass` 可以列出）。沒寫、或寫了一個不存在的 class，就沒有任何 controller 處理這份 Ingress，`kubectl get ingress` 的 `ADDRESS` 欄會一直是空的。
 - **`tls`**：憑證與私鑰放在 `kubernetes.io/tls` 型別的 Secret（鍵名是 `tls.crt` 與 `tls.key`），通常由 cert-manager 簽發與更新。憑證鏈的細節見 [HTTPS 憑證](#/skill/https-certificates)。
 - **`pathType: Prefix`** 以路徑的「段」比對：`/api` 符合 `/api` 與 `/api/v1`，不符合 `/apiv2`。`Exact` 要完全相同。
-- **`backend`** 只能指向**同一個 namespace** 的 Service。
 
 Ingress 這個 API（`networking.k8s.io/v1`）是正式版，但官方文件說明它已凍結，新功能加在 Gateway API。社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API；這類資訊變動快，選型前查專案目前的維護狀態。
 
@@ -348,17 +347,14 @@ kubectl rollout undo deployment/booking-api -n booking --to-revision=4
 
 ## 其他錯誤訊息
 
-訊息的確切文字依 kubectl 與 Kubernetes 版本而異，下面是類似的樣子：
-
 | 訊息或現象 | 原因 | 處理 |
 |---|---|---|
-| `spec.selector: Invalid value: …: field is immutable` | 想修改既有 Deployment 的 selector | selector 不能改；刪除後重建，或換一個名稱建新的 |
+| `spec.selector: Invalid value: …: field is immutable` | 想修改既有 Deployment 的 selector | 刪除後重建，或換一個名稱建新的 |
 | `no matches for kind "Ingress" in version "extensions/v1beta1"` | 用了已移除的舊 apiVersion（從舊文章複製來的範例） | 改成 `networking.k8s.io/v1`，並補上 `pathType` 與新的 `backend.service` 寫法 |
 | `error converting YAML to JSON: yaml: line 14: mapping values are not allowed in this context` | 縮排錯誤，或冒號後面少了空白 | 看訊息指出的行號與它的上一行 |
 | `namespaces "booking" not found` | namespace 還沒建立 | 先建立 namespace |
 | `unknown field "spec.template.spec.containers[0].imagePullpolicy"` | 欄位名稱拼錯（大小寫也算） | 用 `kubectl explain deployment.spec.template.spec.containers` 查正確的欄位名稱 |
 | `rollout status` 一直停在 `Waiting for deployment … rollout to finish` | 新版 Pod 起不來或 readiness 不通過 | 看新 Pod 的狀態與 Events；必要時 `rollout undo` |
-| Ingress 的 `ADDRESS` 一直是空的 | 沒有 controller 處理這個 class | 檢查 `ingressClassName` 與叢集裡的 IngressClass |
 
 ## 動手
 

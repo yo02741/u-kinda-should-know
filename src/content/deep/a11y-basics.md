@@ -127,16 +127,7 @@ button:focus-visible, input:focus-visible {
 
 `aria-label` 與 `aria-labelledby` 會蓋過元素原本的文字：按鈕寫著「送出」卻加了 `aria-label="submit"`，螢幕閱讀器念的是 submit。語音控制的使用者說「按送出」也點不到它。看得到的文字和名稱要一致。
 
-圖片的 `alt`：
-
-| 圖片 | `alt` |
-|---|---|
-| 傳達資訊（院區平面圖、看診流程圖） | 寫出圖片要傳達的內容，例如「門診大樓 2 樓，內科診間在電梯右側」 |
-| 純裝飾（背景插圖、分隔花紋） | `alt=""`：螢幕閱讀器直接跳過 |
-| 放在連結或按鈕裡、是唯一內容（Logo 連回首頁） | 寫出連結或按鈕的作用，例如「回到首頁」 |
-| 圖片旁邊已經有同樣的文字 | `alt=""`，避免念兩次 |
-
-完全沒寫 `alt` 和 `alt=""` 不一樣：沒寫時，部分螢幕閱讀器會念出檔名，例如「hero 底線 final 點 webp」。
+圖片的 `alt` 依用途寫（傳達資訊、純裝飾、連結或按鈕裡的唯一內容），對照表見 [圖片與媒體](#/skill/images-media)。圖片旁邊已經有同樣的文字時寫 `alt=""`，避免念兩次。完全沒寫 `alt` 和 `alt=""` 不一樣：沒寫時，部分螢幕閱讀器會念出檔名，例如「hero 底線 final 點 webp」。
 
 ## 鍵盤操作與焦點
 
@@ -150,7 +141,7 @@ button:focus-visible, input:focus-visible {
 | 方向鍵 | 在 radio 群組、選單、Tabs、日曆的格子之間移動 |
 | Esc | 關閉 Dialog、選單、Popover |
 
-原生的 `button`、`a href`、`input`、`select`、`textarea` 自動加入 Tab 順序、處理 Enter 與 Space。`div` 加 `@click` 這些都沒有。`tabindex` 的三種值：
+原生可聚焦的元素還有 `select`、`textarea`。`tabindex` 的三種值：
 
 | `tabindex` | 效果 | 用在哪裡 |
 |---|---|---|
@@ -171,13 +162,13 @@ button:focus-visible, input:focus-visible {
 | 非文字的元件與圖形：輸入框的邊框、焦點框、圖示、圖表的線 | 3:1 |
 | 停用的元件、純裝飾、Logo | 沒有要求 |
 
-另一條 A 等級的規定是不能只用顏色傳達資訊：錯誤欄位除了紅框還要有文字訊息，必填除了紅色星號還要有「（必填）」或在 label 裡說明，「可預約」與「額滿」除了綠紅兩色還要有文字或圖示。
+另一條 A 等級的規定是不能只用顏色傳達資訊：必填除了紅色星號還要有「（必填）」或在 label 裡說明，「可預約」與「額滿」除了綠紅兩色還要有文字或圖示。
 
 WCAG 2.2 另外新增了點擊目標的最小尺寸（2.5.8，AA）：可以點的目標至少 24×24 CSS px，或彼此之間留夠間距。
 
 ## 一段可以跑的對比計算
 
-下面照 WCAG 的公式計算幾組常見顏色的對比值，最後找出白底上最淺、仍然達到 4.5:1 的灰色：
+照 WCAG 的公式計算幾組常見顏色的對比值，再找出白底上最淺、仍然達到 4.5:1 的灰色：
 
 ```js run
 // WCAG 2.x 的相對亮度與對比值：(較亮 + 0.05) / (較暗 + 0.05)
@@ -215,13 +206,11 @@ for (let v = 0x99; v >= 0x60; v--) {
 }
 ```
 
-`#999999` 這類常見的 placeholder 顏色只有 2.85:1；白字紅底的錯誤 Badge 拿來放一般大小的字也不夠。公式裡 sRGB 的門檻值 `0.04045` 是 WCAG 2.x 勘誤後的數字，舊版文件寫 `0.03928`，兩者算出的結果幾乎相同。
-
-`.error` 的顏色是 `#b3261e`，算出來在白底上約 6.5:1。
+白字紅底的錯誤 Badge 拿來放一般大小的字不夠 4.5:1。公式裡 sRGB 的門檻值 `0.04045` 是 WCAG 2.x 勘誤後的數字，舊版文件寫 `0.03928`，兩者算出的結果幾乎相同。
 
 ## ARIA：補 HTML 沒有的東西
 
-ARIA 屬性只改變 accessibility tree 裡的資訊，不會替元素加上任何行為：`<div role="button">` 被念成「按鈕」，但 Tab 停不到、按 Enter 沒反應，要自己補 `tabindex="0"` 與按鍵處理。W3C 的 Using ARIA 文件把這件事列為第一條規則：能用原生 HTML 元素就不要用 ARIA。
+`<div role="button">` 被念成「按鈕」，但 Tab 停不到、按 Enter 沒反應，要自己補 `tabindex="0"` 與按鍵處理。「能用原生 HTML 元素就不要用 ARIA」是 W3C 的 Using ARIA 文件的第一條規則。
 
 ARIA 該用的地方是 HTML 沒有對應元素或屬性的狀態與關係：
 
@@ -239,7 +228,7 @@ ARIA 該用的地方是 HTML 沒有對應元素或屬性的狀態與關係：
 
 畫面上的內容改變時，螢幕閱讀器預設不會主動念。`role="status"`（等於 `aria-live="polite"`）會等目前的朗讀結束後念出新內容；`role="alert"`（`aria-live="assertive"`）會立刻打斷，用在需要馬上處理的錯誤。
 
-螢幕閱讀器監聽的是「已經存在的容器裡的內容變化」。容器和訊息同時插進 DOM，很多螢幕閱讀器不會念。所以容器要從頁面一開始就在，之後只改它的文字。
+螢幕閱讀器監聽的是「已經存在的容器裡的內容變化」。容器和訊息同時插進 DOM，很多螢幕閱讀器不會念。
 
 ## SPA 換頁時的焦點
 
@@ -263,7 +252,7 @@ router.afterEach(async (to, from) => {
 
 ## Lighthouse 的項目與其餘常見錯誤
 
-Lighthouse 的 Accessibility 類別由 axe-core 的規則產生，下表左欄是它列出的項目名稱：
+Lighthouse 的 Accessibility 類別由 axe-core 的規則產生：
 
 | Lighthouse 的項目或現象 | 原因 | 修法 |
 |---|---|---|
@@ -275,7 +264,6 @@ Lighthouse 的 Accessibility 類別由 axe-core 的規則產生，下表左欄�
 | `Some elements have a [tabindex] value greater than 0` | 用正數的 `tabindex` 調整順序 | 改成 `0`，順序靠 DOM 的位置 |
 | `<html> element does not have a [lang] attribute` | 沒有語言標示，螢幕閱讀器用錯的語音念 | `<html lang="zh-Hant-TW">` |
 | `Touch targets do not have sufficient size or spacing.` | 點擊目標太小或擠在一起 | 至少 24×24 CSS px，或拉開間距 |
-| 操作後螢幕閱讀器沒念出結果 | 訊息只在 Toast 裡，或 live region 和訊息同時插入 | 一直存在的 `role="status"` 容器 |
 | 換頁後螢幕閱讀器沒有反應 | SPA 換頁沒有移動焦點 | 換頁後聚焦 `h1` 並更新 `document.title` |
 
 Lighthouse 拿到 100 分，代表它檢查得到的規則都過了。焦點順序合不合理、替代文字對不對、念出來聽不聽得懂、自製元件的鍵盤操作，都在它的範圍之外。開頭的第 3 個問題它也沒有報：Lighthouse 用的 axe 規則把非空的 `placeholder` 當成欄位有名稱，對比檢查也不包含 placeholder 的文字。

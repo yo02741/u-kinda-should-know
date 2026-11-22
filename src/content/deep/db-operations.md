@@ -86,7 +86,7 @@ echo "還原花了 $(( $(date +%s) - start )) 秒"   # 這就是你的 RTO 下�
 
 PostgreSQL 為每個連線開一個後端程序（process），每個都要記憶體，排序或 hash 時還依 `work_mem` 再要更多；連線多到某個程度，程序切換與鎖競爭會讓整體吞吐量下降。`max_connections` 預設是 100，正式環境通常也只設到幾百。
 
-先看自己的資料庫目前的設定與連線狀態：
+目前的設定與連線狀態：
 
 ```sql run
 -- context 欄位說明改這個設定要做什麼：postmaster = 要重啟；sighup = reload 即可；user = 每個連線自己可以 SET
@@ -136,7 +136,7 @@ transaction mode 下，同一個用戶端的兩個交易可能跑在不同的資
 
 ## 慢查詢：先量再改
 
-優化從「哪條查詢總共花掉最多時間」開始，不是從「看起來最複雜的那條」開始。兩個工具：
+優化從「哪條查詢總共花掉最多時間」開始，不是從「看起來最複雜的那條」開始。
 
 - **`log_min_duration_statement`**：超過這個時間的查詢會連同參數寫進 log。設成 `500ms` 是常見起點；設成 `0` 會記錄所有查詢，量大時 log 本身就是負擔。可以 `ALTER SYSTEM SET` 後 reload 生效，不用重啟。
 - **`pg_stat_statements`**：擴充套件，把同形狀的查詢正規化（參數換成 `$1`）後累計次數與時間。要先加進 `shared_preload_libraries`（需要重啟），再 `CREATE EXTENSION`。
@@ -159,7 +159,7 @@ LIMIT 10;
 
 ## VACUUM、autovacuum 與表膨脹
 
-MVCC 下，`UPDATE` 寫出新版本、`DELETE` 只標記刪除，舊版本（dead tuple）留在資料檔裡，直到 `VACUUM` 確認沒有任何交易還需要它，才把空間標成可重用。原理見 [交易與隔離等級](#/skill/transactions)。可以直接看到一次全表 UPDATE 讓表變成兩倍大：
+MVCC 下，`UPDATE` 寫出新版本、`DELETE` 只標記刪除，舊版本（dead tuple）留在資料檔裡，直到 `VACUUM` 確認沒有任何交易還需要它，才把空間標成可重用。原理見 [交易與隔離等級](#/skill/transactions)。一次全表 UPDATE 讓表變成兩倍大：
 
 ```sql run
 -- 建一張 2 萬列的表，全部更新一次，看資料檔大小
@@ -170,8 +170,6 @@ SELECT '插入後' AS 時機, pg_size_pretty(pg_relation_size('events')) AS 資�
 UPDATE events SET payload = repeat('y', 100);   -- 每一列都寫出新版本，舊版本還在
 SELECT '全表 UPDATE 後' AS 時機, pg_size_pretty(pg_relation_size('events')) AS 資料檔, pg_size_pretty(pg_total_relation_size('events')) AS 含索引;
 ```
-
-幾個關鍵事實：
 
 - **一般的 `VACUUM` 不會把檔案變小**（只有檔案尾端整段空出來時才會截掉），它讓空間可以被之後的寫入重用。表不會無限長大，但也不會縮回去。
 - **`VACUUM FULL` 會重寫整張表、實際縮小檔案**，但全程拿 ACCESS EXCLUSIVE 鎖，大表上等於停機。不停機縮表常見的做法是第三方工具 pg_repack。
@@ -236,7 +234,7 @@ SELECT pg_size_pretty(pg_database_size(current_database())) AS 整個資料庫;
 | `FATAL: sorry, too many clients already` | 連線數達到 `max_connections` | 算連線預算、縮小各池上限、加 PgBouncer；不要直接把 `max_connections` 調到幾千 |
 | `pg_dump: error: aborting because of server version mismatch` | `pg_dump` 的版本比伺服器舊 | 用與伺服器相同或更新的 `pg_dump` |
 | `ERROR: role "app" does not exist`（還原時） | 備份裡沒有角色 | 先還原 `pg_dumpall --globals-only` 的輸出，或 `pg_restore --no-owner` |
-| `prepared statement "…" does not exist` | transaction mode 的 PgBouncer 上，prepared statement 建在另一條連線 | 升級 PgBouncer 並設定 `max_prepared_statements`，或在驅動關閉 prepared statement 快取 |
+| `prepared statement "…" does not exist` | transaction mode 的 PgBouncer 上，prepared statement 建在另一條連線 | 見「PgBouncer 與 transaction mode」的 prepared statement 一項 |
 | `canceling statement due to statement timeout` | 超過 `statement_timeout` | 這是保護；找出那條查詢優化，而不是把 timeout 拉長 |
 | `terminating connection due to idle-in-transaction timeout` | 交易開著不動超過 `idle_in_transaction_session_timeout` | 找出應用程式在交易中做了什麼（等外部 API、忘了 commit） |
 | `could not extend file "…": No space left on device` | 磁碟滿了 | 先看 WAL 目錄是否因歸檔失敗或廢棄的 replication slot 堆積 |

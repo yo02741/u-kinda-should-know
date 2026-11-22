@@ -87,7 +87,7 @@ X509v3 Subject Alternative Name:
 
 使用者在瀏覽器上幾乎看不出差別：主流瀏覽器在 2019 年前後陸續移除了網址列上顯示 EV 公司名稱的設計，現在三種憑證都只顯示一樣的鎖頭或網站資訊圖示，要點進憑證詳細資料才看得到組織名稱。
 
-所以「買 EV 比較安全」不成立：EV 不會讓連線更難被破解，也不會讓使用者更容易辨識假網站。選 OV / EV 的理由通常是組織政策、合約要求或採購規範，而不是技術上的安全性。
+EV 不會讓連線更難被破解，也不會讓使用者更容易辨識假網站。選 OV / EV 的理由通常是組織政策、合約要求或採購規範。
 
 ## SAN 與萬用字元：一張憑證涵蓋哪些名字
 
@@ -123,13 +123,10 @@ print("加上 apex 之後：", covered(san, "example.org"))
 
 （實際的比對規則還有細節，例如不允許 `*.org` 這種涵蓋整個頂級網域的寫法；這裡只示範段數與 apex。）
 
-萬用字元憑證的取捨：
-
 - **方便**：新增子網域不用重新申請。
 - **風險集中**：同一把私鑰要複製到每一台用它的伺服器，任何一台外洩，所有子網域都受影響；換憑證時也要每一台都換。
-- **無法同時給多層子網域**：`*.example.org` 不能用在 `his.dept.example.org`。
 
-私鑰散落在越多台機器，風險與換證工作量就越大。對外服務數量不多時，每個服務用自己的憑證，或用列了幾個名字的多網域（SAN）憑證，往往比較好管。
+對外服務數量不多時，每個服務用自己的憑證，或用列了幾個名字的多網域（SAN）憑證，往往比較好管。
 
 ### 公開憑證會被公開記錄
 
@@ -144,7 +141,7 @@ print("加上 apex 之後：", covered(san, "example.org"))
 | 適合 | 對外服務、使用者裝置無法統一管理的情境 | 只在內網使用的系統、伺服器之間的連線、內部 API |
 | 維運負擔 | 依 CA 規定的效期與驗證程序 | 自己保管根憑證私鑰、自己管撤銷與效期 |
 
-內部 CA 常見的實作有 Microsoft AD CS（Active Directory 憑證服務）、HashiCorp Vault 的 PKI、smallstep 的 step-ca 等。用內部 CA 的前提是**所有用戶端都裝了根憑證**：透過 AD 群組原則派送到 Windows 電腦很容易，但伺服器、容器、各種語言的執行環境（見「trust store 不只一份」的表）都要各自處理。例如在 Debian 系的容器 image 裡：
+內部 CA 常見的實作有 Microsoft AD CS（Active Directory 憑證服務）、HashiCorp Vault 的 PKI、smallstep 的 step-ca 等。用內部 CA 的前提是**所有用戶端都裝了根憑證**：AD 群組原則只派送到 Windows 電腦，其他執行環境（見「trust store 不只一份」的表）要各自處理。例如在 Debian 系的容器 image 裡：
 
 ```dockerfile
 # 把內部根憑證加進系統的 CA bundle
@@ -166,8 +163,6 @@ Let's Encrypt 是免費的公開 CA，只發 DV 憑證，透過 **ACME** 協定�
 | DNS-01 | 在 `_acme-challenge.<網域>` 加一筆 TXT 記錄 | 要能用 API 自動修改公開 DNS；可以發萬用字元憑證 |
 
 只在內網提供服務的系統，HTTP-01 行不通（CA 連不進來），但只要網域的公開 DNS 能自動更新，就能用 DNS-01 拿到公開憑證，前提是可以接受那個名字出現在 CT 日誌裡。
-
-和購買的憑證比較：
 
 | | Let's Encrypt | 購買的憑證 |
 |---|---|---|
@@ -192,8 +187,6 @@ Let's Encrypt 是免費的公開 CA，只發 DV 憑證，透過 **ACME** 協定�
 
 ## 續約：certbot 與獨立的到期監控
 
-用 certbot 搭配 nginx 的典型做法：
-
 ```bash
 # 申請（HTTP-01，certbot 會自動修改 nginx 設定來回應驗證）
 sudo certbot --nginx -d booking.example.org
@@ -214,7 +207,7 @@ sudo certbot renew --deploy-hook "systemctl reload nginx"
 | 驗證方式失效 | 防火牆規則改了，80 port 從外網連不到，HTTP-01 驗證失敗；DNS API 的金鑰過期，DNS-01 失敗 |
 | 通知寄到沒人看的信箱 | 不是每個 CA 都會寄到期提醒，Let's Encrypt 已停止寄送到期提醒信，必須自己監控 |
 
-監控要直接連到服務，讀出它實際送出的憑證到期日。Prometheus 的 blackbox_exporter 有 `probe_ssl_earliest_cert_expiry` 這個指標，可以設定「剩不到 14 天就告警」。沒有監控系統的話，一個每天跑的腳本也可以：
+Prometheus 的 blackbox_exporter 有 `probe_ssl_earliest_cert_expiry` 這個指標，可以設定「剩不到 14 天就告警」。沒有監控系統的話，一個每天跑的腳本也可以：
 
 ```bash
 # 實際連到服務，取出它送的憑證，檢查 30 天（2592000 秒）內會不會到期
@@ -318,7 +311,6 @@ cert-manager 解決了「拿到新憑證、放到正確位置」，但仍要監�
 |---|---|---|
 | 只有某些用戶端報錯，而且是內部系統 | 那些用戶端沒裝內部根憑證 | 在該執行環境的 trust store 加入根憑證 |
 | `no alternative certificate subject name matches` | SAN 沒有這個名字（常見是 apex 或多層子網域） | 重新申請，把需要的名字都列進 SAN |
-| nginx 啟動失敗：`key values mismatch` | 憑證與私鑰不是同一對 | 確認用的是同一次申請產生的私鑰 |
 | 用 `curl -k` 或關閉驗證「暫時」解決 | 憑證驗證被關掉，連線可被冒充 | 修正憑證本身，不要關驗證 |
 
 ## 動手

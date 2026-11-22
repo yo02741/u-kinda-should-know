@@ -203,7 +203,7 @@ Set-Cookie: __Host-sid=k8Jf2...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age
 
 ## 實際程式：模擬瀏覽器的 CORS 判斷
 
-下面這段 JavaScript 照著上面的規則，判斷一個請求要不要預檢、伺服器的回應能不能通過，並產生類似 Chrome 的錯誤訊息（訊息是依常見格式改寫的，實際措辭依瀏覽器版本可能不同）：
+判斷一個請求要不要預檢、伺服器的回應能不能通過，並產生類似 Chrome 的錯誤訊息（訊息是依常見格式改寫的，實際措辭依瀏覽器版本可能不同）：
 
 ```js run
 const SAFE_HEADERS = ['accept', 'accept-language', 'content-language', 'content-type']
@@ -281,8 +281,6 @@ for (const [name, cfg] of cases) console.log(`\n[${name}]\n` + browserFetch(req,
 ```
 
 ## 其他 CORS 錯誤訊息
-
-Chrome 的訊息都以 `Access to fetch at '…' from origin '…' has been blocked by CORS policy:` 開頭，後半段才是原因：
 
 | 訊息後半段 | 意思 | 怎麼修 |
 |---|---|---|

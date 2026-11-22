@@ -120,7 +120,6 @@ npm run build                # 抓建置錯誤
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | `Uncaught SyntaxError: The requested module '…' does not provide an export named 'useFetch'` | import 了不存在的 API | 刪掉，改用自己的 composable 或已安裝的套件 |
-
 | 離開頁面後計時器還在跑，沒有任何訊息 | `beforeDestroy`、`destroyed` 在 Vue 3 不會被呼叫 | 改用 `onBeforeUnmount`、`onUnmounted` |
 
 :::stop 讀到這裡可以先停：認得 AI 產出的 Vue 程式常見的九種錯，知道各由哪個工具抓，會跑 lint、型別檢查與建置三個指令。後面的成因、ESLint 設定、審查的固定順序與錯誤訊息對照，在要替專案設定 lint 或 Console 出現看不懂的警告時再回來查。
@@ -172,10 +171,8 @@ export default [
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `vue-tsc`：`Module '"vue"' has no exported member 'useFetch'.` | 同上，型別檢查階段就抓得到 | 同上 |
 | 畫面印出 `0`，Console 有 `[Vue warn]: Property "upper" was accessed during render but is not defined on instance.` | Vue 2 的 filter 語法（插值裡用直線符號接 filter 名稱）在 Vue 3 被當成位元 OR 運算 | 改成 `{{ upper(a.name) }}` |
-
 | `[Vue warn]: Set operation on key "date" failed: target is readonly.` | 重新指定 prop | 發事件給父元件 |
 | 編譯錯誤 `v-model cannot be used on a prop, because local prop bindings are not writable.` | `v-model` 綁在 prop 上 | 用 `defineModel()`，或 `:value` 加 `@input` 發事件 |
 | 父元件的陣列被改掉，沒有任何訊息 | 子元件 `props.items.splice()`、`push()` 改了 prop 的內部 | `vue/no-mutating-props` 抓得到；改成發事件 |

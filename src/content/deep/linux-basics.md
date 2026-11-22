@@ -148,8 +148,6 @@ kill -KILL 31877              # 最後手段
 
 ## 權限的常見組合、umask 與服務專屬帳號
 
-常見的組合：
-
 | 數字 | 字串 | 用在 |
 |---|---|---|
 | `600` | `rw-------` | 私鑰、只給服務自己讀的秘密檔 |
@@ -220,7 +218,7 @@ systemctl cat orders-api                # 看 systemd 實際採用的 unit 內�
 sudo systemctl edit orders-api          # 建覆寫檔（drop-in），不直接改套件提供的原檔
 ```
 
-`Restart=on-failure` 加上 `RestartSec` 讓服務當掉後自動回來。但如果短時間內一直失敗，systemd 會停止重試，狀態裡出現 `Start request repeated too quickly.`。這時是程式本身有問題（設定錯、埠被占用），要看 log，再按一次 restart 沒有用。修好後先 `sudo systemctl reset-failed orders-api` 清掉計數。
+`Restart=on-failure` 加上 `RestartSec` 讓服務當掉後自動回來。但如果短時間內一直失敗，systemd 會停止重試，狀態裡出現 `Start request repeated too quickly.`。這時是程式本身有問題（設定錯、埠被占用），要用 `journalctl -u` 找第一次失敗的原因，再按一次 restart 沒有用。修好後先 `sudo systemctl reset-failed orders-api` 清掉計數。
 
 ## log 在哪：journalctl
 
@@ -284,7 +282,7 @@ sudo du -sh /var/log/* | sort -h | tail
 sudo lsof +L1                    # 已經被刪掉、但還被行程開著的檔案：空間要等行程關檔或重啟才會釋放
 ```
 
-最後一點：刪掉一個正在被寫入的 10 GB log 檔，`df` 的使用率不會下降，因為寫入它的行程還握著那個檔案。正確做法是讓程式重新開檔（logrotate 的 `postrotate`、對 nginx 送 `USR1`），或用 `truncate -s 0` 清空內容而不是刪除。
+刪掉一個正在被寫入的 10 GB log 檔，`df` 的使用率不會下降，因為寫入它的行程還握著那個檔案。正確做法是讓程式重新開檔（logrotate 的 `postrotate`、對 nginx 送 `USR1`），或用 `truncate -s 0` 清空內容而不是刪除。
 
 依症狀找指令：
 
@@ -296,7 +294,7 @@ sudo lsof +L1                    # 已經被刪掉、但還被行程開著的檔
 | 寫檔失敗 | `df -h`、`df -i` | `ls -ld` 目錄的權限與擁有者 |
 | 連不到別台 | `curl -v`、`dig` | 防火牆與路由，見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting) |
 
-下面這段模擬「拿到一份 `ps aux` 輸出，找出最吃記憶體的服務，依使用者加總」，可以直接執行：
+解析一份 `ps aux` 輸出，找出最吃記憶體的服務，並依使用者加總：
 
 ```python run
 # 解析 ps aux 的輸出：依 RSS 排序，並依 USER 加總記憶體
@@ -352,7 +350,7 @@ LOG_LEVEL=debug ./run.sh      # 只對這一個指令設定，不影響目前的
 sudo cat /proc/48302/environ | tr '\0' '\n' | grep -v -i -E 'password|secret|token'
 ```
 
-這也提醒了一件事：環境變數裡的秘密，同一台機器上權限夠的人都看得到。
+環境變數裡的秘密，同一台機器上權限夠的人都看得到。
 
 shell 腳本開頭加上 `set -euo pipefail`：任一指令失敗就停（`-e`）、用到沒定義的變數就停（`-u`）、管線中任何一段失敗都算失敗（`pipefail`）。部署腳本沒有這一行時，`cd /srv/orders/releases/42` 失敗了，下一行 `rm -rf ./*` 照樣在錯誤的目錄執行。
 
@@ -398,11 +396,8 @@ chmod 644 ~/.ssh/id_ed25519.pub
 
 | 訊息 | 意思 | 怎麼查、怎麼修 |
 |---|---|---|
-| `uvicorn: command not found` | `PATH` 裡找不到 | `command -v`；在 systemd、cron、sudo 底下寫完整路徑 |
-| `[Errno 98] ... address already in use` | 埠已被其他行程占用 | `sudo ss -ltnp 'sport = :8000'` 找 PID，確認是誰再處理 |
 | `OSError: [Errno 28] No space left on device` | 磁碟或 inode 用完 | `df -h`、`df -i`、`du`；刪了檔案空間沒回來就查 `lsof +L1` |
 | 行程消失，`journalctl -k` 有 `Out of memory: Killed process 48302 (python)` | 記憶體不夠，被核心的 OOM killer 用 SIGKILL 砍掉 | 看 RSS 的變化；減少 worker 數、找記憶體洩漏或加記憶體 |
-| `Start request repeated too quickly.` | systemd 在短時間內重啟太多次，停止重試 | 看 `journalctl -u` 找第一次失敗的原因；修好後 `systemctl reset-failed` |
 | `Permission denied (publickey).` | 伺服器沒有接受任何一把金鑰 | `ssh -v` 看送了哪把；確認公鑰在正確帳號的 `authorized_keys`、`~/.ssh` 與檔案權限 |
 | `WARNING: UNPROTECTED PRIVATE KEY FILE!` 後面接 `Permissions 0644 for '...' are too open.` | 私鑰權限太寬，客戶端拒絕使用 | `chmod 600` 私鑰 |
 | `Host key verification failed.` | 伺服器的主機金鑰和 `known_hosts` 記的不同 | 機器重建過就是正常的，用 `ssh-keygen -R <主機>` 移除舊紀錄；**不明原因變動時先確認，不要直接忽略**，那正是防冒充的機制 |

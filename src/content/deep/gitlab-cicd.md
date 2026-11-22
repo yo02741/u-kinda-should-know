@@ -159,7 +159,7 @@ deploy-production:
 
 ## 執行順序：stages 的時間線與 needs
 
-**stage 是一道柵欄**：同一個 stage 的 job 平行執行；前一個 stage 的 job 全部成功，下一個 stage 才開始。上面的範例在 main 分支上的時間線是這樣：
+範例在 main 分支上的時間線：
 
 | 時間 | test stage | build stage | deploy stage |
 |---|---|---|---|
@@ -168,13 +168,11 @@ deploy-production:
 | t2 | `test` 完成 | `build-image` 開始 | 等待 |
 | t3 | | `build-image` 完成 | `deploy-production` 出現「手動執行」按鈕 |
 
-`needs` 把柵欄換成依賴關係（DAG）：寫了 `needs: [build-image]` 的 job 只等 `build-image`，不等同一 stage 或前一 stage 的其他 job。`needs: []` 代表不等任何 job，pipeline 一開始就跑。job 數多的 pipeline 用 `needs` 能明顯縮短總時間，但要注意：**沒列進 needs 的 job 失敗，不會擋住它**。
-
-`needs` 還有第二個效果：預設只下載 needs 裡那些 job 的 artifacts。
+- `needs` 形成的依賴關係是 DAG：不等同一 stage 或前一 stage 的其他 job。job 數多的 pipeline 用它能明顯縮短總時間。
+- `needs: []` 代表不等任何 job，pipeline 一開始就跑。
+- 寫了 `needs` 的 job 預設只下載 needs 裡那些 job 的 artifacts。
 
 ## rules 常用的預定義變數、MR pipeline 與分支 pipeline
-
-規則裡最常用的預定義變數：
 
 | 變數 | 內容 | 注意 |
 |---|---|---|
@@ -189,7 +187,7 @@ deploy-production:
 
 ### MR pipeline 與分支 pipeline
 
-push 一個分支會觸發分支 pipeline；這個分支有開著的 MR 時，GitLab 還可以觸發 MR pipeline（`CI_PIPELINE_SOURCE == "merge_request_event"`）。兩者都設定時，同一個 commit 會跑兩次。範例開頭的 `workflow: rules` 是 GitLab 文件提供的寫法：有開著的 MR 就只跑 MR pipeline，沒有 MR 時跑分支 pipeline。
+push 一個分支會觸發分支 pipeline；這個分支有開著的 MR 時，GitLab 還可以觸發 MR pipeline（`CI_PIPELINE_SOURCE == "merge_request_event"`）。兩者都設定時，同一個 commit 會跑兩次。範例開頭的 `workflow: rules` 讓有開著的 MR 時只跑 MR pipeline，沒有 MR 時跑分支 pipeline。
 
 在專案設定的 Merge requests 裡勾選「Pipelines must succeed」，MR 的 pipeline 沒有通過就不能合併。main 要保持可部署，靠的主要是這個設定。
 
@@ -209,8 +207,6 @@ Runner 可以設成 **protected**：只執行受保護分支或 tag 的 job。�
 
 ### executor
 
-executor 決定 Runner 用什麼方式執行 job：
-
 | executor | 怎麼執行 | 取捨 |
 |---|---|---|
 | shell | 直接在 Runner 主機上用 shell 執行 | 最簡單；job 之間共用環境、互相影響，不建議給多個專案共用 |
@@ -220,7 +216,7 @@ executor 決定 Runner 用什麼方式執行 job：
 
 `image:` 和 `services:` 只在 docker、kubernetes 這類容器型 executor 有作用；shell executor 會忽略它們。
 
-用 `tags` 讓 job 指定 Runner：Runner 註冊時帶標籤（例如 `docker`、`prod-network`），job 寫 `tags: [prod-network]`，就只會被帶這個標籤的 Runner 接走。沒有任何線上的 Runner 符合時，job 停在 pending，頁面上會提示這個 job 卡住、沒有可用的 Runner。
+用 `tags` 讓 job 指定 Runner：Runner 註冊時帶標籤（例如 `docker`、`prod-network`），job 寫 `tags: [prod-network]`，就只會被帶這個標籤的 Runner 接走。
 
 新版 GitLab 建立 Runner 的流程是在介面上先建立 Runner、取得 authentication token（`glrt-` 開頭），再在主機上執行 `gitlab-runner register`；舊的 registration token 方式已被標為棄用。
 
@@ -258,7 +254,7 @@ docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
 ```
 
 - 用 `--password-stdin` 而不是 `-p`：密碼不會出現在程序列表與指令紀錄裡。
-- 用 commit SHA 當 tag：每個 image 都能對回一個 commit。只用 `latest` 時，無法知道正式環境跑的是哪一版，也無法指定退回哪一版。
+- 只用 `latest` 當 tag 時，無法知道正式環境跑的是哪一版，也無法指定退回哪一版。
 - **同一個 image 一路晉升**：staging 驗過的 image tag，就是 production 要部署的 tag，不要每個環境重 build。見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
 - 在 Settings → Packages and registries 設定**清理政策**，否則每個 commit 一個 image，儲存空間會一直長。
 
@@ -268,9 +264,7 @@ docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
 
 job 加上 `environment:` 之後，GitLab 會在 Operate → Environments 記錄每個環境的部署歷史：哪個 commit、誰觸發、什麼時候。在環境頁面可以對過去某次部署按「重新部署」，這是最直接的回退方式，前提是部署 job 用的是固定的 image tag，而不是 `latest` 或 `git pull`。
 
-與部署相關的幾個設定：
-
-- `when: manual`：部署需要人按下。寫在 `rules` 裡的 manual job，預設不允許失敗（`allow_failure: false`），pipeline 會停在等待狀態，直到有人執行。
+- `when: manual`：寫在 `rules` 裡的 manual job，預設不允許失敗（`allow_failure: false`），pipeline 會停在等待狀態，直到有人執行。
 - `resource_group`：同一個 resource group 的 job 一次只跑一個，避免兩條 pipeline 同時部署到 production。
 - **Protected environments**：限制誰能部署到某個環境，並可要求核准（deployment approvals）。這兩個功能在 GitLab 的付費方案（Premium、Ultimate）才有；免費版可以用 protected 變數加受保護分支，達到「只有合進 main 的程式碼能部署」的效果；受保護分支上的手動 job，依 GitLab 的權限規則，需要有合併到該分支的權限才能執行。方案與功能的對應會隨版本調整，採用前以官方文件為準。
 
@@ -280,17 +274,11 @@ job 加上 `environment:` 之後，GitLab 會在 Operate → Environments 記錄
 
 | GitLab CI | GitHub Actions |
 |---|---|
-| `.gitlab-ci.yml`（一個專案一份） | `.github/workflows/*.yml`（可以多份） |
 | pipeline | workflow run |
-| stage + job | job（用 `needs` 排順序） |
 | `script:` | `steps:` 裡的 `run:` |
-| `rules:` / `workflow: rules:` | `on:` 與 `if:` |
-| CI/CD variables（protected、masked） | secrets 與 variables（可綁 environment） |
 | Runner（instance / group / project） | runner（GitHub-hosted / self-hosted） |
-| `services:` | `services:` |
-| GitLab Container Registry | GitHub Container Registry（ghcr.io） |
 
-概念幾乎一一對應，寫法不同。完整的對照與範例見 [CI 管線：lint、test、build](#/skill/ci-pipeline)。
+檔案、觸發條件、執行順序、機密、`services:` 與 registry 的對照見 [CI 管線：lint、test、build](#/skill/ci-pipeline)。
 
 ## 常見錯誤與錯誤訊息
 

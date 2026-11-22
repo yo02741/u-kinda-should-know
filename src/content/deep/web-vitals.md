@@ -86,9 +86,7 @@ DevTools 的 Performance 分頁錄一次載入（`Record and reload`），Insigh
 | Insight 或現象 | 原因 | 修法 |
 |---|---|---|
 | `LCP request discovery`：`LCP resources shouldn’t use loading=lazy` | 首屏主圖加了 `loading="lazy"`，要等版面算完才開始下載 | 拿掉 `loading="lazy"` |
-
 | `Layout shift culprits`：`Unsized image element` | `<img>` 沒有 `width`、`height` | 補上寬高或 `aspect-ratio` |
-
 | Lighthouse 100 分，實際數據的 INP 很差 | Lighthouse 的一般報告沒有操作，沒有量 INP | 看實際數據；在 Performance 分頁自己錄操作，CPU 加 `4× slowdown` |
 
 :::stop 讀到這裡可以先停：會讀 LCP、CLS、INP 的門檻與評等，分辨實驗室數據與實際數據，用 web-vitals 套件收實際數據。後面是三個指標各自的拆解與修法、p75 與 CLS 分組的模擬、DevTools Insights 對照表，要修一個不合格的指標時再回來讀。
@@ -267,15 +265,12 @@ async function recomputeStats(rows) {
 
 | Insight 或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `LCP request discovery`：`fetchpriority=high should be applied` | 主圖用一般優先順序，和其他資源搶頻寬 | 加 `fetchpriority="high"` |
 | `LCP breakdown` 的 `Resource load delay` 很長 | 主圖太晚被發現：CSS 背景圖、JS 渲染才出現 | 改成 `<img>`，或 `<link rel="preload" as="image">` |
-
 | `Layout shift culprits`：`Web font` | 字型換上時文字重新換行 | `font-display: optional`，或調整備用字型 |
 | `Font display` | 字型的 `font-display` 讓文字在載入期間看不見 | 文件建議改 `swap` 或 `optional` |
 | `INP breakdown` 的 `Processing duration` 很長 | 事件處理函式（含重新渲染）太久 | 拆開、讓出主執行緒、移到 Web Worker |
 | `INP breakdown` 的 `Input delay` 很長 | 點下去時主執行緒正在跑別的長任務 | 找出那個 task（常是第三方 script） |
-
 | Safari 使用者沒有 CLS 數據 | `onCLS` 只在 Chromium 能量 | 用 Chromium 的數據代表，Safari 上實機檢查 |
 
 ## 動手

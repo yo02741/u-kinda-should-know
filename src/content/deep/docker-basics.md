@@ -98,16 +98,16 @@ docker logs api           # 主行程印了什麼
 
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
-| `Bind for 0.0.0.0:8000 failed: port is already allocated` | 主機上的 8000 已經被別的容器或程式占用 | `docker ps` 看是不是舊容器；或換一個主機埠 `-p 8001:8000` |
+| `Bind for 0.0.0.0:8000 failed: port is already allocated` | 主機上的 8000 已經被別的容器或程式占用 | `docker ps` 看是不是舊容器；不是的話 `sudo ss -ltnp` 找行程；或換一個主機埠 `-p 8001:8000` |
 | 容器立刻 `Exited (0)` 或 `Exited (1)`，`docker ps` 看不到 | 主行程結束了 | `docker logs`；確認 CMD 是常駐程式而不是跑完就結束的指令 |
 
-:::stop 讀到這裡可以先停：分得出 image 與 container、會排 Dockerfile 的順序讓快取生效、部署時用不會重複的 tag 或 digest 確認每台跑的是同一份。後面是層的細節、`latest` 的其他問題與多架構、隔離、資料存放、PID 1 與訊號、`docker run` 的參數與完整的錯誤訊息表，容器裡的資料不見、`docker stop` 要等 10 秒或遇到錯誤訊息時再回來讀。
+:::stop 讀到這裡可以先停：分得出 image 與 container、會排 Dockerfile 的順序讓快取生效、部署時用不會重複的 tag 或 digest 確認每台跑的是同一份。後面是層的細節、`latest` 的其他問題與多架構、隔離、資料存放、PID 1 與訊號、`docker run` 的參數與其他錯誤訊息，容器裡的資料不見、`docker stop` 要等 10 秒或遇到錯誤訊息時再回來讀。
 
 ## container 的生命週期
 
-container 有生命週期：`created` → `running` → `exited`。**container 停止不等於刪除**，停止的 container 和它的可寫層還在，`docker start` 可以讓它再跑起來；`docker rm` 才會刪掉。所以 `docker ps -a` 常常會看到一長串 `Exited` 的舊容器，用 `docker run --rm` 讓容器結束時自動刪除。
+`created` → `running` → `exited`。停止的 container 可以用 `docker start` 再跑起來，所以 `docker ps -a` 常常會看到一長串 `Exited` 的舊容器；用 `docker run --rm` 讓容器結束時自動刪除。
 
-container 裡面跑的是**一個主行程**以及它衍生的子行程。主行程結束，container 就結束。這解釋了一個常見的困惑：「`docker run -d myimage` 之後，`docker ps` 看不到它」。多半是主行程啟動後馬上出錯退出了，或者它本來就是一個執行完就結束的指令。`docker ps -a` 會看到 `Exited (1) 3 seconds ago`，`docker logs <容器>` 看它印了什麼。
+「`docker run -d myimage` 之後，`docker ps` 看不到它」多半是主行程啟動後馬上出錯退出了，或者它本來就是一個執行完就結束的指令。`docker ps -a` 會看到 `Exited (1) 3 seconds ago`，`docker logs <容器>` 看它印了什麼。
 
 ## 層的細節：history、copy-on-write 與快取鍵
 
@@ -126,11 +126,11 @@ IMAGE          CREATED        CREATED BY                                      SI
 
 （`<missing>` 只表示那一層沒有對應的本機 image ID，不是缺檔。）
 
-執行時，Docker 用聯合檔案系統（Linux 上通常是 overlayfs）把這些層疊起來，最上面加一層可寫層。讀檔案時從上往下找，第一個找到的就是；寫檔案時，如果檔案在下面的唯讀層，先把整個檔案**複製到可寫層**再改（copy-on-write）。這帶來幾個結果：
+執行時，Docker 用聯合檔案系統（Linux 上通常是 overlayfs）把這些層疊起來，最上面加一層可寫層。讀檔案時從上往下找，第一個找到的就是；寫檔案時，如果檔案在下面的唯讀層，先把整個檔案**複製到可寫層**再改（copy-on-write）。
 
 - **層是共用的**。十個 container 用同一個 image，唯讀層在磁碟上只有一份；兩個 image 用同一個基底，基底的層也只存一份、只下載一次。
 - **後面的層刪檔案不會讓 image 變小**。`RUN rm` 只是在新的一層記錄「這個檔案被刪了」，前一層的內容仍然在 image 裡。要在同一個 `RUN` 裡下載、使用、刪除，或用多階段建置，見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
-- **大量寫入可寫層又慢又會遺失**。資料庫檔案、上傳的檔案要放 volume（下面會講）。
+- **大量寫入可寫層又慢又會遺失**，資料要放 volume。
 
 | 指令 | 快取鍵包含 | 結果 |
 |---|---|---|
@@ -147,9 +147,7 @@ IMAGE          CREATED        CREATED BY                                      SI
 - **registry**：存 image 的伺服器。省略時是 Docker Hub（`docker.io`），只寫 `python:3.12-slim` 等於 `docker.io/library/python:3.12-slim`。
 - **repository**：同一個 image 的各個版本放在一起。
 
-digest 是內容的雜湊：內容不變它就不變，內容一變它一定變。
-
-`latest` 的問題整理如下：
+`latest` 的問題：
 
 | 問題 | 後果 |
 |---|---|
@@ -158,10 +156,8 @@ digest 是內容的雜湊：內容不變它就不變，內容一變它一定變�
 | 看不出版本 | 出事時不知道正式環境跑的是哪一版，也不知道要退回哪一版 |
 | 基底映像用 `latest` | 某天重建，基底升了大版本，程式在沒改任何一行的情況下壞掉 |
 
-實務做法：
-
-- 自己建的 image 用**不會重複的 tag**：git commit SHA（`api:8d1e7f40`），或語意化版本加上 SHA。推出去之後不再移動它。
-- 部署時明確 `docker pull`，或 `docker run --pull=always`；要完全釘死就用 digest：`docker run registry.example.com/shop/api@sha256:9c1e…`。
+- 不會重複的 tag 可以是 git commit SHA（`api:8d1e7f40`），或語意化版本加上 SHA。
+- 要完全釘死就用 digest：`docker run registry.example.com/shop/api@sha256:9c1e…`。
 - 基底映像至少釘到次版本（`python:3.12-slim`），並且**定期主動**升級、重建，取得安全修補。
 
 ### 同一個 tag，不同的 CPU 架構
@@ -196,8 +192,6 @@ exited 137 OOMKilled=true
 ```
 
 退出碼 137 是 128 + 9（SIGKILL）。
-
-這個模型的兩個推論：
 
 1. **所有容器共用主機的核心**。容器裡的 Ubuntu 只是 Ubuntu 的使用者空間檔案；核心版本是主機的。
 2. **容器裡的 root 就是主機的 root（UID 0）**，只是被 namespace 和一些權限限制圍住。沒有開 user namespace 重新對應時，一個逃出容器的 root 行程在主機上就是 root。所以 image 裡要設非 root 使用者，也不要隨手加 `--privileged` 或把 `/var/run/docker.sock` 掛進容器（拿到 docker.sock 等於拿到主機的 root）。
@@ -284,17 +278,15 @@ docker system df                  # image、容器、volume、建置快取各佔
 docker image prune                # 刪掉沒有 tag 的 image；加 -a 連沒被容器使用的都刪
 ```
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
 | `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock` | 目前的使用者沒有權限連 Docker daemon | 用 `sudo`，或把使用者加入 `docker` 群組後重新登入（加入這個群組等同給了 root 權限，只給該給的人） |
-| `Bind for 0.0.0.0:8000 failed: port is already allocated` | 主機上的 8000 已經被別的容器或程式占用 | `docker ps` 看是不是舊容器；不是的話 `sudo ss -ltnp` 找行程；或換一個主機埠 `-p 8001:8000` |
 | `Conflict. The container name "/api" is already in use by container "…"` | 同名容器還在（可能是已停止的） | `docker rm -f api` 再起，或換名字 |
 | `pull access denied for shop/api, repository does not exist or may require 'docker login'` | 名字打錯、registry 沒寫（被當成 Docker Hub）、或沒登入私有 registry | 檢查完整名字；`docker login registry.example.com` |
 | `manifest unknown` 或 `not found` | 這個 tag 在 registry 上不存在 | 確認 CI 確實推了這個 tag |
 | `exec format error` | image 的 CPU 架構與主機不同；或腳本第一行沒有正確的 shebang | `docker image inspect --format '{{.Architecture}}'` 看架構；用 `--platform` 重建 |
-| 容器立刻 `Exited (0)` 或 `Exited (1)` | 主行程結束了 | `docker logs`；確認 CMD 是常駐程式而不是跑完就結束的指令 |
 | `Exited (137)`、`OOMKilled=true` | 超過記憶體上限 | 調整 `--memory` 或降低程式的用量（worker 數、快取大小） |
 | 主機上 `curl localhost:8000` 得到 `Connection reset by peer` 或 `Empty reply from server` | 埠有發布，但容器裡的程式聽的是 `127.0.0.1` | 讓程式聽 `0.0.0.0`（例如 `uvicorn --host 0.0.0.0`） |
 | `no space left on device` | image、停止的容器、建置快取堆滿磁碟 | `docker system df` 看是哪一類，再用對應的 `prune` 清理 |

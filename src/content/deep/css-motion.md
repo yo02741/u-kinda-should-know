@@ -100,7 +100,7 @@ defineProps({ call: { type: Object, default: null } })   // { no, room }；null 
 /* 縮寫：transition: opacity 200ms ease-out, transform 200ms ease-out; */
 ```
 
-- 要能算出中間值：`opacity: 0` 到 `1`、`translate` 的距離、顏色都可以；`display: none` 到 `block`、`height: 0` 到 `auto` 不行，前者直接切換，後者沒有動畫（`interpolate-size: allow-keywords` 讓 `auto` 能補間，2026 年 11 月只有 Chromium 129 以上支援）。
+- 要能算出中間值：`opacity: 0` 到 `1`、`translate` 的距離、顏色都可以；`display: none` 到 `block`、`height: 0` 到 `auto` 不行，前者直接切換，後者沒有動畫。
 - 每個屬性結束時各觸發一次 `transitionend`。值沒有變化就沒有轉場、也沒有事件；轉場進行到一半被取消（元素被移除、改成 `display: none`、屬性又被改掉），觸發的是 `transitioncancel`。
 
 `transition: all` 會讓之後任何屬性的改變都變成動畫：切換暗色主題時所有顏色慢慢變、改字級時版面慢慢擠開。列出要動的屬性就好。
@@ -135,7 +135,7 @@ defineProps({ call: { type: Object, default: null } })   // { no, room }；null 
 
 ## easing：速度怎麼變
 
-easing 是時間進度對應到變化進度的曲線。`ease-out` 一開始就移動得多、接近終點時放慢，適合進場；`ease-in` 相反，適合離場；`linear` 等速，適合進度條與轉圈。下面算出 200ms 的動畫在不同時間點走了多少：
+easing 是時間進度對應到變化進度的曲線。`ease-out` 一開始就移動得多、接近終點時放慢，適合進場；`ease-in` 相反，適合離場；`linear` 等速，適合進度條與轉圈。200ms 的動畫在不同時間點走了多少：
 
 ```js run
 // CSS 的 cubic-bezier(x1, y1, x2, y2)：給時間進度 t（0～1），算出變化的進度
@@ -173,20 +173,16 @@ for (const [name, f] of Object.entries(curves)) {
 
 Vue 3.5 的做法是讀 `*-active` 那一刻元素計算後的 `transition-duration`、`transition-delay`、`animation-duration`，算出要等多久，再搭配 `transitionend` 或 `animationend`。
 
-其他常用的設定：
-
 - `mode="out-in"`：切換兩個元素時，舊的先離場、新的再進場，不會同時出現兩個。
 - `appear`：第一次渲染也播進場動畫。
 - `@after-enter`、`@after-leave` 等 JavaScript 鉤子，例如離場完成後把焦點移回觸發的按鈕。
 - `v-show` 也適用：離場結束後 Vue 才設 `display: none`。
 
-`<Transition>` 裡只能有一個元素或元件，放了兩個會出現 `[Vue warn]: <transition> can only be used on a single element or component. Use <transition-group> for lists.`。
-
 ## `<TransitionGroup>`：候診清單的排序動畫
 
-`<TransitionGroup>` 對清單的每一項套進場與離場的 class，另外在順序改變時套上 `v-move`：Vue 記下每一項移動前後的位置，先用 `transform` 把它放回舊位置，再移除 transform 讓它滑到新位置，所以 `.queue-move` 只要寫 `transition: transform 300ms ease`。
+順序改變時，Vue 記下每一項移動前後的位置，先用 `transform` 把它放回舊位置，再移除 transform 讓它滑到新位置，所以 `.queue-move` 只要寫 `transition: transform 300ms ease`。
 
-每一項都要有穩定的 `key`（掛號 id，不是陣列 index），否則 Vue 分不出哪一項移到哪裡；少了 `key` 時 Console 出現 `<TransitionGroup> children must be keyed.`。刪除某一項時，其他項目要等它離場完才會補上空位，Vue 官方範例的做法是讓離場中的項目 `position: absolute`，其他項目立刻開始移動。
+每一項都要有穩定的 `key`（掛號 id，不是陣列 index），否則 Vue 分不出哪一項移到哪裡。刪除某一項時，其他項目要等它離場完才會補上空位，Vue 官方範例的做法是讓離場中的項目 `position: absolute`，其他項目立刻開始移動。
 
 ```vue
 <template>
@@ -212,12 +208,10 @@ Vue 3.5 的做法是讀 `*-active` 那一刻元素計算後的 `transition-durat
 
 macOS、iOS、Windows、Android 的協助工具設定裡都有「減少動態效果」或「關閉動畫效果」的選項，瀏覽器把它對應到 `prefers-reduced-motion: reduce`（Baseline，2020 年起各瀏覽器都支援）。有前庭障礙的人看到大範圍的移動、視差、縮放會頭暈。
 
-兩種寫法：
-
 - 先寫動畫，再在 `@media (prefers-reduced-motion: reduce)` 裡拿掉位移與縮放。
 - 預設沒有位移，只在 `@media (prefers-reduced-motion: no-preference)` 裡加上；忘了寫 media query 的元件預設就是安全的。
 
-減少動態不等於完全沒有變化：淡入淡出與顏色變化通常可以保留，告訴使用者「有東西出現了」。`scroll-behavior: smooth` 與 `element.scrollIntoView({ behavior: 'smooth' })` 也是動態，一樣要看這個設定；JavaScript 用 `matchMedia('(prefers-reduced-motion: reduce)').matches` 讀。
+淡入淡出與顏色變化通常可以保留，告訴使用者「有東西出現了」。`scroll-behavior: smooth` 與 `element.scrollIntoView({ behavior: 'smooth' })` 也是動態，一樣要看這個設定；JavaScript 用 `matchMedia('(prefers-reduced-motion: reduce)').matches` 讀。
 
 WCAG 2.2 相關的條文：2.2.2 Pause, Stop, Hide（A）要求自動開始、持續超過 5 秒、和其他內容同時出現的動態內容要能暫停或隱藏，跑馬燈式的看板公告屬於這一類；2.3.1 要求一秒內閃爍不超過三次；2.3.3 Animation from Interactions（AAA）要求互動觸發的動畫可以關掉。
 
@@ -233,7 +227,7 @@ WCAG 2.2 相關的條文：2.2.2 Pause, Stop, Hide（A）要求自動開始、�
 
 在 Vue 專案裡，元件的進出場用 `<Transition>` 最穩；`@starting-style` 適合原生 `<dialog>` 與 `popover` 這類不經過 Vue 的進場。
 
-跟著捲動變化的效果（閱讀進度條、捲到時淡入），以前的寫法是監聽 `scroll` 事件、每次讀 `scrollY` 再改 `style`：每次捲動都在主執行緒跑程式，還常順手讀版面尺寸，捲動跟著卡。Scroll-driven animations 讓 CSS 動畫的進度直接對到捲動位置。它在 2026 年 10 月才成為 Baseline，規則包在 `@supports (animation-timeline: scroll())` 裡，不支援的瀏覽器就沒有這個效果、內容照常顯示；不要為了舊瀏覽器再補一套 `scroll` 監聽。效果只是裝飾時，在 `prefers-reduced-motion: no-preference` 裡才加上。
+跟著捲動變化的效果（閱讀進度條、捲到時淡入），以前的寫法是監聽 `scroll` 事件、每次讀 `scrollY` 再改 `style`：每次捲動都在主執行緒跑程式，還常順手讀版面尺寸，捲動跟著卡。Scroll-driven animations 讓 CSS 動畫的進度直接對到捲動位置。規則包在 `@supports (animation-timeline: scroll())` 裡，不支援的瀏覽器就沒有這個效果、內容照常顯示；不要為了舊瀏覽器再補一套 `scroll` 監聽。效果只是裝飾時，在 `prefers-reduced-motion: no-preference` 裡才加上。
 
 ## 原生 `<dialog>` 的進場
 
@@ -251,22 +245,18 @@ dialog[open] {
 }
 ```
 
-這段只有進場。離場要讓 `display` 與 `overlay` 也加進 transition 並寫 `allow-discrete`：轉場 `display` 在 Firefox 還不支援，`overlay` 只有 Chromium 支援，其他瀏覽器的 Dialog 會直接關掉或提早離開 top layer。離場動畫是加分，關閉本身不受影響。
+這段只有進場。離場要讓 `display` 與 `overlay` 也加進 transition 並寫 `allow-discrete`；不支援的瀏覽器（見上表）Dialog 會直接關掉或提早離開 top layer。離場動畫是加分，關閉本身不受影響。
 
 ## 其他錯誤與訊息
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-| 用 `v-if` 隱藏時沒有離場動畫 | 元素立刻從 DOM 移除 | 包在 `<Transition>` 裡 |
-| `[Vue warn]: <transition> can only be used on a single element or component. …` | `<Transition>` 裡放了多個元素 | 包一層元素，或改用 `<TransitionGroup>` |
+| `[Vue warn]: <transition> can only be used on a single element or component. Use <transition-group> for lists.` | `<Transition>` 裡放了多個元素 | 包一層元素，或改用 `<TransitionGroup>` |
 | `<TransitionGroup> children must be keyed.` | 清單項目沒有 `key` | 用資料的 id 當 `key` |
 | 清單排序時直接跳位置 | 沒有 `v-move` 的 transition，或 `key` 用了 index | 加 `.xxx-move { transition: transform … }`，`key` 用 id |
 | `height: auto` 的展開沒有動畫 | `auto` 不能補間 | Grid 的 `0fr` 到 `1fr`，或只在 Chromium 用 `interpolate-size` |
-| `animation` 播完跳回原樣 | 預設不保留最後一格 | `animation-fill-mode: forwards` |
 | 等 `transitionend` 的程式沒執行 | 值沒變、`duration` 是 0（減少動態時拿掉了轉場），或轉場被中斷 | 檢查值與時間；一併處理 `transitioncancel`；`el.getAnimations()` 是空陣列時直接往下做 |
 | 減少動態時寫了一條全域規則，把所有 `animation-duration`、`transition-duration` 設成 `0.01ms !important` | 舊的 CSS reset 常見的寫法：淡入淡出與顏色變化也一起消失，有些動畫直接跳到終點反而更突兀 | 逐個元件處理：在 media query 裡拿掉位移與縮放，保留淡入淡出 |
-| 切換主題時整頁慢慢變色 | `transition: all` | 只列出要動的屬性 |
-| 開了「減少動態效果」畫面還在滑動 | 沒寫 `prefers-reduced-motion` | 加 media query，拿掉位移與縮放 |
 
 ## 動手
 

@@ -107,8 +107,6 @@ location /api/ {
 
 ## `location` 的比對規則
 
-`location` 有四種寫法：
-
 | 寫法 | 類型 | 例子 |
 |---|---|---|
 | `location = /health` | 精確比對 | 只比對 `/health`，`/health/` 或 `/healthz` 都不算 |
@@ -123,7 +121,7 @@ location /api/ {
 3. 否則先記住這個最長前綴，**依設定檔順序**試每一個 regex，第一個命中的就用它。
 4. 沒有 regex 命中，才用第 2 步記住的最長前綴。
 
-所以前綴的**書寫順序不重要**（只看長度），regex 的**書寫順序很重要**（先寫的先試）。最容易被忽略的是第 3 步：一個比對副檔名的 regex 會蓋過一般前綴。下面這段程式照這四步實作比對，可以直接執行：
+所以前綴的**書寫順序不重要**（只看長度），regex 的**書寫順序很重要**（先寫的先試）。最容易被忽略的是第 3 步：一個比對副檔名的 regex 會蓋過一般前綴。照這四步實作比對：
 
 ```python run
 import re
@@ -171,7 +169,7 @@ for uri in ["/health", "/healthz", "/static/app.css", "/img/logo.PNG", "/api/use
 
 後端要**設定成採信這些標頭**，而且只採信來自 nginx 的。uvicorn 用 `--forwarded-allow-ips` 指定信任的代理位址（預設只有 `127.0.0.1`）；`X-Forwarded-For` 的最左邊可以被客戶端偽造，信任邊界怎麼畫見 [負載平衡](#/skill/load-balancing)。
 
-一個常見的陷阱：`proxy_set_header` 是**整組繼承**的。`server` 層設了五個 `proxy_set_header`，某個 `location` 裡只要寫了任何一個 `proxy_set_header`，這個 location 就不再繼承 server 層的那五個。`add_header` 也是同樣的規則。共用的標頭可以放在一個檔案裡，在每個 location `include`。
+`proxy_set_header` 是**整組繼承**的。`server` 層設了五個 `proxy_set_header`，某個 `location` 裡只要寫了任何一個 `proxy_set_header`，這個 location 就不再繼承 server 層的那五個。`add_header` 也是同樣的規則。共用的標頭可以放在一個檔案裡，在每個 location `include`。
 
 WebSocket 需要把升級請求轉過去：
 
@@ -198,7 +196,7 @@ location /ws/ {
 
 nginx 預設會**緩衝**請求本體與回應：上傳慢的客戶端由 nginx 慢慢收完再一次送給後端，後端的 worker 不會被慢速客戶端拖住。
 
-nginx 由一個 master 行程與數個 worker 行程組成。`nginx -s reload`（或 `systemctl reload nginx`）讓 master 讀新設定、啟動新的 worker，舊的 worker 把手上的連線處理完才結束，所以重新載入不會中斷進行中的請求。設定寫錯時，master 會拒絕新設定、繼續用舊的跑，所以**永遠先 `nginx -t` 再 reload**：
+nginx 由一個 master 行程與數個 worker 行程組成。`nginx -s reload`（或 `systemctl reload nginx`）讓 master 讀新設定、啟動新的 worker，舊的 worker 把手上的連線處理完才結束，所以重新載入不會中斷進行中的請求。`nginx -t` 通過時的輸出：
 
 ```bash
 $ sudo nginx -t
@@ -211,7 +209,7 @@ regex location 裡的 `proxy_pass` 不能帶 URI 部分，`nginx -t` 會報 `"pr
 
 ## upstream 與負載平衡
 
-開頭的第三個問題（部署時只有一個後端、它重啟期間全部 502）要靠多個後端加上逐一更新。`upstream` 定義一組後端：
+`upstream` 定義一組後端：
 
 ```nginx
 upstream api_backend {
@@ -303,7 +301,7 @@ server {
 
 `ssl_certificate` 要指向**含中繼憑證的完整鏈**（`fullchain.pem`），只放伺服器憑證時，部分客戶端會驗證失敗。憑證的申請與續約見 [HTTPS 憑證：要買哪種、怎麼續](#/skill/https-certificates)。HSTS 一旦送出，瀏覽器在 `max-age` 內都不會再用 HTTP 連這個網域，確定全站都能走 HTTPS 再開。
 
-`client_max_body_size` 解決開頭的第二個問題。它可以設在 `http`、`server` 或 `location`，例如整站維持較小的值，只在上傳的 location 放大。上傳檔案更好的做法是讓瀏覽器直傳物件儲存，見 [物件儲存：bucket、預簽網址與生命週期](#/skill/object-storage)。
+`client_max_body_size` 可以設在 `http`、`server` 或 `location`：整站維持較小的值，只在上傳的 location 放大。上傳檔案更好的做法是讓瀏覽器直傳物件儲存，見 [物件儲存：bucket、預簽網址與生命週期](#/skill/object-storage)。
 
 ## 502 與 504：從 error log 找原因
 

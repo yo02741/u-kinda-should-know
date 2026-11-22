@@ -92,8 +92,6 @@ export default defineConfig({
 
 ## 幾種失敗在開發者工具裡長得不一樣
 
-一個 `POST` 被 CORS 擋下，掛號可能已經建立了，只是前端讀不到回應。
-
 | 情況 | Network 分頁的狀態欄 | Console | 程式拿到 |
 |---|---|---|---|
 | 回應少了 CORS 標頭 | `CORS error` | `… has been blocked by CORS policy: …` | `TypeError` |
@@ -128,8 +126,6 @@ axios 對應的設定是 `withCredentials: true`。即使三方面都設好，co
   │◄──────────── 回應 ──────────────│◄──────────────── 回應 ────────────────────│
 ```
 
-Vite 把符合規則的請求轉給後端，這段是伺服器對伺服器，不受同源政策限制。
-
 | 選項 | 作用 |
 |---|---|
 | `target` | 轉送到哪裡，例如 `http://localhost:8000` |
@@ -142,7 +138,7 @@ Vite 把符合規則的請求轉給後端，這段是伺服器對伺服器，不
 
 ## 正式環境：同網域的 `/api`，或跨來源
 
-把前端與 API 放在同一個網域，由反向代理依路徑分流：`https://clinic.example/` 給前端的靜態檔，`https://clinic.example/api/` 轉給後端。前端程式和開發時一樣寫 `/api/...`，同一份建置結果不用改。nginx 的寫法與 Kubernetes 上的做法見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
+同網域時反向代理依路徑分流：`https://clinic.example/` 給前端的靜態檔，`https://clinic.example/api/` 轉給後端，同一份建置結果不用改。nginx 的寫法與 Kubernetes 上的做法見後端的 [前端與 nginx 上 K8s](#/skill/spa-containers) 與 [nginx 反向代理](#/skill/nginx)。
 
 API 一定要放在另一個網域（例如 `https://api.clinic.example` 同時服務手機 App）時，就得跨來源：後端設定 CORS 白名單，要帶 cookie 時前端加 `credentials: 'include'`，API 的網址用建置時的環境變數傳入，不寫死在程式裡。
 
@@ -152,7 +148,7 @@ API 一定要放在另一個網域（例如 `https://api.clinic.example` 同時�
 
 在 Console 執行 `location.origin` 看目前頁面的 origin；`new URL(網址).origin` 看任意網址的 origin。
 
-下面用 `URL` 物件照上面的規則判斷：網址解析成什麼、和頁面同不同源、`fetch` 預設會不會帶 cookie、需不需要 preflight（簡單請求的規則有簡化，完整條件見後端的課）：
+用 `URL` 物件判斷網址解析成什麼、同不同源、`fetch` 預設帶不帶 cookie、要不要 preflight（簡單請求的規則有簡化，完整條件見後端的課）：
 
 ```js run
 // 從某個頁面送出一個 fetch：網址解析成什麼、同不同源、預設帶不帶 cookie、要不要 preflight（簡化版規則）
@@ -247,11 +243,10 @@ Console 的 CORS 訊息都以 `Access to fetch at '…' from origin '…' has be
 
 | 訊息後半段或現象 | 原因 | 誰修、怎麼修 |
 |---|---|---|
-| `No 'Access-Control-Allow-Origin' header is present on the requested resource.` | 跨來源的回應沒有 CORS 標頭；也可能是後端的 500、401 錯誤回應沒經過 CORS 設定 | 開發時改走 proxy、程式用相對路徑；必須跨來源時請後端設定，並查後端 log 的實際狀態碼 |
+| `No 'Access-Control-Allow-Origin' header is present on the requested resource.`，後端已經設了 CORS | 後端的 500、401 錯誤回應沒經過 CORS 設定 | 查後端 log 的實際狀態碼 |
 | `Response to preflight request doesn't pass access control check: It does not have HTTP ok status.` | 後端的 `OPTIONS` 回了 401、404 或 405 | 後端讓 `OPTIONS` 不經過驗證 |
 | `Request header field authorization is not allowed by Access-Control-Allow-Headers in preflight response.` | 前端送的標頭沒被允許 | 後端列進 `Allow-Headers`；或確認前端是否真的需要這個標頭 |
 | `The value of the 'Access-Control-Allow-Origin' header in the response must not be the wildcard '*' when the request's credentials mode is 'include'.` | 前端 `credentials: 'include'`，後端回 `*` | 後端改成比對白名單、回確切的 origin |
-| `res.headers.get('X-Total-Count')` 是 `null`，Network 卻看得到這個標頭 | 跨來源，後端沒有 `Access-Control-Expose-Headers` | 後端加上；或改成同源 |
 | `res.status` 是 `0`，`res.json()` 丟出 `SyntaxError: Unexpected end of JSON input` | 用了 `mode: 'no-cors'`，回應變成讀不到內容的 opaque response | 拿掉 `mode: 'no-cors'`，回到上面幾列處理 |
 | 終端機出現 `http proxy error: /api/appointments` 與 `Error: connect ECONNREFUSED 127.0.0.1:8000` | 後端沒啟動，或 port 不對 | 啟動後端、核對 `target`；錯誤裡的位址是 `::1` 時，代表 `localhost` 解析成 IPv6、後端只聽 IPv4，`target` 改成 `http://127.0.0.1:8000` |
 | 後端回 404，log 裡的路徑少了 `/api` | `rewrite` 拿掉了前綴，後端的路由卻有 `/api` | 拿掉 `rewrite` |

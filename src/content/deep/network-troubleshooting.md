@@ -94,8 +94,6 @@ sched.example.org.	300	IN	A	10.20.0.15
 
 名字解析成 `10.20.0.15`、TTL 還剩 300 秒、回答的是 `10.0.0.53` 這台 DNS。
 
-壞掉時常見的幾種：
-
 | `dig` 的結果 | 意思 | 常見原因 |
 |---|---|---|
 | `status: NXDOMAIN` | 這個名字不存在 | 打錯字、記錄還沒建、問到了不認識這個內部網域的 DNS |
@@ -160,7 +158,7 @@ $ nc -vz -w 3 10.30.0.8 5432
 nc: connect to 10.30.0.8 port 5432 (tcp) timed out: Operation now in progress
 ```
 
-- **refused**：問題在目的主機上：服務沒起來、聽錯 port，或只聽在 localhost。到伺服器上用 `ss -ltn` 看：
+- **refused**：到伺服器上用 `ss -ltn` 看是服務沒起來、聽錯 port，還是只聽在 localhost：
 
   ```bash
   $ ss -ltn
@@ -219,11 +217,10 @@ nginx 的 log 實際長這樣，`upstream:` 會告訴你是哪一台後端：
 排查方式：
 
 1. 看回應是誰產生的。`curl -v` 的回應標頭裡常有 `Server: nginx` 之類的資訊；錯誤頁的內容也會透露是哪個產品。
-2. 到那一台 proxy 看 error log，找出 `upstream` 的位址。
-3. 從 **proxy 那台機器**對 upstream 做 `nc -vz` 和 `curl`，因為從你的電腦能連，不代表從 proxy 能連。
-4. 看負載平衡器的健康檢查：它打的是哪個路徑、預期什麼狀態碼。健康檢查路徑如果需要登入，會一直被判定為失敗。
+2. 到那一台 proxy 看 error log，找出 `upstream` 的位址，從 **proxy 那台機器**對它做 `nc -vz` 和 `curl`：從你的電腦能連，不代表從 proxy 能連。
+3. 看負載平衡器的健康檢查：它打的是哪個路徑、預期什麼狀態碼。健康檢查路徑如果需要登入，會一直被判定為失敗。
 
-`504` 要注意兩個逾時的關係：proxy 的逾時（nginx 的 `proxy_read_timeout` 預設 60 秒）比應用程式處理時間短，就會出現「後端做完了，但使用者看到 504」。調高逾時只是治標，慢的那段要另外處理。
+`504` 與 proxy、應用程式兩邊逾時的關係，以及 nginx error log 的其他訊息，見 [nginx 反向代理](#/skill/nginx)。
 
 ## 第 6 層：TLS
 
@@ -270,8 +267,6 @@ $ curl -sv -o /dev/null https://sched.example.org/health
 - `401` / `403`：認證或權限問題，網路是通的。
 - `500`：應用程式內部錯誤，看應用程式 log。
 - 回應很慢但最後成功：應用程式在等它自己的下游（資料庫、其他 API）。這時要從**應用程式那台機器**，對它的下游重複一次上面的排查。
-
-應用程式本身也是一個用戶端：它連資料庫要經過 DNS、防火牆、TLS，一樣的七層。
 
 ## 其他常見錯誤
 

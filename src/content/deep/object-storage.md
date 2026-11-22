@@ -104,11 +104,10 @@ print("十分鐘後：            ", verify("PUT", url, now + 600))
 | 容器重建後 | 寫在可寫層就消失 | 還在 | 還在 |
 | 容量 | 受限於那顆磁碟 | 受限於檔案伺服器 | 依服務而定，通常不用自己規劃 |
 | 存取方式 | 檔案系統呼叫 | 檔案系統呼叫 | HTTP（PUT / GET / DELETE / LIST） |
-| 修改部分內容 | 可以 | 可以 | 不行，整個物件重寫 |
+| 修改部分內容 | 可以 | 可以 | 不行，整個物件重寫；一般的 S3 API 沒有改掉中間一段或在後面追加的操作 |
 | 瀏覽器直接存取 | 要經過應用程式 | 要經過應用程式 | 可以（presigned URL、CDN） |
 
 - 以 AWS S3 來說，bucket 名稱在同一個分區（例如一般的商用區域）裡全球唯一。
-- 一般的 S3 API 沒有「把第 100 到 200 個位元組改掉」或「在後面追加」這種操作。
 - AWS S3 從 2020 年 12 月起對 PUT 與 DELETE 提供強的 read-after-write 一致性：寫入成功後立刻讀，一定讀到新內容，列舉也看得到。其他 S3 相容的服務不一定有同樣的保證，要看各自的文件。
 
 ## S3 相容 API 與自建
@@ -145,12 +144,10 @@ for item in resp.get("Contents", []):
 
 開發環境可以在 docker compose 裡起一個 S3 相容的服務，讓本機與正式環境用同一套程式碼，只差 `endpoint_url` 與憑證。要注意 MinIO 的社群版採用 AGPLv3 授權，而且近年官方調整過社群版的發行方式與功能範圍；要拿來當正式環境的儲存，先確認它目前的版本、授權與維護狀態，再和其他自建方案或受管服務比較。
 
-## 預簽網址的限制：到期上限、大小、CORS
+## 預簽網址的限制：到期上限與大小
 
-- **簽章綁定方法與 key**。用 GET 的網址去 PUT、改掉網址裡的 key，簽章都會不符。
 - **到期時間有上限**。AWS 的 Signature Version 4 預簽網址最長 7 天；若用臨時憑證（例如執行角色）簽，憑證先到期的話網址也會跟著失效。
 - **限制大小**：S3 的 presigned POST 可以在 policy 裡寫 `content-length-range`，由物件儲存拒絕超過大小的上傳。presigned PUT 的限制方式依服務與 SDK 而定，要查文件。
-- **瀏覽器直傳需要 CORS**：bucket 要設定允許你的網站來源使用 PUT，否則瀏覽器會擋下請求。
 - 真正的 Signature Version 4 要組 canonical request、用日期與區域推導簽章金鑰。
 
 上傳要經過 API、用 presigned URL 直傳，還是分段上傳，取決於檔案大小、需不需要同步驗證內容與網路品質，設計情境 [使用者上傳檔案](#/scenario/upload) 有完整的比較與決策練習。
@@ -158,8 +155,6 @@ for item in resp.get("Contents", []):
 ## 權限與公開 bucket 的外洩
 
 「bucket 被設成公開，任何人都能列出與下載裡面的檔案」是反覆發生的資料外洩原因：身分證影本、合約、資料庫備份，被掃描公開 bucket 的工具找到。原因通常是設定，用不到駭客技術：為了讓前端能顯示圖片，把整個 bucket 打開。
-
-原則：
 
 - **上傳用的 bucket 永遠私有**。使用者的檔案一律透過 API 檢查權限後簽短效網址存取。
 - **開啟 Block Public Access**。AWS S3 從 2023 年 4 月起，新建 bucket 預設開啟 Block Public Access 並停用 ACL；舊 bucket 與其他服務要自己確認。帳號層級也可以開啟，避免有人在某個 bucket 上誤開。
@@ -219,9 +214,9 @@ S3 的生命週期設定大致長這樣（JSON 格式，用 SDK 或 CLI 套用�
 
 以 AWS S3 的規格，每段 5 MiB 到 5 GiB（最後一段可以小於 5 MiB），最多 10,000 段。斷線時只需要重傳失敗的那段；合併完成前，物件不會出現在 bucket 裡。
 
-要注意：分段上傳的物件，`ETag` 通常不是整個檔案的 MD5，不能拿來跟本機算的 MD5 比對完整性。需要檢查完整性時，用服務提供的 checksum 功能或自己記錄雜湊值。
+分段上傳的物件，`ETag` 通常不是整個檔案的 MD5，不能拿來跟本機算的 MD5 比對完整性。需要檢查完整性時，用服務提供的 checksum 功能或自己記錄雜湊值。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 物件儲存的錯誤是 HTTP 狀態碼加上 XML 裡的錯誤代碼（以 S3 為例）：
 
@@ -229,17 +224,13 @@ S3 的生命週期設定大致長這樣（JSON 格式，用 SDK 或 CLI 套用�
 |---|---|---|---|
 | `AccessDenied` | 403 | 憑證沒有這個動作的權限、bucket policy 拒絕、Block Public Access 擋下公開存取 | 先確認是「誰」在呼叫（哪個角色、哪把金鑰），再看 IAM policy 與 bucket policy |
 | `AccessDenied`，訊息 `Request has expired` | 403 | presigned URL 已過期 | 網址是不是被存起來重複使用？改成每次重新簽，或調整到期時間 |
-| `SignatureDoesNotMatch` | 403 | 請求和簽章時不一致：方法不同、`Content-Type` 跟簽進去的不同、key 被改、區域或 endpoint 設錯 | 比對「簽的時候」與「送出時」的方法、標頭、key |
 | `RequestTimeTooSkewed` | 403 | 發出請求的主機時鐘和服務差太多 | 校正主機時間（NTP） |
 | `NoSuchKey` / `NoSuchBucket` | 404 | key 拼錯、物件已被刪除或被生命週期規則清掉、bucket 名稱或區域錯 | 用 `list_objects_v2` 加前綴確認實際的 key |
 | `EntityTooLarge` | 400 | 超過單一 PUT 上限，或超過 presigned POST 的 `content-length-range` | 大檔改用分段上傳；確認大小限制是否符合需求 |
 | `EntityTooSmall` | 400 | 分段上傳時，非最後一段小於 5 MiB | 調整分段大小 |
 
-瀏覽器直傳時最常見的錯誤出現在瀏覽器 console：`No 'Access-Control-Allow-Origin' header is present on the requested resource`。這代表 bucket 沒有設定 CORS，或設定的來源、方法、標頭不包含這次請求。伺服器 log 不會有任何紀錄。
-
 不會出現錯誤訊息、但會出事的情況：
 
-- **資料庫存了完整的 presigned URL**：幾分鐘後所有圖片一起失效。存 key，讀取時再簽。
 - **「先暫時公開一下」**：測試時打開的公開存取忘了關。用帳號層級的 Block Public Access 防止。
 - **上傳完成直接相信客戶端**：客戶端說「傳好了」，API 就把狀態改成 `ready`。應該由 API 自己查物件的大小與類型，內容檢查（magic bytes、掃毒）交給背景工作。
 - **刪除使用者時忘了物件儲存**：資料庫的列刪了，檔案還留在 bucket 裡。刪除流程要包含物件，或用前綴與生命週期規則統一清理。

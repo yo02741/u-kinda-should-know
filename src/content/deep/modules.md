@@ -88,11 +88,11 @@ const routes = [
 ## 模組的規則：作用域、只執行一次、唯讀綁定
 
 - 每個模組有自己的作用域。檔案裡的 `const`、`function` 不會變成全域變數，別的檔案要用就得 `export` 出去、在那邊 `import` 進來。
-- 同一個模組不管被 import 幾次，都只下載、執行一次，大家拿到同一份。`store.js` 裡的 `const cache = new Map()` 在整個應用程式裡只有一個。
+- 模組只執行一次，所以 `store.js` 裡的 `const cache = new Map()` 在整個應用程式裡只有一個。
 - 模組預設是 strict mode，最上層的 `this` 是 `undefined`。
-- 瀏覽器用 `<script type="module">` 載入，行為像 `defer`：不擋 HTML 解析，解析完才執行。沒有 `type="module"` 的 `<script>` 裡寫 `import`，會得到 `SyntaxError: Cannot use import statement outside a module`。
+- 瀏覽器用 `<script type="module">` 載入，行為像 `defer`：不擋 HTML 解析，解析完才執行。
 
-匯入拿到的是唯讀的綁定。原模組之後改了變數，匯入端讀到的是新值；匯入端自己指定 `count = 1` 會丟出 `TypeError: Assignment to constant variable.`。
+匯入拿到的是唯讀的綁定。原模組之後改了變數，匯入端讀到的是新值；匯入端自己指定 `count = 1` 會丟出 `TypeError: Assignment to constant variable.`，要改就呼叫原模組匯出的函式。
 
 具名匯出讓每個檔案用同一個名字，編輯器的自動匯入與重新命名也比較準。很多團隊的慣例是「元件用預設匯出，其他都用具名匯出」。
 
@@ -108,13 +108,13 @@ main.js
  └─ import { createPinia } from 'pinia'
 ```
 
-兩個模組互相 import 時（`a.js` import `b.js`，`b.js` 又 import `a.js`），先執行的那一個會讀到另一個還沒初始化的 `const`，得到 `ReferenceError: Cannot access 'A' before initialization`。常見的情況是 store 與 API 模組互相引用，修法是把共用的部分抽到第三個檔案。
+兩個模組互相 import 時（`a.js` import `b.js`，`b.js` 又 import `a.js`），先執行的那一個會讀到另一個還沒初始化的 `const`，得到 `ReferenceError: Cannot access 'A' before initialization`（在宣告之前就用了變數也是這個訊息）。常見的情況是 store 與 API 模組互相引用，修法是把共用的部分抽到第三個檔案。
 
 ## 副檔名、套件的 `exports` 與 import map
 
 | 寫法 | 由誰解析 | 對到哪裡 |
 |---|---|---|
-| `vue/dist/某個檔案` | Vite | 只能用 `exports` 有列出的路徑，沒列出的會出現 `Missing "./…" specifier in "vue" package` |
+| `vue/dist/某個檔案` | Vite | 只能用 `exports` 有列出的路徑，沒列出的會出現 `Missing "./…" specifier in "vue" package`；改用套件文件寫的匯入路徑 |
 
 瀏覽器只認完整的網址，副檔名一定要寫。Vite 會幫忙補副檔名，預設依序試 `.mjs`、`.js`、`.mts`、`.ts`、`.jsx`、`.tsx`、`.json`（Vite 8 的 `resolve.extensions`）；`.vue` 不在裡面，匯入元件一定要寫 `.vue`。
 
@@ -128,8 +128,6 @@ main.js
   import { createApp, ref } from 'vue'   // 由上面的 import map 對到網址
 </script>
 ```
-
-沒有 import map 時，瀏覽器丟出 `TypeError: Failed to resolve module specifier "vue". Relative references must start with either "/", "./", or "../".`。
 
 ## `vite.config.js` 的 alias
 
@@ -186,18 +184,11 @@ create-vite 9.3 的 Vue + TypeScript 範本產生的 `package.json`：
 | `dependencies` | 應用程式執行時 import 的套件：`vue`、`vue-router`、`pinia` |
 | `devDependencies` | 開發與建置用的工具：`vite`、`typescript`、`vue-tsc`、ESLint、測試工具 |
 
-前端專案最後是 Vite 打包出來的檔案，程式 import 了什麼就打包什麼，放在哪一區不影響 bundle 的內容。分開放的用處在於讀的人一眼看得出哪些會進到使用者的瀏覽器，以及只裝執行所需套件的情況（例如 `npm ci --omit=dev`）。
+放在哪一區不影響 bundle 的內容，兩區在安裝時的差別見 [套件管理與供應鏈](#/skill/npm-packages)。
 
 ## 版本範圍與 lock 檔
 
-| 寫法 | 允許的版本 | 例子 |
-|---|---|---|
-| `^3.5.0` | `>=3.5.0 <4.0.0` | 3.5.45、3.6.0 可以，4.0.0 不行 |
-| `~6.0.3` | `>=6.0.3 <6.1.0` | 6.0.9 可以，6.1.0 不行 |
-| `^0.9.1` | `>=0.9.1 <0.10.0` | 0.x 時 `^` 只放寬到同一個 minor |
-| `3.5.45` | 只有這一版 | |
-
-`package.json` 寫的是範圍，同一份範圍在不同時間安裝可能裝到不同版本。`package-lock.json` 記下這次實際裝了哪一版（連同依賴的依賴），提交進版控之後，每個人與 CI 才裝得到同一組。`npm install` 會依範圍更新 lock 檔；`npm ci` 先刪掉 `node_modules`，完全照 lock 檔安裝，lock 檔與 `package.json` 對不上就直接失敗，所以 CI 用它。
+`package.json` 寫的是範圍：`^3.5.0` 是 `>=3.5.0 <4.0.0`，`~6.0.3` 是 `>=6.0.3 <6.1.0`，`^0.9.1` 是 `>=0.9.1 <0.10.0`。同一份範圍在不同時間安裝可能裝到不同版本，`package-lock.json` 記下實際裝了哪一版，要提交進版控；CI 用的 `npm ci` 完全照 lock 檔安裝，對不上就直接失敗。完整的範圍表與各個安裝指令的差別見 [套件管理與供應鏈](#/skill/npm-packages)。
 
 開頭那次改動還加了一個圖表套件：AI 在本機跑了 `npm install`，`package.json` 多了一行，`package-lock.json` 卻沒有提交，CI 的 `npm ci` 就失敗。新增套件的步驟：
 
@@ -234,13 +225,8 @@ npm 上還有不少只提供 CommonJS 的套件。Vite 開發時會先把依賴�
 
 | 訊息 | 原因 | 修法 |
 |---|---|---|
-| `SyntaxError: The requested module './date.js' does not provide an export named 'formatDate'` | 匯入的具名匯出不存在：對方是預設匯出，或名字拼錯 | 對照兩邊的寫法；預設匯出就不加大括號 |
 | `TypeError: Failed to resolve module specifier "vue". Relative references must start with either "/", "./", or "../".` | 瀏覽器直接載入了含 bare specifier 的檔案，沒經過 Vite，也沒有 import map | 用 Vite 開發與建置，或加 import map |
 | `SyntaxError: Cannot use import statement outside a module` | `<script>` 少了 `type="module"` | 加上 `type="module"` |
-| `Missing "./dist/xxx" specifier in "某套件" package` | 匯入了套件 `exports` 沒有公開的路徑 | 改用套件文件寫的匯入路徑 |
-| `ReferenceError: Cannot access 'A' before initialization` | 循環匯入，或在宣告之前就用了變數 | 把共用的部分抽到第三個檔案 |
-| `TypeError: Assignment to constant variable.` | 對匯入的綁定重新指定 | 呼叫原模組匯出的函式去改 |
-| `ReferenceError: require is not defined` | 前端程式碼裡用了 CommonJS 的 `require` | 改成 `import` |
 | `Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html".` | 要的 JS 檔不存在，伺服器回了 `index.html`：`base` 設錯，或部署後舊頁面要了已刪除的 chunk | 檢查 `base` 與部署的檔案；處理 `vite:preloadError` |
 | `TypeError: Failed to fetch dynamically imported module: …` | 動態 import 的 chunk 下載失敗（404 或網路斷了） | 同上；在路由切換失敗時提示重新整理 |
 | `npm ci` 停在 `can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync` | 改了 `package.json` 沒更新或沒提交 lock 檔 | 本機 `npm install` 後一起提交 |

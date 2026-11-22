@@ -21,7 +21,7 @@ Authorization: Bearer atl_live_Xb3kQ9vT2mN8pL4rW7yZ1cF6hJ0sD5gA8eK3nM2qR9u
 
 設計要點和密碼一樣嚴格：固定前綴（`atl_live_`、`atl_test_`，讓人與 secret 掃描工具一眼認出）、資料庫只存 `SHA-256(key)`、完整 key 只在建立時顯示一次、每把 key 有 scope 與到期日、記錄建立者與最後使用時間。格式、資料表、驗證流程與程式在 [金鑰的範圍與壽命](#/skill/key-scope-lifetime)。兩個常見的錯誤：
 
-- **key 放在網址的 query string**（`?api_key=…`）：網址會進入存取 log、代理伺服器 log、瀏覽器歷史、`Referer` header。key 一律放在 header。
+- **key 放在網址的 query string**（`?api_key=…`）：網址會進入存取 log、代理伺服器 log、瀏覽器歷史、`Referer` header。key 一律放在 header；已經進 log 的 key 視為外洩，輪替。
 - **API key 綁在個人帳號上**：給機器用的 key 應該屬於一個「服務帳號」或「整合」，有自己的擁有團隊，人員異動時不受影響。
 
 API key 是長效的共享祕密，每次呼叫都送出同一個值。被看到一次（log、錯誤回報、被入侵的 CI），就能在別處重放到被撤銷為止。
@@ -136,24 +136,19 @@ passkey 是可探索（discoverable）的 WebAuthn 憑證，使用者不用先�
 
 企業客戶通常要求「用我們公司的身分提供者（IdP）登入」，員工離職時在 IdP 停用就全部進不來。你的系統是 Service Provider（SAML 的用語）或 Relying Party（OIDC 的用語）。
 
-| | SAML 2.0 | OIDC |
-|---|---|---|
-| 憑證格式 | XML 的 Assertion，以 XML Signature 簽章 | JWT 的 ID token |
-| 怎麼傳到你的系統 | 常見是瀏覽器把簽好的 Assertion 用表單 POST 到你的 ACS 網址 | 授權碼流程：後端拿 code 換 token |
-| 設定交換 | 雙方交換 XML metadata（含憑證） | issuer 網址 + discovery + JWKS |
-| 適合 | 既有的企業 IdP、很多 B2B SaaS 的企業方案 | 新系統、手機 App、也要呼叫 API 的情境 |
+兩種協定的憑證格式、流程、設定交換與怎麼選，見 [企業身分：LDAP、AD、SAML 與 SCIM](#/skill/enterprise-identity)；OIDC 的 discovery 見 [OAuth 2.0 與 OpenID Connect](#/skill/oauth-oidc)。
 
 驗 SAML Assertion 要檢查簽章、`Audience` 是自己、`Recipient` 與 `Destination` 是自己的 ACS 網址、`NotOnOrAfter` 沒過期、`InResponseTo` 對應自己發出的請求。XML 簽章驗證歷史上出過不少「簽章包裝」類的漏洞，務必用維護中的成熟函式庫，不要自己解析 XML 判斷。
 
-多租戶 SaaS 支援 SSO 時還要注意：
+多租戶 SaaS 支援 SSO 時：
 
 - **網域驗證**：租戶聲稱「`@acme.com` 的人走我們的 IdP」之前，要先證明擁有 `acme.com`（例如 DNS TXT 紀錄），否則租戶 A 可以設定自己的 IdP 去宣告租戶 B 員工的 email。
-- **帳號佈建**：第一次登入時自動建立帳號（JIT provisioning）很方便，但離職時不會自動停用；需要同步停用時用 SCIM（RFC 7643、7644）。
+- **帳號佈建**：第一次登入時自動建立帳號（JIT provisioning）在離職時不會自動停用；要同步停用時用 SCIM，見 [企業身分：LDAP、AD、SAML 與 SCIM](#/skill/enterprise-identity)。
 - 本地帳號綁 IdP 的 `issuer` + 使用者識別碼（SAML 的 NameID 或 OIDC 的 `sub`），理由和 [OAuth 2.0 與 OIDC](#/skill/oauth-oidc) 裡講的一樣。
 
 ## 實際程式：TOTP（RFC 6238）
 
-下面用標準函式庫的 `hmac`、`hashlib`、`struct` 從頭實作 HOTP 與 TOTP，先用 RFC 附錄的測試向量確認實作正確，再模擬註冊、驗證、時間誤差與重放。所有時間都用固定的數字，每次執行結果都一樣。
+用標準函式庫的 `hmac`、`hashlib`、`struct` 實作 HOTP 與 TOTP：先用 RFC 附錄的測試向量確認，再模擬註冊、驗證、時間誤差與重放。時間用固定的數字，每次執行結果都一樣。
 
 ```python run
 import hmac, hashlib, struct, base64
@@ -222,7 +217,7 @@ print("  2 分半前的碼：", TotpVerifier(secret).verify(old, NOW))
 print("  亂猜 000000：", TotpVerifier(secret).verify("000000", NOW))
 ```
 
-這段程式省略了正式環境要有的兩件事：嘗試次數限制（同一個帳號幾次失敗就暫停一段時間）與 secret 加密儲存。TOTP 的 secret 和密碼不同，伺服器每次都要用原文計算，所以不能只存雜湊。
+這段程式省略了嘗試次數限制（同一個帳號幾次失敗就暫停一段時間）與 secret 加密儲存。TOTP 的 secret 伺服器每次都要用原文計算，所以不能只存雜湊。
 
 ## 常見錯誤與錯誤訊息
 
@@ -231,8 +226,6 @@ print("  亂猜 000000：", TotpVerifier(secret).verify("000000", NOW))
 | TOTP 驗證碼一直錯，但 App 上看起來正常 | 伺服器時鐘不準（沒跑 NTP）；或手機時間是手動設定的 | 伺服器跑 NTP；驗證時記下偏差的時間步，偏差持續出現就是時鐘問題 |
 | 手動輸入 secret 後產生的碼不對 | Base32 字串有空白、小寫，或少了 padding，解碼失敗或解成別的值；Python 會丟 `binascii.Error: Incorrect padding` | 解碼前去空白、轉大寫、補 `=`（如上面的 `load_secret`） |
 | 用了 SHA-256 或 8 位數，有些 App 產生的碼都不對 | 部分 Authenticator App 會忽略 `algorithm`、`digits`、`period` 參數，固定用 SHA-1、6 位、30 秒 | 用 SHA-1、6 位、30 秒這組最相容的設定 |
-| 同一個 TOTP 在 30 秒內能登入兩次 | 沒有記錄最後使用的時間步 | 存 `last_step`，小於等於它的一律拒絕 |
-| API key 出現在 CDN 或代理伺服器的 log 裡 | key 放在 query string | 改放 `Authorization` header；已經出現在 log 的 key 視為外洩，輪替 |
 | client credentials 換 token 回 `{"error": "invalid_client"}` | client_id 或 secret 錯、用了授權伺服器不支援的驗證方式（Basic header 與表單參數） | 對照 discovery 的 `token_endpoint_auth_methods_supported`；檢查 secret 有沒有多餘的換行 |
 | nginx 回 `400 No required SSL certificate was sent` | 開了 `ssl_verify_client on`，客戶端沒有出示憑證 | 確認客戶端有設定憑證與私鑰；用 `openssl s_client -connect host:443 -cert client.pem -key client.key` 測試 |
 | `openssl s_client` 顯示 `verify error:num=20:unable to get local issuer certificate` | 驗證端沒有信任簽發這張憑證的 CA，或客戶端沒有送出中繼憑證 | 把內部 CA 加入驗證端的信任清單；客戶端送完整的憑證鏈 |

@@ -120,6 +120,13 @@ for (const f of deepFiles) {
     if (flags.includes('vue') && !['js', 'javascript'].includes(lang)) errors.push(`${tag}: vue 旗標只能加在 js 區塊（\`\`\`js run vue），這裡是 "${lang}"`)
   }
   const prose = md.replace(/^```[\s\S]*?^```/gm, '')
+  // 表格中間不能有空行：空行之後的列會被當成另一張表的表頭
+  const pl = prose.split('\n')
+  for (let i = 1; i < pl.length - 1; i++) {
+    if (pl[i].trim() === '' && pl[i - 1].startsWith('|') && pl[i + 1].startsWith('|') && !/^\|\s*:?-{2,}/.test(pl[i + 2] || '')) {
+      errors.push(`${tag}: 表格被空行切斷（「${pl[i + 1].slice(0, 30)}…」那一列之前）`)
+    }
+  }
   if (/^# /m.test(prose)) errors.push(`${tag}: 不要用 # 一級標題（技能頁已有標題），段落用 ##`)
   const h2 = (prose.match(/^## /gm) || []).length
   if (h2 < 3) errors.push(`${tag}: 至少要有三個 ## 段落（目前 ${h2} 個）`)

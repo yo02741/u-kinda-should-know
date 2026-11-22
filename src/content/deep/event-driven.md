@@ -259,7 +259,6 @@ outbox relay 也一樣：多個 relay 並行送出時，同一個 aggregate 的�
 | 資料改了，下游沒收到 | 雙寫：commit 後 publish 前失敗 | outbox 或 CDC |
 | 下游收到一件沒發生的事 | 先 publish 後 commit，或交易裡 publish 後 rollback | outbox：事件只在 commit 後才可能送出 |
 | 點數加兩次、信寄兩封 | 至少一次傳遞，消費者不冪等 | 冪等鍵表，去重與效果同一交易 |
-
 | 狀態從 shipped 退回 paid | 事件亂序，舊事件覆蓋新狀態 | 版本號：`WHERE version < 新版本` |
 | outbox 越來越大、relay 變慢 | 已送出的列沒清 | 定期刪除，或用分區表；`published_at IS NULL` 加部分索引 |
 | 資料庫磁碟被 WAL 吃滿 | CDC 的 replication slot 停止消費 | 監控 slot 落後量，停用的 slot 要刪除 |

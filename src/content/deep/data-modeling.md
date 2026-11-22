@@ -106,7 +106,7 @@ ORDER BY p.id;
 
 ## 三個正規形式的細節
 
-正規形式的正式定義是用「函數相依」寫的，下面用開頭那張表說明。
+正規形式的正式定義是用「函數相依」寫的。
 
 **1NF 的另一種違反：重複欄位。**`phone1`、`phone2`、`phone3`：第四支電話要加欄位、查「這支電話是誰的」要查三個欄位。改成一張 `user_phones(user_id, phone)`。
 
@@ -114,7 +114,7 @@ ORDER BY p.id;
 
 **2NF：只依賴主鍵一部分的欄位，每出現一次就重複一次。**品項表如果還放了 `product_name`、`customer_email`：
 
-- `product_name` 只由 `product_id` 決定，跟 `order_id` 無關。「鍵盤」這個名字在每張買了鍵盤的訂單裡都存一遍，改名時要改很多列。
+- `product_name`：「鍵盤」這個名字在每張買了鍵盤的訂單裡都存一遍，改名時要改很多列。
 - `customer_email` 只由 `order_id`（進而由客戶）決定，跟 `product_id` 無關。
 
 **3NF：遞移相依。**`orders(id, user_id, customer_email, customer_city, …)` 的結果是開頭的更新異常：同一位使用者的 email 分散在他每一張訂單上。拆開之後需要時 JOIN。
@@ -196,7 +196,7 @@ DELETE FROM orders WHERE id = 106;
 SELECT count(*) AS items_left_for_106 FROM order_items WHERE order_id = 106;   -- 0
 ```
 
-PostgreSQL **不會**自動替外鍵欄位建索引（主鍵和 UNIQUE 會）。沒有索引時，刪除一位使用者要掃整張 orders 找參照，JOIN 也會慢。外鍵欄位通常都該有索引，見 [索引與查詢計畫](#/skill/indexes)。
+PostgreSQL **不會**自動替外鍵欄位建索引（主鍵和 UNIQUE 會）。外鍵欄位通常都該有索引，沒有時的後果見 [索引與查詢計畫](#/skill/indexes)。
 
 ## 用約束表達業務規則
 

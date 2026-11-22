@@ -140,7 +140,7 @@ histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[
 
 ### 百分位數與 histogram 的估計
 
-下面產生一組延遲樣本：大部分很快，少數很慢。比較平均、真正的百分位數，以及從 bucket 估出來的百分位數：
+一組延遲樣本（大部分很快，少數很慢）的平均、真正的百分位數，以及從 bucket 估出來的百分位數：
 
 ```python run
 import bisect, random
@@ -188,8 +188,6 @@ for q in (0.5, 0.95, 0.99):
     print(f"bucket 估計 p{int(q*100):<3} {histogram_quantile(q, bounds, cumulative)*1000:7.0f} ms")
 ```
 
-觀察：
-
 - 平均值落在快、慢兩群之間，**哪一群使用者的實際體驗都不是它**。
 - p95 還在快的那群，p99 才看到慢的那 3%。要看尾端，就要看 p99。
 - bucket 估計的準確度取決於 bucket 的邊界：p50、p95 落在比較窄的 0.1–0.25 秒 bucket，估得很準；p99 落在 5–10 秒這個很寬的 bucket，只能估出一個內插值，誤差可能有幾百毫秒到幾秒。bucket 邊界要涵蓋你在意的門檻（例如 SLO 是 300 ms，就要有一個 `le="0.3"`）。
@@ -231,7 +229,7 @@ RED 看的是使用者感受到什麼；USE 找的是哪個資源是瓶頸。Goo
 
 ## 分散式追蹤：trace 與 span
 
-一個 **trace** 代表一個請求的完整旅程；它由很多 **span** 組成，每個 span 是一段有開始與結束時間的工作（一次 HTTP 呼叫、一句 SQL、一段函式），span 之間有父子關係。必讀那張圖裡，時間花在外部金流 API。
+一個 **trace** 代表一個請求的完整旅程；它由很多 **span** 組成，每個 span 是一段有開始與結束時間的工作（一次 HTTP 呼叫、一句 SQL、一段函式），span 之間有父子關係。
 
 每個 span 記錄：名稱、開始與結束時間、所屬的 trace id、自己的 span id、父 span id，以及屬性（`http.route`、`db.system`、`order.id` 等）。
 
@@ -307,17 +305,14 @@ groups:
 
 固定門檻之外，以 SLO 為基礎的燃燒率告警更能反映「照這個速度，這個月的錯誤預算會不會燒完」，見 [SLI、SLO 與錯誤預算](#/skill/slo-error-budget)。每一則告警附上 runbook 連結，見 [健康檢查、備份與事故處理](#/skill/reliability)。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息／現象 | 原因 | 怎麼處理 |
 |---|---|---|
-| `TypeError: Object of type datetime is not JSON serializable` | log 的欄位裡有 `datetime`、`Decimal` 等 `json` 不認得的型別 | 先轉成字串（`isoformat()`），或給 `json.dumps` 一個 `default=str` |
 | `ValueError: Duplicated timeseries in CollectorRegistry` | prometheus_client 同一個指標名稱註冊了兩次，常見於模組被重複 import 或測試裡重建 app | 指標在模組層級定義一次；測試用獨立的 registry |
 | 監控系統記憶體一直漲、查詢逾時 | 標籤基數爆炸 | 找出時間序列最多的指標與標籤，把高基數的值移出標籤 |
 | `rate()` 用在 gauge 上，結果怪異 | `rate` 假設值只增不減（遇到下降當成重啟歸零） | gauge 直接看值，或用 `deriv`、`delta` |
 | trace 在某個服務斷掉，變成兩個不相干的 trace | 那個服務沒有傳遞 `traceparent`，或經過佇列時沒放進訊息 metadata | 加上 instrumentation，或手動 inject／extract 上下文 |
-| log 裡 stack trace 被切成好幾筆 | 用純文字輸出多行例外 | 例外放進結構化 log 的一個欄位 |
-| 儀表板上的 p99 看起來很平滑，但使用者抱怨 | 圖表把各實例的百分位數取平均，或時間窗口太大 | 用 histogram 的 bucket 先加總再算；縮小窗口 |
 
 ## 動手
 

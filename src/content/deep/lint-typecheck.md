@@ -124,13 +124,11 @@ eslint-plugin-vue 10.12.1 的 Vue 3 組合，數字是實際數過的規則數�
 | `flat/strongly-recommended` | 再加 25 | 可讀性，大多是模板的格式 | `vue/html-indent`、`vue/html-quotes`、`vue/max-attributes-per-line`、`vue/attribute-hyphenation` |
 | `flat/recommended` | 再加 8 | 一致性與少用的寫法 | `vue/attributes-order`、`vue/block-order`、`vue/no-v-html`、`vue/this-in-template` |
 
-`flat/essential` 是底線，AI 產出的元件最常踩的幾種錯（改 props、`v-for` 沒 `key`、Vue 2 的生命週期名稱）都在裡面，完整清單見 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes)。`strongly-recommended` 多出來的規則大部分是格式，和 Prettier 重疊；用了 Prettier 時，把 `eslint-config-prettier/flat` 放在設定陣列的最後，這些規則就會被關掉。`vue/no-v-html` 在 `recommended` 才有，專案有用到 `v-html` 時值得單獨打開：`v-html` 插入的字串不會被跳脫，是 XSS 的常見來源。
+`flat/essential` 是底線，AI 產出的元件最常踩的幾種錯（改 props、`v-for` 沒 `key`、Vue 2 的生命週期名稱）都在裡面，完整清單見 [AI 寫前端的常見錯誤](#/skill/ai-common-mistakes)。`strongly-recommended` 多出來的規則大部分是格式，和 Prettier 重疊，會被設定陣列最後的 `skipFormatting` 關掉。`vue/no-v-html` 在 `recommended` 才有，專案有用到 `v-html` 時值得單獨打開：`v-html` 插入的字串不會被跳脫，是 XSS 的常見來源。
 
 ## vue-tsc：執行方式與 TypeScript 版本
 
-`tsc` 只認得 `.ts`、`.tsx`、`.js` 這類副檔名，`.vue` 不在它的範圍裡。`vue-tsc` 用 Vue 的語言工具把 SFC 轉成 TypeScript 看得懂的形式，`<script setup lang="ts">` 與模板裡的運算式一起檢查：`{{ appt.patientNmae }}` 會被當成「存取 `Appointment` 型別上不存在的屬性」。實測同一個專案，`tsc --noEmit` 沒有任何輸出，`vue-tsc --build` 列出上面四個錯並以代碼 1 結束。
-
-兩種常見的執行方式：
+`vue-tsc` 用 Vue 的語言工具把 SFC 轉成 TypeScript 看得懂的形式：`{{ appt.patientNmae }}` 會被當成「存取 `Appointment` 型別上不存在的屬性」。實測同一個專案，`tsc --noEmit` 沒有任何輸出，`vue-tsc --build` 列出上面四個錯並以代碼 1 結束。
 
 | 指令 | 用在哪裡 |
 |---|---|
@@ -162,7 +160,7 @@ pre-commit 用 husky 掛 git hook、lint-staged 挑出暫存的檔案：`npx hus
 - TypeScript 6.0 直接報錯：`error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.`
 - TypeScript 5.9 不報錯，默默用預設值檢查：實測一個 `strict: true` 才會報錯的檔案，`tsc --noEmit a.ts` 以代碼 0 結束，`tsc --noEmit -p .` 才報出 `TS7006`。
 
-型別錯誤也常發生在沒改到的檔案（改了 `types.ts`，壞的是用到它的元件）。型別檢查放在 CI 跑整個專案；一定要放進 pre-commit 時，用 lint-staged 的函式寫法回傳不帶檔名的指令。
+型別錯誤也常發生在沒改到的檔案（改了 `types.ts`，壞的是用到它的元件）。型別檢查放在 CI 跑整個專案；一定要放進 pre-commit 時的寫法在下一節。
 
 pre-commit 可以用 `git commit --no-verify` 跳過，只是加快回饋；合併前的關卡在 CI。
 
@@ -244,8 +242,6 @@ export default {
 | `The 'slots' variable inside 'v-for' directive should be replaced with a computed property that returns filtered array instead. You should not mix 'v-for' with 'v-if'  vue/no-use-v-if-with-v-for` | 同一個元素上同時有 `v-for` 與 `v-if` | 用 computed 先篩選 |
 | `Unexpected side effect in "first" computed property  vue/no-side-effects-in-computed-properties` | computed 裡呼叫了會改原陣列的 `sort()` | 改用 `toSorted()` 或先複製 |
 | `Component name "Queue" should always be multi-word  vue/multi-word-component-names` | 單字的元件名稱，可能和未來的 HTML 元素撞名 | 改成 `QueueList` 這類兩個字以上的名稱 |
-| `error TS2551: Property 'patientNmae' does not exist on type 'Appointment'. Did you mean 'patientName'?` | 模板裡拼錯欄位 | 照建議修正；只有 `vue-tsc` 看得到模板裡的這種錯 |
-| `error TS2367: This comparison appears to be unintentional because the types … have no overlap.` | 和型別裡不存在的字串比較（`'canceled'` 與 `'cancelled'`） | 改成型別裡的值 |
 | `error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline.` | lint-staged 把檔名傳給了 `tsc` 或 `vue-tsc` | 用函式回傳不帶檔名的指令，或把型別檢查移到 CI |
 | `Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './lib/tsc' is not defined by "exports"` | vue-tsc 3.3 搭配了 TypeScript 7 | `typescript` 鎖在 `~6.0.0` |
 | 存檔時 Prettier 改一次、`eslint --fix` 又改回去 | 少了 `eslint-config-prettier`，或沒放在設定陣列的最後 | 把 `skipFormatting` 放到最後 |

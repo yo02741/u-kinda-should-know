@@ -28,7 +28,7 @@
 | `:href`、`:src`、`location.href = x`、`window.open(x)` | 網址 | `javascript:` 網址會執行 |
 | `eval(x)`、`new Function(x)`、`setTimeout(x)`（x 是字串） | JavaScript | 直接執行 |
 
-`innerHTML` 插進去的 `<script>` 不會執行，但 `<img onerror>`、`<svg onload>`、`<iframe srcdoc>` 會，只過濾 `<script>` 擋不住。
+`innerHTML` 插進去的 `<script>` 不會執行（HTML 規範的規定），但 `<img onerror>`、`<svg onload>`、`<iframe srcdoc>` 會，只過濾 `<script>` 擋不住。
 
 ## 修法：純文字、sanitizer、scheme 允許清單
 
@@ -107,22 +107,17 @@ console.log(escapeHtml('<img src=x onerror=alert(1)>'))
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
 | 輸入 `<img src=x onerror=alert(1)>` 後跳出對話框 | `v-html` 或 `innerHTML` 放了使用者內容 | 改成 `{{ }}`；要顯示 HTML 先經過 sanitizer |
-
 | 點連結執行了程式 | `:href` 綁了 `javascript:` 網址，Vue 不檢查 scheme | `new URL()` 讀 `protocol`，只放行允許清單 |
 
 :::stop 讀到這裡可以先停：會找出把字串當成 HTML 或網址的寫法，用純文字、sanitizer 與 scheme 允許清單處理。後面是 Vue 與 DOMPurify 的細節、token 存放、CSP、第三方 script 與前端秘密，要設定安全標頭或接廠商的 script 時再回來讀。
 
 ## Vue 處理了什麼、沒處理什麼
 
-在 Chromium 153 實測：`el.innerHTML = '<script>…</script>'` 插進去的 script 不會執行（HTML 規範規定這樣插入的 script 不執行），但 `el.innerHTML = '<img src="x" onerror="…">'` 的 `onerror` 會。只過濾 `<script>` 的程式擋不住後者。
-
-用 Vue 3.5.45 實測同一段字串 `<img src=x onerror="…">`：
+用 Vue 3.5.45 在 Chromium 153 實測同一段字串 `<img src=x onerror="…">`：
 
 - `{{ note }}`：Elements 分頁看到的是 `&lt;img src=x …&gt;`，畫面顯示這串字，沒有執行。
 - `v-html="note"`：建出一個 `<img>`，`onerror` 執行了。
 - `:href="url"`，`url` 是 `javascript:window.x=1`：`href` 原樣輸出，點下去執行。Vue 官方文件的 Security 一節也寫明 Vue 不替網址做檢查。
-
-另外兩件和 Vue 有關的事：
 
 - 使用者的內容不能變成模板。含編譯器的完整版 Vue 可以在瀏覽器裡編譯 `template` 字串，字串裡的 `{{ }}` 會被當成 JavaScript 運算式執行。Vite 建置的專案在建置時就把 SFC 的模板編譯成函式，執行時用的是不含編譯器的 runtime 版。
 - `v-html` 插進來的元素沒有 `data-v-…` 屬性，`<style scoped>` 的規則套不到它們（見 [CSS 怎麼決定套用哪一條](#/skill/css-cascade)），常有人因為這個改用全域樣式。
@@ -144,7 +139,7 @@ defineProps({ note: { type: String, default: '' } })
 </style>
 ```
 
-衛教文章、公告這類由後台編輯器產生的 HTML，需要保留標題、清單與連結。Sanitizer 把字串解析成 DOM，依允許清單保留標籤與屬性，其他移除。DOMPurify 3.4.18 在 Chromium 的預設結果：
+Sanitizer 把字串解析成 DOM，依允許清單保留標籤與屬性，其他移除。DOMPurify 3.4.18 在 Chromium 的預設結果：
 
 | 輸入 | `DOMPurify.sanitize()` 的結果 |
 |---|---|
@@ -173,20 +168,17 @@ defineProps({ note: { type: String, default: '' } })
 
 ## token 放在哪裡都擋不住 XSS
 
-| 位置 | XSS 時注入的 script 能做什麼 | 其他代價 |
-|---|---|---|
-| localStorage | 讀走 token，在別的電腦上用到它過期 | 關掉瀏覽器還在 |
-| sessionStorage | 讀走 token（只限這個分頁的那一份） | 關掉分頁就消失 |
-| 記憶體（Pinia store） | 頁面開著時用它發請求；要讀走得剛好在它存在時執行 | 重新整理就沒了，要搭配 refresh 機制 |
-| `HttpOnly` cookie | 讀不到 cookie，但能在頁面裡發請求，瀏覽器自動帶上 | 要處理 CSRF 與跨網域的 `credentials` |
+每個位置都會被 XSS 利用，差別在攻擊者拿走的是「token 本身」還是「頁面開著時的操作權」：
 
-每個位置都會被利用，差別在攻擊者拿走的是「token 本身」還是「頁面開著時的操作權」。登入方案的整體取捨見 [登入狀態與 401](#/skill/auth-frontend) 與後端的 [驗證基礎](#/skill/authn-basics)；從資安的角度，最有效的仍是不讓 XSS 發生。
+- localStorage、sessionStorage：注入的 script 讀走 token，在別的電腦上用到它過期。
+- 記憶體（Pinia store）：頁面開著時用它發請求；要讀走得剛好在它存在時執行。
+- `HttpOnly` cookie：讀不到 cookie，但能在頁面裡發請求，瀏覽器自動帶上；要處理 CSRF 與跨網域的 `credentials`。
+
+各位置在重新整理、跨分頁時的差別見 [登入狀態與 401](#/skill/auth-frontend) 與 [瀏覽器裡的儲存](#/skill/browser-storage)，伺服器那一側見後端的 [驗證基礎](#/skill/authn-basics)。最有效的仍是不讓 XSS 發生。
 
 ## CSP：伺服器限制前端程式能做什麼
 
-CSP（Content-Security-Policy）是伺服器隨 HTML 送出的回應標頭，告訴瀏覽器這個頁面能執行哪些來源的 script、套用哪些樣式、連到哪些網址。注入的程式就算進了 DOM，違反 CSP 也不會執行。代價是自己的程式也要照它的規矩寫。
-
-`script-src 'self'` 之下，下列寫法都會被擋。訊息取自 Chromium 153 的 Console：
+CSP（Content-Security-Policy）是伺服器隨 HTML 送出的回應標頭，限制頁面能執行哪些來源的 script、套用哪些樣式、連到哪些網址；各指令的作用見後端的 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)。自己的程式也要照它的規矩寫：`script-src 'self'` 之下，下列寫法都會被擋。訊息取自 Chromium 153 的 Console：
 
 | 被擋的寫法 | Console 訊息的開頭 | 改法 |
 |---|---|---|
@@ -211,7 +203,7 @@ CSP（Content-Security-Policy）是伺服器隨 HTML 送出的回應標頭，告
 add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
 ```
 
-導入 CSP 時先送 `Content-Security-Policy-Report-Only`：瀏覽器照樣回報違規、但不阻擋，觀察一段時間確定沒有誤擋，再換成正式的標頭。主機不能設定回應標頭時（例如某些靜態網站服務），可以在 `index.html` 寫 `<meta http-equiv="Content-Security-Policy" content="…">`，但 `frame-ancestors` 與回報功能在 meta 裡無效。
+導入 CSP 時先送 `Content-Security-Policy-Report-Only`，只回報違規、不阻擋。主機不能設定回應標頭時（例如某些靜態網站服務），可以在 `index.html` 寫 `<meta http-equiv="Content-Security-Policy" content="…">`，但 `frame-ancestors` 與回報功能在 meta 裡無效。
 
 更進一步的是 Trusted Types：CSP 加上 `require-trusted-types-for 'script'` 之後，`innerHTML` 這類地方只接受經過自訂 policy 產生的物件，直接給字串會丟出錯誤。Chrome 83、Safari 26、Firefox 148 支援，2026 年 2 月成為 Baseline，舊瀏覽器還沒有，先當成額外的一層：程式照樣透過 policy 寫入，不支援的瀏覽器只是不強制檢查。過濾仍要自己做，不支援的瀏覽器不會替你擋。
 
@@ -256,11 +248,10 @@ window.addEventListener('message', (event) => {
 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
-
 | `Failed to find a valid digest in the 'integrity' attribute …` | CDN 上的檔案和 `integrity` 記錄的不同 | 確認版本；廠商換了檔案就重新審查再更新雜湊 |
 | bundle 搜得到金鑰 | 金鑰放在 `VITE_` 變數或程式裡 | 移到後端；已經外流的金鑰作廢重發 |
 
-AI 產生的前端常見的三個：為了顯示換行或粗體直接用 `v-html`；把 API 給的網址直接綁 `:href`；為了讓 CSP 不報錯，在 `script-src` 加上 `'unsafe-inline'` 與 `'unsafe-eval'`。最後一個等於把 CSP 拿掉，要改的是程式的寫法。
+AI 產生的前端除了必讀那兩個錯誤（`v-html` 放使用者內容、API 給的網址直接綁 `:href`），還常為了讓 CSP 不報錯，在 `script-src` 加上 `'unsafe-inline'` 與 `'unsafe-eval'`。這等於把 CSP 拿掉，要改的是程式的寫法。
 
 ## 動手
 

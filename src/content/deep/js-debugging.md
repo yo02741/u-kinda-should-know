@@ -170,7 +170,7 @@ Vue 只接得到它自己呼叫的函式丟出的錯。下面這些不經過 Vue
 
 - `setTimeout`、`setInterval` 的回呼，以及自己用 `addEventListener` 加的監聽器：由 `window` 的 `error` 事件接。
 - 呼叫了 async 函式卻沒有回傳或 `await` 它的 Promise：`onMounted(() => { load() })` 裡 `load()` 失敗，Vue 收不到；寫成 `onMounted(async () => { await load() })` 或 `onMounted(() => load())`，Vue 才收得到。其他沒人接的 Promise 由 `window` 的 `unhandledrejection` 事件接。
-- 從別的網域載入的 script（第三方套件的 CDN 網址）丟出的錯，`window` 的 `error` 事件只拿到 `Script error.`，沒有訊息與位置，除非 `<script>` 加上 `crossorigin` 而且對方的回應帶有 CORS 標頭。
+- 從別的網域載入的 script（第三方套件的 CDN 網址）丟出的錯，`window` 的 `error` 事件只拿到 `Script error.`，沒有訊息與位置，除非 `<script>` 加上 `crossorigin` 而且對方的回應帶有 CORS 標頭，或自己託管該檔案。
 
 ## 用 `cause` 保留原本的錯誤
 
@@ -260,7 +260,7 @@ onErrorCaptured((err, instance, info) => {
 </template>
 ```
 
-回傳 `false` 會讓錯誤停在這裡，errorHandler 就收不到；要同時回報，在這裡自己呼叫回報函式。
+回傳 `false` 之後 errorHandler 收不到；要同時回報，在這裡自己呼叫回報函式。
 
 ## 其他錯誤訊息
 
@@ -273,8 +273,6 @@ onErrorCaptured((err, instance, info) => {
 | `RangeError: Maximum call stack size exceeded` | 遞迴沒有停，或兩個函式互相呼叫 | 看 stack trace 裡重複出現的那幾行 |
 | `[Vue warn]: Unhandled error during execution of mounted hook` | 生命週期裡丟出錯誤，而且沒有 errorHandler | 展開警告下面的元件名稱與錯誤；補上 errorHandler |
 | `Uncaught (in promise) …` | Promise 失敗沒有人處理 | 找到沒有 `await` 或沒有 `catch` 的呼叫 |
-| `Script error.` | 跨網域的 script 出錯，瀏覽器不給細節 | `<script crossorigin>` 加上對方的 CORS 標頭；或自己託管該檔案 |
-| stack trace 只有 `index-<hash>.js:1:48213` | 沒有 source map | 開發環境重現，或建置時產生 source map |
 
 ## 動手
 

@@ -144,12 +144,11 @@ print("竄改後的 token →", check_token(forged, NOW + 60))
 
 ## 兩種往返的完整請求、cookie 屬性與 session fixation
 
-四種組合實際帶的東西：
+必讀那張四格表實際帶的東西：
 
-| | 放在 cookie（瀏覽器自動帶） | 放在 Authorization header（程式自己帶） |
-|---|---|---|
-| 參照型（查表） | 傳統 session：`Cookie: sid=…` | opaque token：`Authorization: Bearer 3f9a…`，伺服器查表或呼叫 introspection |
-| 自帶型（驗簽章） | JWT 放在 cookie 裡（有些框架這樣做） | 常見的「JWT 登入」：`Authorization: Bearer eyJ…` |
+- 傳統 session：`Cookie: sid=…`。
+- opaque token：`Authorization: Bearer 3f9a…`，伺服器查表或呼叫 introspection。
+- JWT 登入：`Authorization: Bearer eyJ…`；有些框架把 JWT 放在 cookie 裡。
 
 登入表單的請求，以及登入後瀏覽器自動帶 cookie 的請求：
 
@@ -177,7 +176,7 @@ Cookie: __Host-sid=q7HkX2vP9mT4sL8wR1yZ3cF6hJ0dN5gA
 | `__Host-` 前綴 | 瀏覽器強制要求 `Secure`、`Path=/`、不能設 `Domain` | 子網域可能設下同名 cookie 覆蓋它 |
 | `Max-Age` / `Expires` | cookie 在瀏覽器保留多久 | 不設就是「瀏覽器關閉即刪除」的 session cookie；伺服器端的到期仍要另外檢查 |
 
-還有一個登入時一定要做的事：**登入成功後換一個新的 session id**。如果沿用登入前就存在的 id，攻擊者可以先拿到一個 id、想辦法讓受害者用這個 id 登入，之後攻擊者手上的 id 就變成已登入的（session fixation）。
+**登入成功後換一個新的 session id**。如果沿用登入前就存在的 id，攻擊者可以先拿到一個 id、想辦法讓受害者用這個 id 登入，之後攻擊者手上的 id 就變成已登入的（session fixation）。
 
 token 版的登入請求，以及之後帶 token 的請求：
 
@@ -214,15 +213,11 @@ session 的代價是每個請求一次查詢，以及所有應用伺服器都要
 
 ## 攻擊面：cookie 防 CSRF，header 防 XSS 偷走
 
-兩種攜帶方式各有一個主要的對手：
-
 | | cookie（HttpOnly） | header（token 存在 JS 讀得到的地方） |
 |---|---|---|
 | CSRF（跨站請求偽造） | 有風險：瀏覽器會自動帶 cookie，別的網站可以讓瀏覽器對你的網站發請求 | 沒有：別的網站沒辦法讓瀏覽器自動加上你的 Authorization header |
 | XSS 偷走憑證 | JS 讀不到，偷不走；但 XSS 仍能在頁面裡以使用者身分發請求 | `localStorage` 或 JS 變數裡的 token 可以被讀出來、送到攻擊者那裡，在任何地方使用到過期 |
 | 主要防護 | `SameSite`、CSRF token、檢查 `Origin`、改變狀態的操作不用 GET | 防 XSS（輸出編碼、CSP）、access token 短效期、存在記憶體而非 `localStorage` |
-
-幾個容易誤會的地方：
 
 - **HttpOnly 不能讓 XSS 變安全**。它只是讓攻擊者拿不走 session id、不能離開這個頁面使用。頁面上的惡意腳本仍可以直接呼叫 API。XSS 要從根本防，見 [XSS 與 CSRF](#/skill/xss-csrf)。
 - **SameSite 看的是「site」不是「origin」**。`evil.shop.example.com` 和 `shop.example.com` 算同一個 site，SameSite 擋不住從同一個註冊網域底下的其他子網域發起的請求。子網域如果開放給使用者或第三方，還是要有 CSRF token 或 `Origin` 檢查。
@@ -242,14 +237,13 @@ session 的代價是每個請求一次查詢，以及所有應用伺服器都要
 
 ## 簽章、框架的 session 與常見錯誤
 
-必讀那段程式的最後一部分：伺服器不查表也能確定內容沒被改過，因為只有持有 `SECRET` 的人算得出正確的簽章。代價是撤銷問題。
+必讀那段程式的最後一部分：伺服器不查表也能確定內容沒被改過，因為只有持有 `SECRET` 的人算得出正確的簽章。
 
 在真正的框架裡，session 通常由框架或套件處理（例如 Starlette 的 `SessionMiddleware` 是把資料簽章後整包放進 cookie，屬於自帶型；要伺服器端 session 得另外接 Redis 之類的儲存）。選套件時先確認它是哪一種，撤銷行為完全不同。
 
 | 症狀 | 原因 | 怎麼修 |
 |---|---|---|
 | 登入成功，下一個請求又變成未登入 | 回應的 `Set-Cookie` 被瀏覽器拒收：在 HTTP 上設了 `Secure`、跨站請求沒有 `SameSite=None`、`fetch` 沒帶 `credentials: 'include'`。Chrome DevTools 的 Network 面板會在該 cookie 旁標出被擋下的原因 | 開發環境用 `localhost`（多數瀏覽器把它當安全來源）；跨站時檢查 SameSite 與 CORS credentials 設定 |
-| 多台伺服器時使用者會隨機被登出 | session 存在各自的記憶體，負載平衡器把請求送到別台 | 改用共用儲存（Redis、資料庫） |
 | 改密碼後，其他裝置仍然登入著 | 改密碼流程沒有撤銷既有 session 或 refresh token | 改密碼時撤銷該使用者所有 session 與 refresh token，見 [帳號生命週期](#/skill/account-lifecycle) |
 | 每個請求都回 `401`，log 顯示 token 過期 | access token 過期後客戶端沒有用 refresh token 換新的，或伺服器與客戶端的時鐘差太多 | 客戶端在收到 401 時換發一次再重試；伺服器驗 `exp` 時容許幾十秒的時鐘誤差 |
 

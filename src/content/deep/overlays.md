@@ -103,25 +103,24 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); overflow: hidden; overscroll-be
 
 ## Dialog 的焦點：開啟、留在裡面、還回去
 
-WAI-ARIA APG 的 Dialog (Modal) 模式：
+WAI-ARIA APG 的 Dialog (Modal) 模式另外寫了：
 
-1. 開啟時焦點移到 Dialog 裡的元素，通常是第一個可聚焦的元素。內容很長時，先聚焦開頭的標題或段落（加 `tabindex="-1"`）；確認刪除這類不容易復原的操作，可以先聚焦比較安全的按鈕。
-2. 開著的時候，Tab 與 Shift+Tab 只在 Dialog 裡移動，到了最後一個再按 Tab 回到第一個。
-3. Esc 關閉。
-4. 關閉後焦點回到開啟它的元素；那個元素不存在了，就移到接得上工作流程的地方。
-5. 建議 Tab 順序裡一定有一顆看得見的關閉或取消按鈕。
+- 開啟時通常聚焦第一個可聚焦的元素。內容很長時，先聚焦開頭的標題或段落（加 `tabindex="-1"`）；確認刪除這類不容易復原的操作，可以先聚焦比較安全的按鈕。
+- 開著的時候，到了最後一個元素再按 Tab 回到第一個。
+- 關閉時開啟它的元素不存在了，焦點就移到接得上工作流程的地方。
+- 建議 Tab 順序裡一定有一顆看得見的關閉或取消按鈕。
 
 APG 也提醒：`aria-modal="true"` 會讓部分輔助科技看不到 Dialog 以外的內容，所以只有在程式真的擋住了外面所有操作、外面也被遮暗時才標。用 `div` 做卻沒擋住背景，標了反而更糟。
 
 ## `<dialog>` 的其他方法與較新的屬性
 
-規範要求關閉 modal Dialog 時把焦點還給開啟前的元素；這一課沒有逐一實測各瀏覽器，驗收時照樣檢查。
+關閉時歸還焦點是規範的要求；這一課沒有逐一實測各瀏覽器，驗收時照樣檢查。
 
 - `close(value)` 關閉並把 `returnValue` 設成 `value`。
 - `::backdrop` 是後面那層遮罩的樣式；`:modal` 選得到目前以 modal 開啟的 Dialog（Baseline 2022）。
 - 在最後一個元素再按 Tab，焦點不會走到頁面其他元素；依瀏覽器而定，可能移到網址列這類瀏覽器介面，而不是繞回 Dialog 的第一個元素。
 
-`<dialog>` 是 Baseline 2022。較新的屬性要看支援狀態（依 2026-11 的 web-features 資料）：
+較新的屬性要看支援狀態（依 2026-11 的 web-features 資料）：
 
 | 功能 | 做什麼 | 狀態 |
 |---|---|---|
@@ -146,7 +145,7 @@ APG 也提醒：`aria-modal="true"` 會讓部分輔助科技看不到 Dialog 以
 | `manual` | 不會，要自己關 | 不會 |
 | `hint` | 會 | 只關其他 `hint`；還不是 Baseline |
 
-Popover 同樣放在 top layer，但不會讓頁面其他部分 inert，也不困住焦點。開啟時焦點不會自動移進去，除非裡面有 `autofocus` 的元素；`auto` popover 關閉時，如果焦點在 popover 裡，會還給開啟前有焦點的元素。
+Popover 同樣放在 top layer，但不會讓頁面其他部分 inert，也不困住焦點。`auto` popover 關閉時，如果焦點在 popover 裡，會還給開啟前有焦點的元素。
 
 把 popover 定位在按鈕旁邊的 CSS anchor positioning，依 2026-11 的 web-features 資料還不是 Baseline，目前多半用 Floating UI 這類函式庫，或自己用 `getBoundingClientRect()` 計算位置。
 
@@ -163,10 +162,6 @@ WCAG 2.1 的 1.4.13 Content on Hover or Focus（AA）對 hover 或 focus 才出�
 瀏覽器內建的 `title` 提示是這條的例外，但它多半只在滑鼠停留時出現，鍵盤與觸控使用者看不到，重要的說明不要只放在 `title`。
 
 AI 有時會產生 `interestfor` 屬性（滑鼠停留或聚焦就開啟目標的 interest invokers）搭配 `popover="hint"` 的 Tooltip。依 2026-11 的 web-features 資料，`interestfor` 只有 Chrome 149 起支援，`popover="hint"` 也還不是 Baseline。用它就要另外寫 `mouseenter`、`focus`、`Esc` 的處理當退路，不能當成唯一的寫法。
-
-## Drawer 與手機
-
-Drawer 是位置不同的 Dialog：從側邊或底部滑出，擋住頁面時規則和 modal Dialog 完全一樣。手機上常把置中的 Dialog 改成從底部滑出的 Sheet，只改 CSS，不改行為。
 
 ## 背景捲動
 
@@ -210,7 +205,7 @@ dialog::backdrop {
 - `closedby` 不是每個瀏覽器都有，不能只靠它擋。
 - 沒有 `requestClose()` 的瀏覽器，退路是自己發一個可取消的 `cancel` 事件：`if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close()`。
 
-AI 產生的 Dialog 最常見的是 `div` 加 `v-if` 加 `z-index`：沒有焦點移動、沒有 Esc、背景沒有 inert。描述需求時指定「用原生 `<dialog>` 的 `showModal()`」，並寫出開啟與關閉時焦點的位置。
+AI 產生的 Dialog 最常見的是開頭那種 `div` 加 `v-if` 加 `z-index`。描述需求時指定「用原生 `<dialog>` 的 `showModal()`」，並寫出開啟與關閉時焦點的位置。
 
 ## 動手
 

@@ -58,7 +58,7 @@ kubectl describe pod booking-api-7c5d9f8b66-h2m8q -n booking
 
 ## Pending：排不上節點
 
-Pod 已建立，但排程器找不到可以放它的節點。Events 的 `FailedScheduling` 訊息會列出每一類節點被排除的原因，類似：
+Events 的 `FailedScheduling` 訊息類似：
 
 ```text
 Warning  FailedScheduling  default-scheduler  0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: }, 2 Insufficient memory.
@@ -75,7 +75,7 @@ Deployment 的副本數不足、卻連一個 Pending 的 Pod 都看不到時，�
 
 ## ImagePullBackOff 與 ErrImagePull：拉不到映像
 
-`ErrImagePull` 是剛失敗，`ImagePullBackOff` 是失敗後正在等待重試（間隔會越來越長）。兩者是同一件事。Events 的 `Failed` 訊息會帶 registry 回的錯誤：
+`ErrImagePull` 是剛失敗，`ImagePullBackOff` 是失敗後正在等待重試（間隔會越來越長）。兩者是同一件事。
 
 | 訊息裡的關鍵字 | 原因 | 下一步 |
 |---|---|---|
@@ -90,7 +90,7 @@ Deployment 的副本數不足、卻連一個 Pending 的 Pod 都看不到時，�
 
 STATUS 是 kubectl 從 Pod 的階段與容器狀態整理出來的摘要。`CrashLoopBackOff`、`ImagePullBackOff` 是容器「正在等待」的原因，不是 Pod 的階段。
 
-容器啟動了，但程序結束了；kubelet 重啟它，它又結束。每次重啟前的等待時間會加倍（從 10 秒開始，上限 5 分鐘），`CrashLoopBackOff` 就是「正在等下一次重啟」。
+kubelet 每次重啟容器前的等待時間會加倍（從 10 秒開始，上限 5 分鐘）。
 
 `describe` 裡容器的 `Last State` 類似：
 
@@ -115,11 +115,9 @@ STATUS 是 kubectl 從 Pod 的階段與容器狀態整理出來的摘要。`Cras
 
 結束碼大於 128 時，減掉 128 是訊號的編號：137 是 SIGKILL（9），143 是 SIGTERM（15）。
 
-與設定有關、但還沒到啟動那一步的是 `CreateContainerConfigError`：`env` 參照的 ConfigMap 或 Secret 不存在。這時沒有 log，原因在 Events。
-
 ## OOMKilled：記憶體超過 limits
 
-容器的記憶體用量超過 `limits.memory`，被核心直接殺掉，`Last State` 的 `Reason` 是 `OOMKilled`、Exit Code 是 137。程式沒有機會寫 log，所以 **log 裡找不到原因**是這種狀況的特徵。
+容器是被核心直接殺掉的，**log 裡找不到原因**是這種狀況的特徵。
 
 137 只代表「被 SIGKILL」，要看到 `Reason: OOMKilled` 才能確定是記憶體。接著分辨兩種情況：
 
@@ -153,7 +151,7 @@ kubectl get pods -n booking -l app=export-api --show-labels -o wide
 | ENDPOINTS 有位址，連線逾時（timeout） | NetworkPolicy 擋住，或節點之間的網路問題 | `kubectl get networkpolicy -n <ns>`；確認來源 Pod 在允許的範圍內 |
 | 名稱解析失敗 | 跨 namespace 卻只寫了短名稱；或 NetworkPolicy 擋住了 DNS | 改用 `<service>.<namespace>`；檢查對外規則有沒有放行 DNS（port 53） |
 
-「被拒絕」與「逾時」的差別和一般網路排查相同：被拒絕代表封包到了、但沒有程式在那個 port 上；逾時通常是封包被丟掉。NetworkPolicy 的行為是：沒有任何 policy 選到某個 Pod 時，它不受限制；一旦有 policy 選到它，就只有被允許的流量能通過（前提是叢集的網路外掛有實作 NetworkPolicy，否則寫了也不會生效）。
+「被拒絕」與「逾時」的差別見 [網路通不通：從 DNS 到防火牆](#/skill/network-troubleshooting)。NetworkPolicy 的行為：沒有任何 policy 選到某個 Pod 時，它不受限制；一旦有 policy 選到它，就只有被允許的流量能通過（前提是叢集的網路外掛有實作 NetworkPolicy，否則寫了也不會生效）。
 
 ## Ingress 回 404、502、503、504
 
@@ -172,7 +170,7 @@ kubectl get pods -n booking -l app=export-api --show-labels -o wide
 
 ## 用程式走一遍排查順序
 
-下面把開頭那六個 Pod 的狀態、上一次的結束資訊與 Events 寫成資料，照「狀態 → 上一次的結束原因 → Events」的順序判斷：
+把開頭那六個 Pod 的狀態、上一次的結束資訊與 Events 寫成資料，照「狀態 → 上一次的結束原因 → Events」的順序判斷：
 
 ```python run
 pods = [
@@ -258,8 +256,6 @@ print(f"    下一步：{action}")
 | `kubectl debug -it <pod> --image=busybox:1.36 --target=<容器名稱> -n <ns>` | 在 Pod 裡加一個臨時容器（ephemeral container），共用它的網路，帶自己的工具 | 需要叢集支援並允許臨時容器；臨時容器加上去後要等 Pod 刪除才會消失 |
 | `kubectl debug node/<node> -it --image=busybox:1.36` | 在節點上開一個除錯用的 Pod | 權限很大，通常只有叢集管理者能用 |
 
-幾個用法：
-
 ```bash
 # 程式實際拿到的環境變數（會印出秘密，注意畫面與紀錄）
 kubectl exec booking-api-6b8f7c9d54-4xk2p -n booking -- env
@@ -274,7 +270,7 @@ kubectl exec -it booking-api-6b8f7c9d54-4xk2p -n booking -- sh
 kubectl port-forward pod/export-api-84f9d6c5b7-m4n1z 8080:8000 -n booking
 ```
 
-正式環境的映像通常很精簡，沒有 shell 也沒有 `curl`（見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)），`exec` 進不去，這時用 `kubectl debug` 帶一個有工具的臨時容器進去。不要為了除錯方便把工具裝進正式映像。
+正式環境的映像通常很精簡，沒有 shell 也沒有 `curl`（見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)），`exec` 進不去。不要為了除錯方便把工具裝進正式映像。
 
 `exec` 與 `debug` 都是直接在正式環境的容器裡操作，應該受 RBAC 限制並留下稽核紀錄；在裡面改的任何東西，Pod 重建後就消失，不能當成修復。
 
@@ -284,7 +280,6 @@ kubectl port-forward pod/export-api-84f9d6c5b7-m4n1z 8080:8000 -n booking
 
 | 訊息或現象 | 意思 | 下一步 |
 |---|---|---|
-| `0/3 nodes are available: 3 Insufficient cpu.` | 每個節點剩餘可保留的 CPU 都放不下這個 Pod 的 requests | 檢查 requests 是否過大；看節點已分配的量 |
 | `Back-off pulling image "…"` | 拉映像失敗後正在等待重試 | 往上找同一個 Pod 的 `Failed to pull image` 那一則，原因在那裡 |
 | `Back-off restarting failed container` | CrashLoopBackOff | `kubectl logs --previous` |
 | `previous terminated container "api" in pod "…" not found` | 加了 `--previous`，但這個容器沒有上一次 | 容器沒重啟過，或 Pod 已經被重建；拿掉 `--previous`，或查 log 收集系統 |

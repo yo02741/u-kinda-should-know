@@ -126,10 +126,6 @@ remote: error: Changes must be made through a pull request.
 
 GitLab 則會回 `You are not allowed to push code to protected branches on this project.`。這代表規則有效：開分支、發 PR，不是去找人把規則關掉。
 
-## rebase 會改寫歷史：`--force-with-lease`
-
-X 變成 X'，SHA 不同。不要 rebase 已經被別人拉下來的共享分支。rebase 自己的分支後要更新遠端時，用 `--force-with-lease` 而不是 `--force`：它會先確認遠端分支還停在你上次看到的位置，如果有人在這期間推了新 commit，就拒絕覆蓋。
-
 ## commit 訊息與可 revert 的 commit
 
 ### 一個 commit 做一件事
@@ -177,7 +173,7 @@ BREAKING CHANGE: lowercase coupon codes are rejected with 422.
 
 ### revert 一個 merge commit
 
-對 merge commit 直接 `git revert` 會失敗，因為 git 不知道要以哪個 parent 為基準；加 `-m 1` 表示以第一個 parent（main）為基準：
+對 merge commit 直接 `git revert` 會失敗，git 不知道要以哪個 parent 為基準，要加 `-m 1`：
 
 ```text
 error: commit 7c3d2a1... is a merge but no -m option was given.
@@ -218,7 +214,7 @@ uv run pytest                # 衝突解完一定要重跑測試：能編譯不�
 
 rebase 時衝突是**一個 commit 一個 commit**出現的，訊息是 `error: could not apply ...`，並提示解完後執行 `git rebase --continue`。
 
-幾個減少衝突的做法：
+減少衝突的做法：
 
 - **常同步 main**：每天把 main 合進（或 rebase 到）自己的分支，衝突小的時候就解掉。
 - **lock 檔不要手動合**：`uv.lock`、`package-lock.json` 衝突時，接受其中一邊後重新執行 `uv lock` 或 `npm install` 產生，再確認差異。
@@ -256,8 +252,6 @@ def checkout(req: CheckoutRequest, user=Depends(current_user)):
     return pricing.checkout(req.items, discounts)
 ```
 
-flag 的幾種用途：
-
 | 用途 | 例子 | 生命週期 |
 |---|---|---|
 | 發布開關 | 新功能先對內部帳號開，再逐步開放 | 全面開放後就移除 |
@@ -293,20 +287,17 @@ print("換一個 flag 的桶號：", bucket("new-search", u))
 
 flag 的代價是**分支藏進了程式碼**：兩個 flag 就有四種組合要測。發布開關在全面開放後要移除，否則幾個月後沒有人敢動它。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 訊息 | 原因 | 怎麼處理 |
 |---|---|---|
-| `! [rejected] main -> main (non-fast-forward)`，提示 `Updates were rejected because the tip of your current branch is behind` | 遠端有你本機沒有的 commit | `git pull --rebase`（或先 fetch 再合併），解完衝突再推；不要直接 `--force` |
 | `GH006: Protected branch update failed` | 直接 push 到受保護分支 | 開分支、發 PR |
-| `! [rejected] feature -> feature (stale info)` | `--force-with-lease` 發現遠端在你上次 fetch 之後被改過 | 先 fetch，看別人推了什麼，整合後再推 |
-| `CONFLICT (content): Merge conflict in ...` | 兩邊改了同一段 | 理解兩邊的意圖後合併，`git add` 標記，重跑測試 |
-| `error: commit ... is a merge but no -m option was given.` | 對 merge commit 執行 revert 沒有指定 parent | `git revert -m 1 <sha>` |
+| `! [rejected] feature -> feature (stale info)` | `--force-with-lease` 先確認遠端分支還停在你上次 fetch 看到的位置；有人在這期間推了新 commit 就拒絕覆蓋 | 先 fetch，看別人推了什麼，整合後再推 |
 
 不會有錯誤訊息、但同樣會出事的情況：
 
 - **把機密 commit 進去再刪掉**：刪掉的那一版仍在 git 歷史裡。要當成已經外洩，先撤銷並更換那個機密，再考慮改寫歷史。見 [秘密管理](#/skill/secrets)。
-- **解衝突時兩邊都保留**：兩段邏輯同時存在，程式能跑但結果錯，例如折扣算了兩次。衝突解完一定要跑測試。
+- **解衝突時兩邊都保留**：兩段邏輯同時存在，程式能跑但結果錯，例如折扣算了兩次。
 
 ## 動手
 

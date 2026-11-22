@@ -111,8 +111,8 @@ grant_type=client_credentials&scope=invoices.write
 | 錯誤解法 | 後果 |
 |---|---|
 | CLI 要使用者把密碼直接打進終端機 | 工具拿到了明文密碼，MFA 也用不上 |
-| SPA 把 `client_secret` 寫進前端程式碼 | secret 等於公開，任何人都能冒充這個 client |
-| 對帳服務借用某位工程師的帳號 | 那個人離職或改密碼，服務就壞掉；稽核紀錄上也分不出是人還是服務 |
+| SPA 或 App 把 `client_secret` 寫進程式碼 | 功能正常，但 secret 等於公開，任何人都能冒充這個 client。公開客戶端在授權伺服器上要設成「不需要 secret」，改用 PKCE |
+| 對帳服務借用某位工程師的帳號（包括用人的帳號跑 Device Code 拿 token） | 那個人離職或改密碼，服務就壞掉；稽核紀錄上也分不出是人還是服務 |
 
 | | Device Code | 授權碼 + PKCE | Client Credentials |
 |---|---|---|---|
@@ -171,7 +171,7 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code
 &client_id=atlas-cli
 ```
 
-`grant_type` 是一個 URN：`urn:ietf:params:oauth:grant-type:device_code`（上面是 URL 編碼後的樣子）。使用者還沒完成時，授權伺服器回 `400` 加上錯誤碼：
+`grant_type` 是一個 URN：`urn:ietf:params:oauth:grant-type:device_code`（上面是 URL 編碼後的樣子）。使用者還沒完成時的回應：
 
 ```http
 HTTP/1.1 400 Bad Request
@@ -313,7 +313,7 @@ grant_type=authorization_code
 &code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
 ```
 
-上面的 verifier 與 challenge 是 RFC 7636 附錄 B 的測試向量，可以用下面的程式驗算。
+上面的 verifier 與 challenge 是 RFC 7636 附錄 B 的測試向量，可以用必讀的程式驗算。
 
 base64url 是標準 base64 把 `+` 換 `-`、`/` 換 `_`、去掉結尾的 `=`。
 
@@ -336,10 +336,8 @@ Cache-Control: no-store
 }
 ```
 
-幾個和使用者流程不同的地方：
-
-- **沒有 refresh token**。RFC 6749 規定這個流程不應該發 refresh token：client 隨時可以用自己的憑證再要一次，不需要它。
-- **token 裡的 `sub` 是服務本身**，不是某個人。下游 API 依據它做授權與稽核，才分得出「人做的」和「服務做的」。
+- **不發 refresh token 的原因**：client 隨時可以用自己的憑證再要一次，不需要它。
+- **`sub` 是服務、不是某個人**：下游 API 依據它做授權與稽核，才分得出「人做的」和「服務做的」。
 - **client 必須是機密型**：它要有地方安全地放憑證（伺服器的 secret 管理，見 [秘密管理](#/skill/secrets)）。比 `client_secret` 更好的選擇是不傳共享 secret 的認證方式，例如用私鑰簽一個 JWT 來證明身分（RFC 7523）或 mTLS（RFC 8705），授權伺服器只存公鑰或憑證資訊。
 - **scope 照樣要最小化**。服務 token 沒有使用者在旁邊看，被偷時的影響範圍完全由 scope 決定。
 
@@ -355,13 +353,8 @@ token 端點的錯誤都是 JSON：`{"error": "…", "error_description": "…"}
 | `unauthorized_client` | 這個 client 沒被允許用這種 grant type | 在授權伺服器的 client 設定打開對應的 grant（例如 device grant） |
 | `unsupported_grant_type` | `grant_type` 拼錯，或伺服器不支援 | Device Code 的 grant_type 是完整 URN，常見錯誤是只寫 `device_code` |
 | `invalid_scope` | 要求的 scope 不存在或超出允許範圍 | 對照授權伺服器公布的 `scopes_supported` |
-| `slow_down` 不斷出現 | CLI 沒有在收到 `slow_down` 後拉長間隔 | 每次 `slow_down` 都把間隔加 5 秒，並持續使用新間隔 |
 
-不會有錯誤訊息、但同樣危險的情況：
-
-- **SPA 或 App 裡藏了 client_secret**：功能正常，但 secret 已經公開。公開客戶端在授權伺服器上要設成「不需要 secret」，改用 PKCE。
-- **`redirect_uri` 用萬用字元或只比對前綴**：攻擊者可以讓授權碼被導到他控制的路徑。授權伺服器應該完全比對註冊過的 `redirect_uri`（原生 App 的 loopback 位址允許 port 不同）。
-- **服務用人的帳號跑 Device Code 拿 token**：能動，但又回到「人離職服務就壞」的問題。沒有使用者的情境就用 Client Credentials。
+不會有錯誤訊息、但同樣危險：**`redirect_uri` 用萬用字元或只比對前綴**時，攻擊者可以讓授權碼被導到他控制的路徑。授權伺服器應該完全比對註冊過的 `redirect_uri`（原生 App 的 loopback 位址允許 port 不同）。
 
 ## 動手
 

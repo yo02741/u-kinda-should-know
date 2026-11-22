@@ -199,8 +199,6 @@ Vue Test Utils（VTU）的 `mount(元件, 選項)` 建立一個 Vue app，把元
 
 ## 一次點擊到畫面更新的時間線
 
-一次點擊到畫面更新，中間有好幾個非同步的步驟：
-
 ```text
 await user.click(送出)
   └─ click 事件 → submit() 執行，submitting.value = true
@@ -235,7 +233,7 @@ MSW 3 的套件裡已經沒有 `onUnhandledRequest`。照 2.x 的寫法傳進去
 
 ## plugin 與替身：Pinia、Router
 
-- **Pinia**：`@pinia/testing` 的 `createTestingPinia()` 建一個測試用的 Pinia，`initialState` 指定 store 的初始狀態，預設把所有 action 換成 spy（`stubActions: true`）。spy 函式要由 `createSpy` 提供；沒開 Vitest 的 `globals` 時，找不到全域的 `vi`，要明確傳 `createSpy: vi.fn`。
+- **Pinia**：`@pinia/testing` 的 `createTestingPinia()` 建一個測試用的 Pinia，`initialState` 指定 store 的初始狀態，預設把所有 action 換成 spy（`stubActions: true`）；沒開 Vitest 的 `globals` 時要明確傳 `createSpy: vi.fn`。
 - **Vue Router**：只需要 `<RouterLink>` 顯示出來時，用 VTU 的 `RouterLinkStub` 換掉，再用 `findComponent(RouterLinkStub).props('to')` 檢查連到哪裡；要測導航行為時，建一個用 `createMemoryHistory()` 的真 router 放進 `global.plugins`，`await router.isReady()` 之後再掛載。
 
 ## 共用的 setup：MSW、jest-dom、清理
@@ -278,7 +276,7 @@ afterEach(() => {
 afterAll(() => server.close())
 ```
 
-handler 檢查 body 裡有沒有 `time`：前端把欄位打錯時，假後端回 422，畫面不會出現號碼，測試就會失敗。這正是開頭那組測試漏掉的。
+handler 檢查 body 裡有沒有 `time`：前端把欄位打錯時，假後端回 422，畫面不會出現號碼，測試就會失敗。
 
 這三個測試在 Vitest 5.1.1、`@testing-library/vue` 8.1.0、user-event 14.6.13、MSW 3.0.7、jsdom 31.0.1 上實測通過。改按鈕的 class、把 `<label>` 換成別的排版，測試都不受影響；把 `:disabled="s.left === 0"` 刪掉，第一個測試會紅。
 
@@ -337,9 +335,7 @@ it('顯示 store 裡的掛號數', () => {
 
 還有幾個不會出錯訊息、但會讓測試沒在檢查的寫法：
 
-- 讀寫 `wrapper.vm` 的內部狀態（`wrapper.vm.picked = '09:00'`）：跳過了使用者的操作，`<script setup>` 重構後也可能讀不到。
-- 斷言只有 `toHaveBeenCalled()`：不知道送了什麼、畫面變成什麼。
-- `vi.mock('../api.js')` 整個換掉 API 模組：網址、方法、body 都不在測試範圍。需要時改用 MSW，handler 裡用 `await request.json()` 檢查 body。
+- 開頭那三種：讀寫 `wrapper.vm` 的內部狀態（`<script setup>` 重構後也可能讀不到）、斷言只有 `toHaveBeenCalled()`、`vi.mock('../api.js')` 整個換掉 API 模組（改用 MSW，handler 裡用 `await request.json()` 檢查 body）。
 - 每個測試都 `shallowMount`：子元件全變成 stub，父子之間的 props 與事件沒有被測到。
 
 ## 動手

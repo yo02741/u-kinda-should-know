@@ -125,13 +125,13 @@ round-robin 不管機器快慢，三台各分三分之一，慢的那台平均�
 | TLS | 可以不解開，直接轉送（passthrough） | 要解開才看得到內容 |
 | 例子 | nginx 的 `stream` 模組、HAProxy `mode tcp`、雲端的網路負載平衡器、Kubernetes Service | nginx 的 `http` 反向代理、HAProxy `mode http`、雲端的應用負載平衡器、Kubernetes Ingress 控制器 |
 
-**L4 分配的是連線，不是請求**。HTTP/1.1 的 keep-alive、HTTP/2、gRPC、WebSocket 讓一條連線長時間承載大量請求。客戶端只開一條連線時（服務對服務呼叫常常如此），L4 把它的所有請求都送到同一台後端，另一台閒著。gRPC 服務放在只做 L4 的 Kubernetes Service 後面常因此負載不均，解法是改用 L7 的代理，或在客戶端做負載平衡。
+HTTP/1.1 的 keep-alive、HTTP/2、gRPC、WebSocket 讓一條連線長時間承載大量請求，服務對服務呼叫又常常只開一條連線，L4 就把所有請求都送到同一台後端，另一台閒著。gRPC 服務放在只做 L4 的 Kubernetes Service 後面常因此負載不均，解法是改用 L7 的代理，或在客戶端做負載平衡。
 
-IP hash 依客戶端 IP 決定後端，適合想讓同一個客戶端固定到同一台的情況；NAT 後很多人共用一個 IP，分布會很不均。
+IP hash 依客戶端 IP 決定後端，適合想讓同一個客戶端固定到同一台的情況；遇到 NAT 的問題見下面的 sticky session。
 
 ## 一致性雜湊：加減機器時搬動多少 key
 
-一致性雜湊解決的是「加減機器時搬動多少 key」。用 `hash(key) % N` 分配時，N 從 3 變 4，大約四分之三的 key 會換到別台，對快取來說等於大部分快取同時失效。一致性雜湊在加一台時，只有大約 1/N 的 key 換主人，其他 key 原地不動。每台機器在環上放很多個「虛擬節點」，是為了避免某台剛好分到一大段環。nginx 的 `hash $request_uri consistent;` 就是這種做法。
+用 `hash(key) % N` 分配時，N 從 3 變 4，大約四分之三的 key 會換到別台，對快取來說等於大部分快取同時失效。一致性雜湊在加一台時，只有大約 1/N 的 key 換主人，其他 key 原地不動。每台機器在環上放很多個「虛擬節點」，是為了避免某台剛好分到一大段環。nginx 的 `hash $request_uri consistent;` 就是這種做法。
 
 ## 健康檢查端點該檢查什麼
 
@@ -156,8 +156,6 @@ sticky session（黏著，session affinity）讓同一個使用者固定送到�
 比較好的做法是讓後端**無狀態**：session 放 Redis 或改用 token，檔案放物件儲存，任何一台都能處理任何請求（見 [擴展](#/skill/scaling)、[物件儲存](#/skill/object-storage)）。WebSocket 這類長連線本身就綁在一台後端上，這是連線的性質，不需要額外的黏著設定；但斷線重連時可能連到另一台，狀態一樣要放在共用的地方。
 
 ## TLS 終結在哪裡
-
-HTTPS 的 TLS 要在某個地方解開，常見三種位置：
 
 | 做法 | TLS 在哪解開 | 優點 | 代價 |
 |---|---|---|---|
@@ -214,12 +212,11 @@ L4 負載平衡器不解析 HTTP，沒辦法加標頭。這時可以用 **PROXY 
 |---|---|---|
 | 502，nginx error log：`connect() failed (111: Connection refused) while connecting to upstream` | 連不上後端 | 後端沒起來、埠寫錯、容器名稱或 Service 名稱錯 |
 | 502，`upstream prematurely closed connection while reading response header from upstream` | 後端在回應前關了連線 | 後端程序當掉或被重啟；後端的 keep-alive 逾時比代理短，代理重用了已被後端關閉的連線 |
-| 504，`upstream timed out (110: Connection timed out) while reading response header from upstream` | 後端太久沒回應 | 慢查詢、外部呼叫沒設逾時；先找慢的原因，不要只把 `proxy_read_timeout` 調大 |
 | 轉址無限迴圈、cookie 沒有 `Secure` | 後端以為請求是 HTTP | 沒有採信 `X-Forwarded-Proto` |
 | log 裡所有 IP 都是 `10.x.x.x` | 後端看到的是負載平衡器 | 沒有設定 realip / `--forwarded-allow-ips` |
 | 某一台特別忙 | 分配不均 | 長連線走 L4、sticky session、IP hash 遇到 NAT |
 
-keep-alive 逾時那一條要多說明：代理與後端之間的閒置連線，如果**後端先關**，代理可能剛好在那一刻把新請求送進這條連線，結果就是零星、難以重現的 502。原則是後端的 keep-alive 閒置逾時要比前面代理的閒置逾時長，讓關閉連線的總是代理這一側。
+504 與其他 error log 訊息見 [nginx 反向代理](#/skill/nginx) 的「502 與 504」。keep-alive 逾時那一列：代理與後端之間的閒置連線，如果**後端先關**，代理可能剛好在那一刻把新請求送進這條連線，結果就是零星、難以重現的 502。原則是後端的 keep-alive 閒置逾時要比前面代理的閒置逾時長，讓關閉連線的總是代理這一側。
 
 ## 動手
 

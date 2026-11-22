@@ -246,7 +246,6 @@ CI 的順序照「便宜的先跑」：lint 與型別檢查、單元與元件測
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `Error: Playwright Test did not expect test.beforeEach() to be called here.` | Vitest 把 `e2e/*.spec.js` 也當成自己的測試 | `exclude: [...configDefaults.exclude, 'e2e/**']` |
 | 版面相關的斷言永遠通過或永遠失敗 | jsdom 的尺寸全是 0 | 移到真的瀏覽器 |
 | 元件測試全綠，功能是壞的 | 斷言落在替身上（`toHaveBeenCalled()`），或測的是內部狀態 | 斷言畫面上的文字、角色、按鈕狀態與送出的請求 |

@@ -148,9 +148,9 @@ for (const [name, token] of Object.entries(cases)) {
 
 ## Base64URL、其他聲明與簽章演算法
 
-Base64URL 和一般 Base64 的差別只有三點：`+` 換成 `-`、`/` 換成 `_`、去掉結尾的 `=`。這樣字串可以直接放進網址和 HTTP header。它沒有任何金鑰，**任何拿到 token 的人都能讀出 payload**。這是簽章型 JWT（JWS，RFC 7515）的本質：保證完整性（沒被改過）與來源（是持有金鑰的人簽的），不保證機密性。
+Base64URL 和一般 Base64 的差別只有三點：`+` 換成 `-`、`/` 換成 `_`、去掉結尾的 `=`。這樣字串可以直接放進網址和 HTTP header。簽章型 JWT 的規格是 JWS（RFC 7515）：保證完整性與來源，不保證機密性。
 
-所以 payload 裡不要放密碼、身分證號、信用卡、內部系統的細節，也不要放「被看到會出事」的東西，例如其他使用者的 id 清單。token 會出現在瀏覽器、log、錯誤回報工具、代理伺服器裡。真的需要加密內容的格式是 JWE（RFC 7516），但多數情況下更簡單的做法是：payload 只放識別碼，敏感資料留在伺服器端查。
+除了必讀列的三項，payload 也不要放內部系統的細節與「被看到會出事」的東西，例如其他使用者的 id 清單。token 會出現在瀏覽器、log、錯誤回報工具、代理伺服器裡。真的需要加密內容的格式是 JWE（RFC 7516），但多數情況下更簡單的做法是：payload 只放識別碼，敏感資料留在伺服器端查。
 
 驗證時不能解開後重新序列化的原因：鍵的順序、空白不同，算出來的簽章就不同。
 
@@ -208,7 +208,7 @@ eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1XzQyIiwicm9sZSI6ImFkbWluIn0.
 
 ## 撤銷的難題
 
-自帶型 token 的優點是不查表，缺點也是不查表：發出去之後，伺服器沒有地方可以「刪掉它」。常見的補法，各有代價：
+自帶型 token 發出去之後，伺服器沒有地方可以「刪掉它」。補法各有代價：
 
 | 做法 | 怎麼做 | 代價 |
 |---|---|---|
@@ -217,7 +217,7 @@ eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1XzQyIiwicm9sZSI6ImFkbWluIn0.
 | 使用者層級的「最早有效時間」 | 使用者表存 `tokens_valid_after`；`iat` 早於它就拒絕 | 要查使用者資料（很多系統本來就會查）；一次撤銷該使用者全部 token |
 | 改用 opaque token + introspection | token 只是隨機字串，資源伺服器呼叫授權伺服器的 introspection 端點（RFC 7662）查狀態 | 每次（或每次快取過期）一個網路往返；撤銷即時 |
 
-refresh token rotation 與重放偵測的完整做法見 [身分閘道](#/skill/identity-gateway)。一個判斷原則：如果你的需求是「停用帳號要在一分鐘內生效」，而 access token 效期是一小時，那就必須在驗證時查某個伺服器端狀態，這時它已經不是無狀態的，要從上表選一種做法。
+refresh token rotation 與重放偵測的完整做法見 [身分閘道](#/skill/identity-gateway)。如果你的需求是「停用帳號要在一分鐘內生效」，而 access token 效期是一小時，那就必須在驗證時查某個伺服器端狀態，這時它已經不是無狀態的，要從上表選一種做法。
 
 ## 伺服器端用 PyJWT 驗證
 
@@ -239,7 +239,7 @@ claims = jwt.decode(
 )
 ```
 
-注意 PyJWT 只在你**傳了** `issuer` 時才檢查 `iss`；沒傳就不檢查。`audience` 則相反：token 裡有 `aud` 而你沒傳，會丟 `InvalidAudienceError`。
+PyJWT 只在你**傳了** `issuer` 時才檢查 `iss`；沒傳就不檢查。`audience` 相反：token 裡有 `aud` 而你沒傳會報錯（見下表的 `Invalid audience`）。
 
 ## 常見錯誤與錯誤訊息
 

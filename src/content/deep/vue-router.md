@@ -213,9 +213,7 @@ React 的 `PatientPage` 換參數時同樣不會重新掛載；靠 `useEffect` �
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | 解構的 `params` 不會更新 | `const { params } = useRoute()` | 用 `route.params.id`，或 `props: true` |
-
 | `[VUE_ROUTER_R0025]`，訊息是 next() callback is deprecated | 守衛還在用 `next`（5.0.3 起警告） | 刪掉 `next` 參數，改用回傳值 |
 | 宣告了 `next` 參數，導航卡住不動 | 某條路徑沒有呼叫 `next` | 同上 |
 | `No match found for location with path "/patient/7"` | 路徑拼錯，或少了 404 路由 | 修正連結；加 `/:pathMatch(.*)*` |

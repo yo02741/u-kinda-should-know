@@ -139,7 +139,7 @@ SELECT user_id, id, status, amount FROM latest WHERE rn = 1 ORDER BY user_id;
 
 ## 子查詢：非相關與相關
 
-子查詢可以出現在三個位置，各有回傳形狀的限制：
+子查詢出現的位置與回傳形狀的限制：
 
 | 位置 | 例子 | 必須回傳 |
 |---|---|---|
@@ -169,11 +169,9 @@ FROM users u
 ORDER BY u.id;
 ```
 
-純量子查詢回傳超過一列時會在執行時報錯（`more than one row returned by a subquery used as an expression`），而不是在寫查詢時。這種錯常在上線後才出現：開發時每位使用者剛好只有一筆資料，正式資料一多就爆。純量子查詢要用聚合（`max`、`sum`）或 `LIMIT 1` 加 `ORDER BY` 保證只有一列。
+純量子查詢回傳超過一列時會在執行時報錯（`more than one row returned by a subquery used as an expression`），而不是在寫查詢時。這種錯常在上線後才出現：開發時每位使用者剛好只有一筆資料，正式資料一多就爆。修法見文末的錯誤表。
 
 ## CTE 會不會先算完存起來：MATERIALIZED
-
-跟版本有關：
 
 - PostgreSQL 12 以前，CTE 一律先算完再給後面用（稱為 optimization fence），外層的條件推不進去，有時反而變慢。
 - PostgreSQL 12 起，沒有副作用、不是遞迴、而且**只被引用一次**的 CTE 會被展開到外層查詢裡一起最佳化；被引用兩次以上的仍會先算完。可以用 `WITH x AS MATERIALIZED (…)` 或 `AS NOT MATERIALIZED (…)` 明確指定。
@@ -298,10 +296,7 @@ RETURNING product_id, qty;
 SELECT user_id, product_id, qty FROM cart_items ORDER BY product_id;
 ```
 
-使用時要知道的細節：
-
 - 衝突目標 `(user_id, product_id)` 必須對應到一個**唯一約束或唯一索引**；對應到部分唯一索引時，要把索引的 `WHERE` 條件也寫上：`ON CONFLICT (user_id) WHERE is_default DO …`。也可以用約束名稱：`ON CONFLICT ON CONSTRAINT cart_items_pkey`。
-- 同一句 INSERT 裡的多列，不能有兩列撞到同一個既有的列，否則報 `ON CONFLICT DO UPDATE command cannot affect row a second time`。批次匯入前要先在應用程式或子查詢裡去重。
 - 主鍵是 identity / sequence 時，即使最後走了 UPDATE，序號也已經被取用，所以 id 會跳號。
 - `old` / `new` 出現在 `RETURNING` 裡是 PostgreSQL 18 的新功能。舊版常見的替代寫法是 `RETURNING (xmax = 0) AS inserted`，它依賴系統欄位的實作細節，官方文件沒有保證這個用法。
 - PostgreSQL 15 起也有 SQL 標準的 `MERGE`，可以在一句裡寫「配到就更新、配不到就新增、某些條件就刪除」。兩者不能互換：PostgreSQL 文件提到，`MERGE` 遇到並行的 INSERT 時不會自動改走 UPDATE，需要這種行為時可以考慮 `INSERT … ON CONFLICT`。
@@ -355,13 +350,9 @@ RETURNING id, status, amount;
 | `recursive query "t" column 1 has type integer in non-recursive term but type bigint overall` | `42804` | 遞迴 CTE 起始項與遞迴項的欄位型別不同（`1` 是 integer，遞迴項算出 bigint） | HINT 會說要轉型起始項：`SELECT 1::bigint …` |
 | `ORDER BY in a recursive query is not implemented` | `0A000` | 在遞迴 CTE 內部寫 ORDER BY | 排序放在最外層的 SELECT |
 | `there is no unique or exclusion constraint matching the ON CONFLICT specification` | `42P10` | `ON CONFLICT (name)`，但 name 沒有唯一約束 | 建唯一約束或唯一索引；部分唯一索引要加上 WHERE |
-| `ON CONFLICT DO UPDATE command cannot affect row a second time` | `21000` | 同一句 INSERT 有兩列的衝突鍵相同 | HINT：確保同一句裡要插入的列沒有重複的鍵；先去重 |
+| `ON CONFLICT DO UPDATE command cannot affect row a second time` | `21000` | 同一句 INSERT 有兩列撞到同一個既有的列（衝突鍵相同） | HINT：確保同一句裡要插入的列沒有重複的鍵；批次匯入前先在應用程式或子查詢裡去重 |
 
-沒有錯誤訊息、但結果錯的情況：
-
-- **累計用了預設的 RANGE 框**：同時間的列得到相同的累計值。逐列累計寫 `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`。
-- **遞迴 CTE 遇到循環資料**：查詢不會結束，直到逾時。加深度上限或 `CYCLE`。
-- **在 `SELECT` 清單放相關子查詢處理大表**：每一列跑一次，列數一多就慢。改成先聚合再 JOIN。
+沒有錯誤訊息的情況：累計用了預設的 RANGE 框（見 LAG 那節）、遞迴 CTE 遇到循環資料而跑到逾時（見遞迴 CTE 那節），以及在 `SELECT` 清單放相關子查詢處理大表：每一列跑一次，列數一多就慢，改成先聚合再 JOIN。
 
 ## 動手
 

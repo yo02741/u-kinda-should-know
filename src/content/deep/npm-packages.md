@@ -99,13 +99,13 @@ npm error Missing: semver@7.8.6 from lock file
 
 ## 公開的供應鏈事件：前端專案的兩個入口
 
-公開的事件也是這兩種。2025 年 9 月，chalk、debug 等每週下載量極高的套件，維護者帳號被釣魚盜用，攻擊者發布的版本會在瀏覽器裡攔截加密貨幣交易、換掉收款地址；同月出現的 Shai-Hulud 蠕蟲靠安裝腳本偷 npm token 與雲端金鑰，再用偷到的 token 發布更多被感染的套件。這兩種剛好是前端專案的兩個入口：安裝時在開發機與 CI 上執行的腳本，以及打包後在使用者瀏覽器裡執行的程式。其他公開事件與 SBOM、簽章這類通用做法，見後端的 [依賴與供應鏈安全](#/skill/supply-chain)。
+公開的事件也走開頭那兩個入口。打包進 bundle 的程式：2025 年 9 月，chalk、debug 等每週下載量極高的套件，維護者帳號被釣魚盜用，攻擊者發布的版本會在瀏覽器裡攔截加密貨幣交易、換掉收款地址。安裝腳本：同月出現的 Shai-Hulud 蠕蟲靠安裝腳本偷 npm token 與雲端金鑰，再用偷到的 token 發布更多被感染的套件。其他公開事件與 SBOM、簽章這類通用做法，見後端的 [依賴與供應鏈安全](#/skill/supply-chain)。
 
 ## 版本範圍的細節
 
 表格是用 npm 解析範圍的 semver 套件（7.8.6）實際比對，從 1.2.3、1.2.9、1.3.0、1.9.9、2.0.0、0.2.3、0.2.9、0.3.0、0.0.3、0.0.4 這十個版本裡選的結果。
 
-- `^` 允許「不改最左邊那個非 0 數字」的更新；`0.x` 的套件因此只跟 patch。
+- `^` 允許「不改最左邊那個非 0 數字」的更新；`0.x` 的套件因此只跟 patch，要升 minor 得手動改範圍、看 changelog 的不相容變更。
 - 預發布版（`1.3.0-beta.1`）不在 `^1.2.3` 的範圍裡，只有範圍本身寫了同一個 `major.minor.patch` 的預發布版（`^1.3.0-beta.0`）才會接受。
 - `npm install <套件>` 預設寫 `^`（`save-prefix` 預設值）；要寫固定版本用 `--save-exact`。
 
@@ -141,7 +141,7 @@ for (const range of ['^1.2.3', '~1.2.3', '1.2.3', '^0.2.3', '^0.0.3']) {
 
 ## `npm ci` 和 `npm install` 的差別
 
-npm 12 的文件列出 `npm ci` 和 `npm install` 的差別：專案一定要有 `package-lock.json`；lock 檔和 `package.json` 對不上時直接失敗，不會去更新 lock 檔；開始前先刪掉整個 `node_modules`；不會寫入 `package.json` 或 `package-lock.json`。
+npm 12 的文件另外列出：專案一定要有 `package-lock.json`；開始前先刪掉整個 `node_modules`；不會寫入 `package.json`。
 
 lock 檔裡一個套件的紀錄：
 
@@ -159,7 +159,7 @@ lock 檔的 diff 在 PR 裡也要看：一個小功能的 PR 讓 lock 檔多了�
 
 對 Vite 建置的 SPA，bundle 裡有什麼只看程式 `import` 了什麼：`dayjs` 放在 `devDependencies`，只要元件 import 了它，照樣會被打包進去；放在 `dependencies` 卻沒人 import，也不會進 bundle。兩區的差別在安裝：
 
-- `npm ci --omit=dev` 不裝 devDependencies。環境變數 `NODE_ENV=production` 時，npm 的 `omit` 設定預設就是 `dev`。Dockerfile 在建置前設了 `NODE_ENV=production`，Vite 就沒被裝，`npm run build` 失敗，shell 印出 `vite: not found` 這類訊息。
+- `npm ci --omit=dev` 不裝 devDependencies。環境變數 `NODE_ENV=production` 時，npm 的 `omit` 設定預設就是 `dev`。Dockerfile 在建置前設了 `NODE_ENV=production`，Vite 就沒被裝，`npm run build` 失敗，shell 印出 `vite: not found` 這類訊息；建置階段不設，或用 `npm ci --include=dev`。
 - 寫給別人用的套件（元件庫）：使用者安裝它時會一起裝它的 `dependencies`，不會裝 `devDependencies`；`vue` 這類要和使用者共用同一份的寫在 `peerDependencies`。
 
 慣例是執行時用到的（`vue`、`vue-router`、`pinia`、`dayjs`）放 `dependencies`，建置、測試、lint 工具放 `devDependencies`。`npm audit --omit=dev` 只看前者，依照這個慣例分好，報告才分得出哪些漏洞會跟著 bundle 到使用者的瀏覽器。
@@ -193,10 +193,9 @@ npm warn install-scripts
 npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
 ```
 
-- 看過腳本、確定需要，執行 `npm approve-scripts <套件>`（等同 `npm install-scripts approve`）。它把允許清單寫進 `package.json` 的 `allowScripts`，預設釘住目前的版本（`套件@版本`），升版後要重新審查；寫成 `false` 是明確拒絕。
-- `strict-allow-scripts=true` 讓沒審查過的安裝腳本直接讓安裝失敗，適合放在 CI。
+- `npm approve-scripts <套件>`（等同 `npm install-scripts approve`）把允許清單寫進 `package.json` 的 `allowScripts`，預設釘住目前的版本（`套件@版本`），升版後要重新審查；寫成 `false` 是明確拒絕。
 - `--ignore-scripts` 一律不執行；`--dangerously-allow-all-scripts` 一律執行，文件寫明只當遷移用的逃生口。
-- npm 12 同時把 `allow-git` 與 `allow-remote` 的預設改成 `none`：依賴指向 git repo 或任意網址的 tarball 時，要在 `.npmrc` 明確打開。
+- npm 12 同時把 `allow-git` 與 `allow-remote` 的預設改成 `none`：依賴指向 git repo 或任意網址的 tarball 時安裝失敗，確認來源可信後在 `.npmrc` 明確打開（例如 `allow-git=root`）。
 
 pnpm 從 10 版起也預設不執行依賴的 build script；pnpm 12 用 `pnpm approve-builds` 把允許清單寫進 `pnpm-workspace.yaml` 的 `allowBuilds`。
 
@@ -206,7 +205,7 @@ pnpm 從 10 版起也預設不執行依賴的 build script；pnpm 12 用 `pnpm a
 
 被盜帳號發布的惡意版本，通常在幾小時到幾天內被發現並下架。延後採用新版本，等於讓別人先踩：
 
-- npm 的 `min-release-age=<天數>`（npm 11 後期版本與 12 都有，預設不啟用）：只安裝發布超過這個天數的版本；內部套件用 `min-release-age-exclude` 排除。修補漏洞的版本太新而被擋時，`npm audit fix` 會保留舊版、印出警告並以非 0 結束。
+- npm 的 `min-release-age=<天數>`（npm 11 後期版本與 12 都有，預設不啟用）。修補漏洞的版本太新而被擋時，`npm audit fix` 會保留舊版、印出警告並以非 0 結束。
 - pnpm 的 `minimumReleaseAge`，單位是分鐘；pnpm 12 內建的預設是 1440 分鐘（一天）。
 - Dependabot、Renovate 這類自動更新工具也有延後開 PR 的設定，見後端的 [依賴與供應鏈安全](#/skill/supply-chain)。
 
@@ -247,13 +246,9 @@ npm 12 對 `npm view zod time.created time.modified repository.url maintainers` 
 | 現象或訊息 | 原因 | 修法 |
 |---|---|---|
 | 同一個 commit，CI 每次裝到的版本不同 | 沒有提交 lock 檔，或 CI 用 `npm install` | 提交 lock 檔，CI 改用 `npm ci` |
-| Docker 建置時 `vite: not found` | 建置前設了 `NODE_ENV=production`，devDependencies 沒裝 | 建置階段不設，或用 `npm ci --include=dev` |
-| `Failed to resolve import "dayjs" from "src/…". Does the file exist?`（換成 pnpm 後） | 幽靈依賴：沒列在 `package.json` | 加進 `dependencies` |
 | 升 minor 版之後畫面壞了 | 套件沒照 semver 發布，或 `^` 自動升了 | 看 lock 檔的 diff 找出升了哪個；有測試擋住再合併 |
-| `^0.2.3` 一直沒升到 0.3.0 | `0.x` 的 `^` 只跟 patch | 手動改範圍，看 changelog 的不相容變更 |
 | `npm audit` 列出幾十個漏洞 | 多數在建置工具裡 | `--omit=dev` 先看會進 bundle 的；建置工具另外排時間升級 |
 | `npm install` 抓不到剛發布的修補版本 | `min-release-age` 擋住了 | 把那個套件加進 `min-release-age-exclude`，或暫時調低 |
-| 依賴指向 git repo 時安裝失敗（npm 12） | `allow-git` 預設 `none` | 確認來源可信後，在 `.npmrc` 設 `allow-git=root` |
 
 AI 寫前端時常見的：沒有確認就加一個新套件（甚至不存在的名字）、只改 `package.json` 不提交 lock 檔、把建置工具放進 `dependencies`、為了消除警告建議 `--dangerously-allow-all-scripts` 或 `--legacy-peer-deps`。
 

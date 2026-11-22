@@ -149,13 +149,13 @@ browserslist 4.29 支援用 Baseline 寫查詢：`baseline widely available`、`
 
 ## 給 coding agent 的 Modern Web Guidance
 
-Chrome 團隊在 npm 上發布的 `modern-web-guidance`（1.0.1，2026-11，Apache-2.0）是給 coding agent 用的 skill，收錄兩百多份現代網頁寫法的指南（dialog、`fetchpriority`、`content-visibility`、拆長任務⋯），每份最後都附上那個功能的 Baseline 狀態、支援的瀏覽器版本與退路。它的規則是：Baseline Widely available 的功能直接用，其他的照指南寫的退路做，除非專案自己寫明了支援範圍；它也建議把支援政策寫進 `AGENTS.md` 這類給 AI 的規範檔。
+Chrome 團隊在 npm 上發布的 `modern-web-guidance`（1.0.1，2026-11，Apache-2.0）是給 coding agent 用的 skill；指南的內容、安裝方式與它怎麼解讀支援範圍見 [AI 給的過時寫法](#/skill/outdated-patterns)。它也建議把支援政策寫進 `AGENTS.md` 這類給 AI 的規範檔。
 
-指南推薦的寫法不一定是 Baseline。例如它建議送分析資料用 `fetchLater()`，同一份指南寫明這個 API 是 Limited availability（Chrome、Edge 135 起），要搭配退路。讓 AI 照指南寫之後，用到的每個新功能仍要對照 web-features 或 MDN 的 Baseline 標示，確認落在自己的支援範圍內。
+指南推薦的寫法不一定是 Baseline（例如 `fetchLater()` 是 Limited availability）。讓 AI 照指南寫之後，用到的每個新功能仍要對照 web-features 或 MDN 的 Baseline 標示，確認落在自己的支援範圍內。
 
 ## 讀 Can I use 與 MDN
 
-- **MDN**：功能頁上方的 Baseline 標示（例如「Baseline Widely available」或「Limited availability」），頁尾的 Browser compatibility 表列出每個瀏覽器從哪一版開始支援、有哪些注意事項。表的資料來自 @mdn/browser-compat-data。
+- **MDN**：功能頁上方有 Baseline 標示（例如「Baseline Widely available」或「Limited availability」）；頁尾的 Browser compatibility 表另外列出注意事項，資料來自 @mdn/browser-compat-data。
 - **Can I use**：一個功能一張表，橫軸是瀏覽器、縱向是版本。格子的狀態對應它的資料代碼：支援（y）、不支援（n）、部分支援（a）、要加前綴（x）、預設停用要手動開啟（d）、未知（u）；格子上的編號對到下方的 Notes。部分支援一定要讀 Notes，常見的是「只支援某些值」或「行為有 bug」。上方的使用比例是全球估計值，院內系統要看自己的使用者統計。
 
 ## 功能偵測與 CSS 退路

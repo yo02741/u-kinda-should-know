@@ -140,10 +140,8 @@ describe('debounce', () => {
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `expected {…} to be {…} // Object.is equality`，下面寫 `Compared values have no visual difference.` | 用 `toBe` 比兩個不同的物件 | 改 `toEqual` 或 `toStrictEqual` |
 | `toThrow` 的測試失敗，錯誤訊息是受測函式自己丟的錯 | `expect(f())` 沒包成函式 | `expect(() => f())` |
-
 | 測試在某些時段或時區失敗 | 用了真的「現在」 | `now` 參數或 `vi.setSystemTime()` |
 
 :::stop 讀到這裡可以先停：會寫 `test.each` 邊界表、用函式包住 `toThrow`、用 fake timers 與 `setSystemTime` 固定時間。後面的執行順序、`toEqual` 與 `toStrictEqual`、非同步斷言、替身、composable 與覆蓋率，在要測呼叫 API 的程式或確認測試改壞會不會紅時再回來讀。
@@ -188,14 +186,14 @@ Compared values have no visual difference.
 
 ## 錯誤與非同步的斷言
 
-`toThrow` 的參數要是函式，Vitest 會在斷言裡呼叫它、接住錯誤：
+Vitest 會在斷言裡呼叫傳給 `toThrow` 的函式、接住錯誤：
 
 ```js
 expect(estimateWait(12, 10)).toThrow(RangeError)        // ✗ 錯誤在 expect 之前就丟出，測試直接失敗
 expect(() => estimateWait(12, 10)).toThrow(RangeError)  // ✓
 ```
 
-`toThrow()` 不帶參數時，丟什麼錯都算通過，連 `TypeError: Cannot read properties of undefined` 這種程式寫錯的錯也算。帶錯誤類別（`RangeError`）、訊息片段（`'已過號'`）或正規表示式，才分得出是哪一條規則擋下來的。
+`toThrow()` 不帶參數時，丟什麼錯都算通過，連 `TypeError: Cannot read properties of undefined` 這種程式寫錯的錯也算。除了錯誤類別，也可以帶訊息片段（`'已過號'`）或正規表示式。
 
 Promise 用 `resolves` 與 `rejects`，前面要 `await`：
 
@@ -216,14 +214,12 @@ Error: Promise returned by `expect(actual).rejects.toThrow(expected)` was not aw
 
 用到「現在」的函式，最簡單的寫法是讓它收 `now` 參數，測試直接傳一個固定的 `Date`。不能改函式時，用 Vitest 的假時鐘：
 
-| API | 做什麼 |
+| API | 補充 |
 |---|---|
-| `vi.useFakeTimers()` | `setTimeout`、`setInterval`、`Date` 換成假的；計時器不會自己觸發 |
-| `vi.advanceTimersByTime(ms)` | 時間往前推 `ms`，期間到期的計時器依序執行 |
+| `vi.useFakeTimers()` | 換掉的是 `setTimeout`、`setInterval`、`Date`；計時器不會自己觸發 |
+| `vi.advanceTimersByTime(ms)` | 期間到期的計時器依序執行 |
 | `vi.runAllTimers()` | 跑完所有計時器（`setInterval` 不停時會一直跑到上限） |
-| `vi.setSystemTime(date)` | 固定 `new Date()` 與 `Date.now()` 的值 |
 | `vi.getTimerCount()` | 還沒觸發的計時器數量，用來檢查有沒有清掉 |
-| `vi.useRealTimers()` | 換回真的；放在 `afterEach`，否則下一個測試也是假的 |
 
 debounce 300ms 的測試照時間推：
 
@@ -234,7 +230,7 @@ debounce 300ms 的測試照時間推：
 | 499 | | 0 次 |
 | 500 | 計時器到期 | 1 次，參數 `'王小'` |
 
-整個測試在 1 毫秒內跑完。取消期限的測試在凌晨失敗，是因為測試用了真的「今天」：測試用 `new Date().toISOString().slice(0, 10)` 組出今天的預約，台灣時間凌晨 0 點到 8 點時 UTC 還是前一天，拿到的是昨天的日期。`vi.setSystemTime(new Date('2026-11-20T07:00:00+08:00'))` 把現在固定在看診前 2 小時整，結果每天都一樣。Vitest 5.1.1 實測，沒呼叫 `vi.useFakeTimers()` 也能用 `vi.setSystemTime()`，這時只有 `Date` 被固定，計時器照常走。
+整個測試在 1 毫秒內跑完。取消期限的測試在凌晨失敗，是因為測試用了真的「今天」：測試用 `new Date().toISOString().slice(0, 10)` 組出今天的預約，台灣時間凌晨 0 點到 8 點時 UTC 還是前一天，拿到的是昨天的日期。Vitest 5.1.1 實測，沒呼叫 `vi.useFakeTimers()` 也能用 `vi.setSystemTime()`，這時只有 `Date` 被固定，計時器照常走。
 
 ## 替身：`vi.fn`、`vi.spyOn`、`vi.mock`
 
@@ -359,9 +355,9 @@ it('scope 停止時清掉計時器', () => {
 
 ## 覆蓋率與「改壞會不會變紅」
 
-`vitest run --coverage`（要裝 `@vitest/coverage-v8`）列出每個檔案的 Stmts、Branch、Funcs、Lines。開頭那個只檢查 `typeof … === 'number'` 的測試，實測四欄都是 100：每一行都跑過了，只是沒有任何一個值被檢查。覆蓋率回答的是「哪些程式沒跑到」，用來找漏掉的分支；它不回答「測試有沒有驗到」。
+`vitest run --coverage`（要裝 `@vitest/coverage-v8`）列出每個檔案的 Stmts、Branch、Funcs、Lines。開頭那個測試每一行都跑過了，只是沒有任何一個值被檢查。覆蓋率回答的是「哪些程式沒跑到」，用來找漏掉的分支；它不回答「測試有沒有驗到」。
 
-回答後者的方法是故意改壞程式，看有沒有測試變紅：把 `<` 改成 `<=`、`Math.ceil` 改成 `Math.round`、刪掉一行檢查。每個改壞的版本叫一個突變體（mutant），有測試失敗叫殺掉（killed），全綠叫存活（survived）。存活的突變體指出測試缺了哪一個邊界。手動做幾次就有感覺；工具是 Stryker，搭配 `@stryker-mutator/vitest-runner`（10.1.1）。原理與報告怎麼讀見後端路線的 [測試品質](#/skill/test-quality)。
+回答後者的方法是故意改壞程式，看有沒有測試變紅：把 `<` 改成 `<=`、`Math.ceil` 改成 `Math.round`、刪掉一行檢查。每個改壞的版本叫一個突變體（mutant），有測試失敗叫殺掉（killed），全綠叫存活（survived），存活的指出測試缺了哪一個邊界。工具是 Stryker，搭配 `@stryker-mutator/vitest-runner`（10.1.1）。原理與報告怎麼讀見後端路線的 [測試品質](#/skill/test-quality)。
 
 ```js
 // vitest.config.js（節錄）
@@ -388,7 +384,7 @@ export default defineConfig({
 
 ## 在瀏覽器裡改壞一次
 
-下面這段不用任何框架：同一組斷言先跑正確版，再跑三個改壞的版本，印出哪些被抓到。把 `checks` 裡「前面 1 位」那一行刪掉再執行，看 `Math.round` 那個變成存活：
+不用任何框架：同一組斷言先跑正確版，再跑三個改壞的版本，印出哪些被抓到。把 `checks` 裡「前面 1 位」那一行刪掉再執行，看 `Math.round` 那個變成存活：
 
 ```js run
 const correct = (current, mine, per = 6) => {
@@ -440,15 +436,12 @@ for (const [name, f] of Object.entries(mutants)) {
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
 | `ReferenceError: it is not defined` | 預設 `globals: false`，沒有 import | `import { describe, it, expect, vi } from 'vitest'` |
-
 | `Promise returned by \`expect(actual).rejects.toThrow(expected)\` was not awaited` | `resolves`／`rejects` 前面沒 `await` | 加 `await` |
 | `Tests 2 passed` 但底部有 `Unhandled Rejection`、結束碼 1，錯誤歸到不相干的測試 | `.then()` 裡的斷言沒有 `return` 或 `await`，測試先結束了 | 改成 `await`，或回傳那個 Promise |
 | `expected "vi.fn()" to be called 1 times, but got 0 times` | 用了 fake timers 卻沒推時間，或推得不夠 | `vi.advanceTimersByTime(ms)` |
-
 | 後面的測試莫名其妙逾時或時間不對 | 上一個測試的 fake timers 沒換回來 | `afterEach(() => vi.useRealTimers())` |
 | `There was an error when mocking a module…` 與 `Cannot access '…' before initialization` | `vi.mock` 的工廠用了外面的變數 | `vi.hoisted()`，或改成參數注入 |
 | `[Vue warn]: onUnmounted is called when there is no active component instance` | 在測試裡直接呼叫用到生命週期的 composable | `withSetup`，或 `onScopeDispose` 加 `effectScope()` |
-| 覆蓋率 100%，改壞程式仍然全綠 | 斷言沒有具體的期望值 | 每條規則寫出值；故意改壞一次確認會變紅 |
 | 在 AI 寫程式工具裡跑，看不到 `console.log` 與 `[Vue warn]` | Vitest 5.1.1 偵測到 `AI_AGENT`、`CLAUDECODE` 這類環境變數時改用精簡輸出，實測通過的測試不印 console | 要看輸出時在一般終端機執行 |
 
 ## 動手

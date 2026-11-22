@@ -160,11 +160,11 @@ spec:
 
 ### Secret 不是加密
 
-Secret 的值在 API 裡只是 base64 **編碼**，任何能讀取這個 namespace 的 Secret 的人都能解出原文。要保護它，至少要做到：
+Secret 的值在 API 裡只是 base64 **編碼**，任何能讀取這個 namespace 的 Secret 的人都能解出原文。保護它要三件事，細節見 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)：
 
 - 用 RBAC 限制誰能讀 Secret。
 - 開啟 etcd 的靜態加密（encryption at rest）；雲端代管服務多半有對應的設定或預設行為，地端自建要自己設定。
-- 不要把 Secret 的 YAML 原文 commit 進 git。常見做法是把機密放在外部的機密管理系統，再同步進叢集，或把加密後的版本放進 git。
+- Secret 的 YAML 原文不進 git：機密放在外部的機密管理系統再同步進叢集，或把加密後的版本放進 git。
 
 ### 資料庫要不要放進叢集
 
@@ -172,13 +172,9 @@ Secret 的值在 API 裡只是 base64 **編碼**，任何能讀取這個 namespa
 
 ## 滾動更新的細節：優雅關閉、三種 probe、回退
 
-預設的策略是 `RollingUpdate`，`maxSurge` 與 `maxUnavailable` 都是 25%。以 3 個副本計算，25% 的 3 是 0.75：maxSurge 無條件進位成 1，maxUnavailable 無條件捨去成 0。
+預設的策略是 `RollingUpdate`，`maxSurge` 與 `maxUnavailable` 都是 25%。以 3 個副本計算，25% 的 3 是 0.75：maxSurge 無條件進位成 1，maxUnavailable 無條件捨去成 0。其他組合見 [Kubernetes 實作：把服務寫成 manifest](#/skill/k8s-manifests)。
 
-**優雅關閉**：舊 Pod 被刪除時，Kubernetes 先送 SIGTERM，等 `terminationGracePeriodSeconds`（預設 30 秒）後才送 SIGKILL。應用程式要在收到 SIGTERM 後停止接新請求、把手上的請求做完再結束。
-
-從 Service 移除 Pod 與送出 SIGTERM 是同時開始的，可能有少量請求在這段時間仍被送到要關閉的 Pod，常見做法是加一個短暫的 `preStop` 等待。
-
-三種 probe 的差別：
+**優雅關閉**：舊 Pod 被刪除時，Kubernetes 先送 SIGTERM，等 `terminationGracePeriodSeconds`（預設 30 秒）後才送 SIGKILL。應用程式要在收到 SIGTERM 後停止接新請求、把手上的請求做完再結束。從 Service 移除 Pod 與送出 SIGTERM 同時開始，所以常加一個短暫的 `preStop` 等待，時間線與寫法見 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
 
 | probe | 失敗時 | 適合檢查 | 不要檢查 |
 |---|---|---|---|
@@ -186,7 +182,7 @@ Secret 的值在 API 裡只是 base64 **編碼**，任何能讀取這個 namespa
 | liveness | **重啟容器** | 程序是否卡死（例如死結、事件迴圈停止） | 資料庫或其他外部依賴 |
 | startup | 啟動期間暫停另外兩個 probe；超過時限就重啟 | 啟動很慢的程式（大型 Java 應用） | |
 
-liveness 檢查資料庫是常見的錯誤：資料庫短暫不穩時，所有 Pod 的 liveness 一起失敗、一起重啟，重啟期間又一起去連資料庫，問題放大成全面停機。
+liveness 檢查資料庫時，資料庫一次短暫不穩會讓所有 Pod 一起重啟，模擬見 [Kubernetes 實作：設定、探針與資源](#/skill/k8s-config-probes)。
 
 更新出問題時：
 
@@ -202,7 +198,7 @@ deployment.apps/booking-web rolled back
 
 ## 地端自建：要自己補的東西
 
-Kubernetes 本身只包含控制平面（API server、scheduler、controller manager、etcd）與節點上的 kubelet。雲端代管服務把周邊的整合都做好了；地端自建時，下面這些都要自己選、自己裝、自己維運：
+Kubernetes 本身只包含控制平面（API server、scheduler、controller manager、etcd）與節點上的 kubelet。地端自建時，下面這些都要自己選、自己裝、自己維運：
 
 | 需要的功能 | 雲端代管通常怎麼提供 | 地端自建要自己處理 |
 |---|---|---|
@@ -219,8 +215,6 @@ Kubernetes 本身只包含控制平面（API server、scheduler、controller man
 | 身分認證 | 整合雲端帳號體系 | 接既有的身分系統（例如透過 OIDC 接 AD），否則大家共用一份 kubeconfig |
 | 網路（CNI）與網路政策 | 預設 CNI | 選擇 CNI（例如 Calico、Cilium），決定 Pod 網段不能跟既有內網重疊 |
 
-幾個地端特有的情況：
-
 **LoadBalancer 一直 pending**：
 
 ```bash
@@ -229,7 +223,7 @@ NAME                       TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)  
 ingress-nginx-controller   LoadBalancer   10.96.141.22   <pending>     80:31380/TCP,443:31443/TCP   3d
 ```
 
-沒有任何元件負責分配外部 IP，所以它永遠在等。MetalLB 這類元件從一段預先保留的內網 IP 中分配位址，用 ARP（L2 模式）或 BGP 對外宣告。那段 IP 要跟網路組協調，不能和 DHCP 或其他設備衝突。
+MetalLB 這類元件從一段預先保留的內網 IP 中分配位址，用 ARP（L2 模式）或 BGP 對外宣告。那段 IP 要跟網路組協調，不能和 DHCP 或其他設備衝突。
 
 **節點不信任內部 registry 的憑證**：
 
@@ -239,13 +233,13 @@ Failed to pull image "registry.example.org/booking/web:3f9c2a1b": ... tls: faile
 
 拉 image 的是**節點上的容器執行環境**（例如 containerd），不是 Pod。內部 CA 的根憑證要裝在每一個節點上，新加入的節點也要。憑證的細節見 [HTTPS 憑證](#/skill/https-certificates)。
 
-**Ingress controller 的選擇**：Ingress 只是規則，實際處理流量的是 controller。Kubernetes 社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API（Kubernetes 的新一代流量路由 API，已正式發布 v1）。選型前查清楚專案的維護狀態，這類資訊變動很快。
+**Ingress controller 的選擇**：Kubernetes 社群維護的 ingress-nginx 專案已在 2026 年 3 月停止維護，新的建置要評估其他 controller 或 Gateway API（Kubernetes 的新一代流量路由 API，已正式發布 v1；寫法見 [Kubernetes 實作：把服務寫成 manifest](#/skill/k8s-manifests)）。選型前查清楚專案的維護狀態，這類資訊變動很快。
 
-**升級是持續的工作**：Kubernetes 大約每年發布三個 minor 版本，每個版本約有 14 個月的修補支援。叢集大約每年要升級一到兩次才不會落到不再支援的版本，而且只能一個 minor 一個 minor 升。這要排進年度維運計畫。
+**升級是持續的工作**：Kubernetes 大約每年發布三個 minor 版本，每個版本約有 14 個月的修補支援。叢集大約每年要升級一到兩次才不會落到不再支援的版本，要排進年度維運計畫。
 
 ## 雲端代管（EKS、GKE、AKS）差在哪
 
-Amazon EKS、Google GKE、Azure AKS 這類服務，替你運作控制平面，並把上一節大部分的整合做好：LoadBalancer 自動建立雲端負載平衡器、預設有 StorageClass、身分系統接雲端帳號、版本升級有工具。
+Amazon EKS、Google GKE、Azure AKS 這類服務替你運作控制平面，並把上一節大部分的整合做好（表格中間那一欄）。
 
 仍然是使用者的責任：
 
@@ -258,8 +252,6 @@ Amazon EKS、Google GKE、Azure AKS 這類服務，替你運作控制平面，�
 地端與雲端的選擇除了技術，還牽涉資料能放在哪裡的法規要求、既有機房的投資、網路連線與團隊能力。見 [地端、雲端還是混合雲](#/skill/hosting-models)。
 
 ## 導入前，團隊與系統要先具備的能力
-
-下面每一項沒做到，搬上叢集後都會變成維運問題：
 
 | 能力 | 具體要做到 | 沒做到時在 K8s 上的後果 |
 |---|---|---|
@@ -286,14 +278,10 @@ Amazon EKS、Google GKE、Azure AKS 這類服務，替你運作控制平面，�
 
 | `kubectl get pod` 的狀態 / 現象 | 意思 | 從哪裡查 |
 |---|---|---|
-| `Pending` | 排程不了：資源不夠、PVC 沒綁定、節點有 taint | `kubectl describe pod` 的 Events，例如 `0/3 nodes are available: 3 Insufficient memory.` |
-| `ImagePullBackOff` / `ErrImagePull` | 拉不到 image：名稱或 tag 錯、沒有 registry 登入資訊、節點不信任 registry 憑證 | `kubectl describe pod` 的 Events |
-| `OOMKilled`（Exit Code 137） | 記憶體超過 limit | 監控記憶體曲線，區分用量不足還是洩漏 |
-| Service 連不到任何 Pod | Service 的 selector 和 Pod 的 label 不一致，或沒有 Pod ready | `kubectl get endpointslices -n <ns>` 看有沒有後端位址 |
 | PVC 一直 `Pending` | 沒有符合的 StorageClass，或沒有預設 StorageClass | Events 會出現 `no persistent volumes available for this claim and no storage class is set` |
 | Ingress 回 404 或 503 | 404：Host 或路徑沒對到規則；503：對到的 Service 沒有可用的 Pod | Ingress controller 的 log；排查方式見 [網路通不通](#/skill/network-troubleshooting) |
 
-查問題的固定順序：`kubectl get pod` 看狀態 → `kubectl describe pod` 看 Events → `kubectl logs`（必要時加 `--previous`）看應用程式輸出。
+`Pending`、`ImagePullBackOff`、`OOMKilled`、Service 連不到 Pod 的訊息關鍵字，以及 get → describe → logs 的排查順序，見 [Kubernetes 排錯：Pending、CrashLoopBackOff、連不到](#/skill/k8s-troubleshooting)。
 
 ## 動手
 

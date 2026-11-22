@@ -99,8 +99,6 @@ const FALLBACK = { label: '未知', cls: 'bg-gray-100 text-gray-700' }
 
 ## v3 與 v4 的差別
 
-v4 和 v3 最大的不同是設定的位置：
-
 | 項目 | v3 | v4 |
 |---|---|---|
 | 入口 | `@tailwind base; @tailwind components; @tailwind utilities;` | `@import "tailwindcss";` |
@@ -109,7 +107,7 @@ v4 和 v3 最大的不同是設定的位置：
 | PostCSS | `tailwindcss` 本身是外掛 | 另一個套件 `@tailwindcss/postcss` |
 | 自訂變體 | `plugins` | `@custom-variant` |
 
-在 v4.3.5 實測：CSS 入口只寫 v3 的 `@tailwind base; @tailwind utilities;`，CLI 沒有任何錯誤，輸出只有一行版權註解，所有 class 都沒有樣式。
+v4.3.5 實測：CSS 入口只寫 v3 的 `@tailwind base; @tailwind utilities;` 時，CLI 的輸出只有一行版權註解。
 
 各種 CSS 組織方式的比較見 [CSS 的組織方式](#/skill/css-architecture)。
 
@@ -137,7 +135,7 @@ v4.3.5 實際產生的 CSS（節錄）：
 | `w-[37px]` | 任意值：`width: 37px` |
 | `bg-red-500!` | `background-color: … !important`（v4 的 `!` 寫在最後，舊的前綴寫法 `!bg-red-500` 也還能用） |
 
-斷點的換算以預設字級 16px 計。要在手機隱藏寫 `max-sm:hidden`，或預設 `hidden` 再加 `sm:block`。mobile-first 的概念見 [RWD 與斷點](#/skill/rwd)。
+斷點的換算以預設字級 16px 計。mobile-first 的概念見 [RWD 與斷點](#/skill/rwd)。
 
 ## `@theme`：token 變成 class
 
@@ -155,13 +153,11 @@ v4.3.5 實際產生的 CSS（節錄）：
 
 變數的命名空間決定產生哪類 class：`--color-*` 給所有顏色工具，`--radius-*` 給 `rounded-*`，`--breakpoint-*` 給斷點變體。這些變數同時出現在 `:root`，一般的 CSS 也能用 `var(--color-clinic)`。v4.3.5 預設只輸出有用到的主題變數。
 
-`--color-clinic` 只定義了一個值，`bg-clinic-500` 不存在，建置不會報錯、CSS 裡也沒有它。要一整組色階就定義 `--color-clinic-50` 到 `--color-clinic-900`。
-
 專案已經有 design token 時，`@theme` 的值指向既有的 token 或把 token 檔改寫成 `@theme`，同一個值只維護一份（見 [design token 與主題](#/skill/design-tokens)）。
 
 ## 掃描的模擬與另外兩種修法
 
-下面這段在 Worker 裡用簡化的規則模擬這件事：
+用簡化的規則模擬掃描：
 
 ```js run
 // 簡化的掃描：把原始碼切成「可能是 class」的片段，再和需要的 class 比對
@@ -219,7 +215,7 @@ Tailwind 產出的 CSS 開頭是：
 
 v4.3.5 實測：`.btn { @apply rounded-md px-4 py-2; }` 寫在 `@layer` 外面時，產出的 `.btn` 放在所有層之後，不屬於任何層。
 
-下面這段在 Playground 跑的是真的 Tailwind CSS 4.3.5：程式碼裡有 `<style type="text/tailwindcss">` 時，沙箱載入 `@tailwindcss/browser`，它在瀏覽器裡掃 DOM 的 class、編譯這段 CSS，產生的樣式和建置時一樣放在 `@layer utilities`。它是非同步產生的，所以讀樣式的程式等 300 毫秒再讀：
+這段在 Playground 跑的是真的 Tailwind CSS 4.3.5：程式碼裡有 `<style type="text/tailwindcss">` 時，沙箱載入 `@tailwindcss/browser`，它在瀏覽器裡掃 DOM 的 class、編譯這段 CSS，產生的樣式和建置時一樣放在 `@layer utilities`。它是非同步產生的，所以讀樣式的程式等 300 毫秒再讀：
 
 ```html run
 <style type="text/tailwindcss">
@@ -250,7 +246,7 @@ v4.3.5 實測：`.btn { @apply rounded-md px-4 py-2; }` 寫在 `@layer` 外面�
 
 ## 兩個同類的 class：看 CSS 的順序，用 `cn()` 合併
 
-元素上同時有 `px-4` 與 `px-2` 時，兩條規則在同一層、權重一樣，勝出的是 **CSS 檔裡排在後面的那條**。Tailwind 依自己的規則排序產出的 CSS，class 屬性裡誰寫在後面不影響結果。v4.3.5 實測 `bg-green-500` 排在 `bg-red-500` 前面，所以 `class="bg-red-500 bg-green-500"` 顯示紅色。
+`px-4` 與 `px-2` 在同一層、權重一樣，Tailwind 依自己的規則排序產出的 CSS。v4.3.5 實測 `bg-green-500` 排在 `bg-red-500` 前面，所以 `class="bg-red-500 bg-green-500"` 顯示紅色。
 
 Vue 的 class 透傳只是把字串接起來：根元素寫 `class="px-4"`，呼叫端傳 `class="px-2"`，結果是 `class="px-4 px-2"`，兩條都在。要「後面的取代前面的」，就要在合併時把衝突的 class 拿掉，這是 `tailwind-merge` 做的事。慣用的寫法叫 `cn()`：
 
@@ -341,7 +337,7 @@ Tailwind 為主的專案裡，偶爾需要寫 CSS（第三方元件的內部、`
 </style>
 ```
 
-沒有 `@reference` 時，SFC 的 `<style>` 是獨立處理的，`@apply` 會失敗（訊息見下一節）。`@apply` 用多了等於回到自己取 class 名稱；同一組 class 在模板裡重複三次以上，先抽成 Vue 元件。
+沒有 `@reference` 時，SFC 的 `<style>` 是獨立處理的，`@apply` 會失敗（訊息見「其他錯誤與訊息」）。`@apply` 用多了等於回到自己取 class 名稱；同一組 class 在模板裡重複三次以上，先抽成 Vue 元件。
 
 ## 任意值的節制
 
@@ -354,12 +350,10 @@ Tailwind 為主的專案裡，偶爾需要寫 CSS（第三方元件的內部、`
 | `It looks like you're trying to use \`tailwindcss\` directly as a PostCSS plugin. The PostCSS plugin has moved to a separate package…` | v4 的 PostCSS 外掛是另一個套件 | Vite 專案改用 `@tailwindcss/vite`；一定要 PostCSS 就裝 `@tailwindcss/postcss` |
 | `Cannot apply unknown utility class \`text-sm\`. Are you using CSS modules or similar and missing \`@reference\`?` | SFC 或 CSS Modules 裡的 `@apply` 不知道主題 | 在 `<style>` 開頭加 `@reference "…/main.css";` |
 | `Cannot apply unknown utility class \`text-foo\`` | `@apply` 了一個不存在的 class（拼錯，或 `@theme` 沒定義） | 查 `@theme` 的命名空間與名稱 |
-| `bg-clinic-500` 沒有樣式 | `@theme` 只定義了 `--color-clinic`，沒有色階 | 改用 `bg-clinic`，或補上 `--color-clinic-500` |
-| 傳進元件的 `px-2` 有時有效有時沒效 | 元素上同時有 `px-4` 與 `px-2`，勝出看 CSS 的順序 | 用 `cn()` 合併 |
+| `bg-clinic-500` 沒有樣式，建置不報錯 | `@theme` 只定義了 `--color-clinic` 一個值，沒有色階 | 改用 `bg-clinic`；要一整組色階就定義 `--color-clinic-50` 到 `--color-clinic-900` |
 | 工具類別被劃掉，勝出的規則帶 `[data-v-…]` | scoped CSS 沒有層，勝過 `@layer utilities` | 把那段 CSS 放進 `@layer components`，或拿掉重複的宣告 |
 | `sm:hidden` 在手機上沒隱藏 | `sm:` 是 640px 以上 | `max-sm:hidden`，或 `hidden sm:block` 反過來寫 |
 | 手機上 hover 樣式不出現 | v4 的 `hover:` 只在 `@media (hover: hover)` 成立 | 觸控的回饋用 `active:` |
-| `dark:` 不跟著切換按鈕變 | 預設的 `dark:` 看系統設定 | 用 `@custom-variant dark (…)` 改成看 `data-theme` |
 
 ## 動手
 

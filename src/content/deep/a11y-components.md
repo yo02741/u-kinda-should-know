@@ -137,7 +137,7 @@ Enter 與 Space 在原生 `<button>` 上本來就會觸發 `click`，所以按�
 
 ## role 是承諾：沒兌現比不寫更糟
 
-APG 的 Read Me First 頁開頭有兩條原則。第一條是「A role is a promise」：寫下 `<div role="button">`，等於承諾也寫好了按鈕該有的鍵盤操作，因為 ARIA 角色不會讓瀏覽器提供任何鍵盤行為或樣式。同一頁的標題是「No ARIA is better than Bad ARIA」：角色寫錯或沒兌現，對螢幕閱讀器使用者的傷害比完全不寫還大。
+「A role is a promise」出自 APG 的 Read Me First 頁（ARIA 角色也不提供樣式）。同一頁的標題是「No ARIA is better than Bad ARIA」：角色寫錯或沒兌現，對螢幕閱讀器使用者的傷害比完全不寫還大。
 
 上面的選單把三件事承諾給輔助科技：這是一顆會開出選單的按鈕（`aria-haspopup="menu"`），它目前是收合的（`aria-expanded`），選單裡的項目要用方向鍵移動（`role="menu"`、`role="menuitem"`）。程式一件都沒做到。
 
@@ -151,7 +151,7 @@ Menu Button 屬性的部分：
 
 ## composite widget：Tab 進入時停在哪一項
 
-APG 的 Developing a Keyboard Interface 頁說明了所有模式共用的慣例：Tab 與 Shift+Tab 在元件之間移動，方向鍵在元件裡面移動。含有多個可聚焦項目的元件（Tabs、Menu、Listbox、Radio group、Grid）在 ARIA 規格裡叫 composite widget，整組在 Tab 順序裡只有一個位置。
+「Tab 在元件之間、方向鍵在元件裡面」是 APG 的 Developing a Keyboard Interface 頁說明的共用慣例。含有多個可聚焦項目的元件（Tabs、Menu、Listbox、Radio group、Grid）在 ARIA 規格裡叫 composite widget。
 
 Tab 進入時停在哪一項，依元件而定：
 
@@ -162,7 +162,7 @@ Tab 進入時停在哪一項，依元件而定：
 | Menubar、Toolbar | 第一項 |
 | Menu（由按鈕開出來） | Tab 不會進入選單，開選單時由程式把焦點移進去 |
 
-驗收時最容易看出問題的一招：從元件前一個元素開始連按 Tab。每個 tab、每個選單項目都停一次，代表整組都設成了 `tabindex="0"`（或全是原生按鈕），沒照模式做。
+連按 Tab 時每一項都停一次，原因是整組都設成了 `tabindex="0"`，或全是原生按鈕。
 
 ## roving tabindex 與 aria-activedescendant 的差別
 
@@ -179,7 +179,7 @@ Tab 進入時停在哪一項，依元件而定：
 
 APG 特別區分 focus 與 selection。焦點是目前操作的位置，同一時間只有一個（`document.activeElement`）；選取是一種狀態，例如 `aria-selected="true"` 的 tab、`aria-checked="true"` 的選項，離開元件後仍然保留。
 
-單選的 Tabs 與 Listbox 可以讓「選取跟著焦點」：→ 移到下一個 tab 時直接顯示它的內容。APG 的建議是內容已經在 DOM 裡、切換沒有延遲時才這樣做；每切一次就要等 API 的內容，改成方向鍵只移動焦點、按 Enter 或 Space 才切換，否則鍵盤使用者每按一次方向鍵就要等一次載入。驗收時兩件事分開看：焦點有沒有移動、`aria-selected` 有沒有換到對的那一個。
+單選的 Tabs 與 Listbox 可以讓「選取跟著焦點」（自動切換）；什麼時候改成手動切換見 [導覽元件](#/skill/navigation-ui)。驗收時兩件事分開看：焦點有沒有移動、`aria-selected` 有沒有換到對的那一個。
 
 ## 各模式的驗收重點
 
@@ -191,9 +191,9 @@ APG 特別區分 focus 與 selection。焦點是目前操作的位置，同一�
 | Dialog（modal） | 焦點移進 Dialog | Tab 不會走到背景；Esc 關閉；焦點回到觸發的按鈕 | Role 是 `dialog`、Name 是標題 | [浮層](#/skill/overlays) |
 | Disclosure、Accordion | 每顆按鈕都在 Tab 順序裡 | Enter、Space 切換 | `aria-expanded` 跟著切換；Accordion 的按鈕包在標題元素裡 | 本課 |
 
-Disclosure 是最簡單也最常被做壞的一個：一顆按鈕控制一塊內容顯示與否，按鈕有 `aria-expanded`，選用的 `aria-controls` 指向那塊內容。Accordion 是一組 disclosure，APG 要求每顆標題按鈕包在一個標題元素裡（例如 `<h3><button aria-expanded="false">看診須知</button></h3>`），而且按鈕是標題裡唯一的元素。AI 常見的寫法是 `<div class="accordion-header" @click>`：不在 Tab 順序裡，也沒有 `aria-expanded`。
+Disclosure 是最簡單也最常被做壞的一個：一顆按鈕控制一塊內容顯示與否，按鈕有 `aria-expanded`，選用的 `aria-controls` 指向那塊內容。Accordion 是一組 disclosure，APG 要求每顆標題按鈕包在一個標題元素裡（例如 `<h3><button aria-expanded="false">看診須知</button></h3>`），而且按鈕是標題裡唯一的元素：螢幕閱讀器的使用者常用「跳到下一個標題」瀏覽頁面，按鈕沒有包在 `h2`、`h3` 裡就跳不到。AI 常見的寫法是 `<div class="accordion-header" @click>`：不在 Tab 順序裡，也沒有 `aria-expanded`。
 
-不需要客製行為時，Disclosure 與 Accordion 直接用原生的 `<details>` 與 `<summary>`：`<summary>` 本身可以聚焦、Enter 與 Space 會切換、展開狀態由瀏覽器提供給輔助科技，不必寫 `aria-expanded` 與按鍵處理（Baseline Widely available）。同一組只能開一個時，每個 `<details>` 寫同樣的 `name="faq"`，這是 Baseline 2024（2024-09 起），舊瀏覽器上退化成可以同時展開幾個，內容照樣看得到。要驗的只剩 `<summary>` 的文字念不念得懂，以及標題層級合不合理。
+不需要客製行為時，Disclosure 與 Accordion 直接用原生的 `<details>` 與 `<summary>`（Baseline Widely available），不必寫 `aria-expanded` 與按鍵處理；瀏覽器替它做的事見 [語意化 HTML 與表單元素](#/skill/semantic-html)。同一組只能開一個時，每個 `<details>` 寫同樣的 `name="faq"`，這是 Baseline 2024（2024-09 起），舊瀏覽器上退化成可以同時展開幾個，內容照樣看得到。要驗的只剩 `<summary>` 的文字念不念得懂，以及標題層級合不合理。
 
 ## 每種工具抓得到什麼
 
@@ -205,7 +205,7 @@ Disclosure 是最簡單也最常被做壞的一個：一顆按鈕控制一塊內
 | Playwright、Vitest Browser Mode | 上面全部，加上真的 `<dialog>`、焦點回復、可見性 | 念出來聽不聽得懂 |
 | NVDA、VoiceOver 實測 | 角色、名稱、狀態變化念出來的樣子，跨元件的操作流程 | 不會留下可以重跑的紀錄 |
 
-開頭那個選單，用 `@axe-core/playwright` 對它掃描得到 0 個違規；同一個測試裡按 Enter 再按 ↓，`document.activeElement` 仍然是按鈕。axe 的結果只能當「結構沒錯」的證據。
+axe 的結果只能當「結構沒錯」的證據。
 
 ## Menu Button 的細節：aria-expanded 的綁定、Popover、Dialog 的焦點回復
 
@@ -347,8 +347,7 @@ Received: inactive
 
   在 Console 建立 live expression `document.activeElement`，一步一步操作，就能看到它在哪一步變成 `body`。
 
-- **`role="menu"` 用在網站導覽**：一般的導覽列用連結加 disclosure 按鈕，APG 的 Disclosure Navigation Menu 範例特別註明沒有用 menu 角色。寫成 menu，螢幕閱讀器使用者會照應用程式選單的方式操作，Tab 卻又走得進去。
-- **Accordion 的標題按鈕不在標題元素裡**：螢幕閱讀器的使用者常用「跳到下一個標題」瀏覽頁面，按鈕沒有包在 `h2`、`h3` 裡就跳不到。
+- **`role="menu"` 用在網站導覽**：一般的導覽列用連結加 disclosure 按鈕（見 [導覽元件](#/skill/navigation-ui)）。寫成 menu，螢幕閱讀器使用者會照應用程式選單的方式操作，Tab 卻又走得進去。
 - **自動化全綠就收工**：axe、元件測試都過了，仍然要用 NVDA 或 VoiceOver 念一遍。APG 的 Read Me First 也提醒，各瀏覽器與螢幕閱讀器的支援程度不同，上線前要在目標使用者會用的組合上實測。
 
 ## 動手

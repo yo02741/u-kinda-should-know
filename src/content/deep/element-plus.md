@@ -184,7 +184,7 @@ async function onSubmit() {
 | 表格 | 欄位、排序、篩選、勾選、固定表頭 | 表頭和內容是兩個 `<table>`（`.el-table__header` 與 `.el-table__body`），螢幕閱讀器讀內容時對不到欄名；伺服器分頁時的排序 |
 | 語系 | 68 個語言檔，含 `zh-tw` | 部分 `aria-label` 沒翻：排序按鈕是 `Sort by 號碼`、全選是 `Select all rows` |
 
-上面的對比值與屬性都是在 Chromium 裡掛上 2.14.8 實測的結果。元件庫省下的是外觀與大部分行為；無障礙的最後一段、和後端的接法、設計稿的差異，還是在自己的程式裡。
+上面的對比值與屬性都是在 Chromium 裡掛上 2.14.8 實測的結果。
 
 要不要用元件庫、用哪一種，設計情境 [元件自己做、用元件庫，還是 headless](#/scenario/ui-library) 比較過。
 
@@ -202,7 +202,7 @@ import App from './App.vue'
 createApp(App).use(ElementPlus).mount('#app')
 ```
 
-`app.use(ElementPlus)` 把所有元件與指令註冊成全域，`index.css` 是全部元件的樣式。按需引入改由建置工具處理：unplugin-vue-components 掃描模板，看到 `<el-button>` 就替這個檔案加上 `import { ElButton } from 'element-plus/es'` 與它的樣式檔；unplugin-auto-import 掃描 script，看到 `ElMessage` 就加上 import。兩個外掛用同一個 `ElementPlusResolver`。
+按需引入改由建置工具處理：unplugin-vue-components 掃描模板，看到 `<el-button>` 就替這個檔案加上 `import { ElButton } from 'element-plus/es'` 與它的樣式檔；unplugin-auto-import 掃描 script，看到 `ElMessage` 就加上 import。
 
 同一個畫面（表單、輸入框、按鈕、表格、Dialog、`ElMessage`、`v-loading`）在 Vite 7.3.8 建置的結果：
 
@@ -212,18 +212,18 @@ createApp(App).use(ElementPlus).mount('#app')
 | 按需引入（兩個外掛） | 368 KB（gzip 132 KB） | 93 KB（gzip 13 KB） |
 | 按需引入，只裝 unplugin-vue-components、手動 import `ElMessage` | 368 KB | 87 KB，少了 `.el-message` 的樣式 |
 
-數字包含 Vue 本身，表格元件占了按需版本的一大塊。第三列是常見的漏洞：模板裡的元件有樣式，script 裡呼叫的 `ElMessage` 沒有，提示框接在頁面最下面、勾勾圖示撐滿整個寬度。chunk 怎麼切、怎麼看建置結果，見 [chunk 與內容 hash](#/skill/bundles-chunks)。
+數字包含 Vue 本身，表格元件占了按需版本的一大塊。第三列是常見的漏洞：模板裡的元件有樣式，script 裡呼叫的 `ElMessage` 沒有，提示框接在頁面最下面、勾勾圖示撐滿整個寬度；加 unplugin-auto-import，或手動 import 它的樣式。chunk 怎麼切、怎麼看建置結果，見 [chunk 與內容 hash](#/skill/bundles-chunks)。
 
-`ElementPlusResolver` 從 `unplugin-vue-components/resolvers` 匯入，兩個外掛共用；unplugin-auto-import 21 沒有自己的 `resolvers` 子路徑。
+unplugin-auto-import 21 沒有自己的 `resolvers` 子路徑，`ElementPlusResolver` 一律從 `unplugin-vue-components/resolvers` 匯入。
 
 ## 語系：`el-config-provider`
 
-Element Plus 預設是英文。兩種設定方式：
+兩種設定方式：
 
 - `app.use(ElementPlus, { locale: zhTw })`：全量引入時用。
 - `<el-config-provider :locale="zhTw">` 包住根元件：按需引入時用，也能只包一個區塊。
 
-語言檔從 `element-plus/es/locale/lang/zh-tw` 匯入。實測在根元件包了 `el-config-provider` 之後，用函式呼叫的 `ElMessageBox.confirm()` 按鈕也變成「取消」「確定」；沒設定時是「Cancel」「OK」。日期元件的月份與星期另外由 dayjs 的語系決定，官方文件要求另外 `import 'dayjs/locale/zh-tw'`。
+實測在根元件包了 `el-config-provider` 之後，用函式呼叫的 `ElMessageBox.confirm()` 按鈕也變成「取消」「確定」。日期元件的月份與星期另外由 dayjs 的語系決定，官方文件要求另外 `import 'dayjs/locale/zh-tw'`。
 
 語言檔裡沒翻的字串可以自己補：語言檔是一般物件，例如 `zhTw.el.table.sortLabel` 是 `'Sort by {column}'`，複製一份改成 `'依{column}排序'` 再傳給 `locale`。這類字串多半是 `aria-label`，畫面上看不到，只有螢幕閱讀器念得出來，要用 Accessibility 分頁才查得到。
 
@@ -241,7 +241,7 @@ Element Plus 預設是英文。兩種設定方式：
 
 ## 在瀏覽器裡看主題變數與語系
 
-下面這段在沙箱裡載入 Element Plus 2.14.8，印出兩顆按鈕的底色與 hover 色、空表格的文字。左邊只改主色，右邊連衍生色一起改：
+這段在沙箱裡載入 Element Plus 2.14.8，印出兩顆按鈕的底色與 hover 色、空表格的文字。左邊只改主色，右邊連衍生色一起改：
 
 ```js run vue
 import { createApp, ref } from 'vue'
@@ -295,9 +295,6 @@ setTimeout(() => {
 | 有欄位沒過 | reject，值是 `{ patientNo: [{ message, field, fieldValue }] }` 這種物件 |
 | 傳了 callback（`validate((valid, fields) => …)`） | 不 reject，結果交給 callback |
 
-沒過時 reject，所以 `await formRef.value.validate()` 不加 try／catch，Console 會出現 `Uncaught (in promise)` 和那個欄位物件。
-
-- `error` 的修法是送出前清成空字串，回應後再設；值經過一次改變，`watch` 就會觸發。
 - 後端欄位名（`patient_no`）和前端的 `prop`（`patientNo`）不同時要有一張對照表，對不到的訊息放在表單上方，規則和 [表單送出](#/skill/form-submit) 一樣。
 - `el-form` 渲染成 `<form>`，`@submit.prevent` 接到原生的 submit 事件，在輸入框按 Enter 也會送出；`native-type="submit"` 讓按鈕是 `type="submit"`。
 - v-model 綁定與驗證時機見 [表單綁定與驗證](#/skill/forms)。
@@ -307,7 +304,7 @@ setTimeout(() => {
 | 元件 | 行為 | 要注意 |
 |---|---|---|
 | `el-table` | `sortable` 只排傳進去的那幾筆。排序中的表頭有 `aria-sort="ascending"`，沒排序時是空字串。沒資料時顯示 `empty-text`，或用 `#empty` 插槽放「這個診次還沒有掛號」與下一步的按鈕 | 資料是伺服器分頁時改成 `sortable="custom"`，在 `@sort-change` 收到 `{ prop, order }`（`order` 是 `ascending`、`descending` 或 `null`），帶進查詢參數重抓，否則只排了這一頁，見 [資料顯示元件](#/skill/data-display) |
-| `el-dialog` | `v-model` 開關，`title` 會成為 `aria-label`。開啟後焦點在 `.el-dialog`（`tabindex="-1"`），Tab 在對話框裡循環，Esc 關閉，關閉後焦點回到開啟前的元素 | `append-to-body` 把它移到 `body` 底下，避免被父層的 `overflow` 或 `z-index` 擋住。和原生 `<dialog>` 的比較見 [浮層](#/skill/overlays) |
+| `el-dialog` | `v-model` 開關，`title` 會成為 `aria-label`。開啟後焦點在 `.el-dialog`（`tabindex="-1"`） | `append-to-body` 把它移到 `body` 底下，避免被父層的 `overflow` 或 `z-index` 擋住。和原生 `<dialog>` 的比較見 [浮層](#/skill/overlays) |
 | `ElMessage` | 函式呼叫，元素加在 `body` 最後，`role="alert"`，預設 3 秒後消失 | 成功的確認用它；錯誤要留在原處讓人讀，用 `el-alert` 或欄位錯誤 |
 | `v-loading` | 在元素上蓋一層 `.el-loading-mask` | 遮罩擋住滑鼠，但下面的按鈕仍然 Tab 得到、按 Enter 也會觸發；送出中要停用按鈕，用 `el-button` 的 `loading` prop（會加上 `disabled`） |
 
@@ -358,14 +355,8 @@ ElementPlusError: [props] [API] type.text is about to be deprecated in version 3
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-| `[Vue warn]: Failed to resolve directive: loading` | `v-loading` 沒註冊 | 同上；`ElementPlusResolver` 的 `directives` 預設是 `true` |
-| 提示框接在頁面最下面、沒有樣式 | 手動 `import { ElMessage }`，只有元件外掛，樣式沒帶入 | 加 unplugin-auto-import，或手動 import 它的樣式 |
-| 後端第二次回同一則錯誤，欄位下沒有字 | `error` 的值沒變，`watch` 沒觸發 | 送出前清成空字串 |
+| `[Vue warn]: Failed to resolve directive: loading` | `v-loading` 沒註冊 | `Components({ resolvers: [ElementPlusResolver()] })`；resolver 的 `directives` 預設是 `true` |
 | `validate()` 沒有檢查某個欄位 | `el-form-item` 沒寫 `prop`，或 `prop` 和 `model` 的 key 不同 | `prop` 寫成 `model` 裡的欄位名 |
-| 按鈕底色變了，hover 還是藍色 | 只覆寫 `--el-color-primary` | 一起覆寫 `light-*` 與 `dark-2`，或用 SCSS 變數重新產生 |
-| 表格點了排序，只排了這一頁 | `sortable` 在前端排目前的 `data` | `sortable="custom"` 加 `@sort-change` 重抓 |
-| 空表格寫「No Data」、對話框按鈕是英文 | 沒設語系 | `el-config-provider :locale="zhTw"` |
-| Console：`ElementPlusError: … is about to be deprecated in version 3.0.0` | 用了準備移除的寫法 | 照訊息裡的 `please use … instead` 改 |
 
 ## 動手
 

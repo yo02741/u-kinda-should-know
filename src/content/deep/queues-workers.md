@@ -165,7 +165,7 @@ print("第 5 次失敗：不再重試，移到死信佇列等人處理")
 
 ## 交易與入列：commit 之前別讓 worker 看到
 
-開頭的第一個 bug：在交易裡 `enqueue`，任務比資料先到。反過來也一樣糟：任務已經進了佇列，交易卻 rollback 了，worker 會對一個不存在的使用者寄信。
+在交易裡 `enqueue` 還有反過來的狀況：任務已經進了佇列，交易卻 rollback 了，worker 會對一個不存在的使用者寄信。
 
 | 做法 | 做法說明 | 風險 |
 |---|---|---|
@@ -174,7 +174,7 @@ print("第 5 次失敗：不再重試，移到死信佇列等人處理")
 | outbox | 同一個交易裡寫入業務資料與一筆「待送出的任務」，另一個程序讀 outbox 再送進 broker | 多一個要維運的程序；可能重送，所以消費者仍要冪等 |
 | 佇列就在同一個資料庫 | 任務表和業務資料在同一個 PostgreSQL，入列就是同一個交易裡的 `INSERT` | 佇列的吞吐量受限於資料庫；適合中小量的背景工作 |
 
-「commit 之後入列」大多數時候夠用；不能接受遺失時用 outbox 或資料庫佇列。outbox 在跨服務流程裡的角色，見 [分散式基礎](#/skill/distributed-basics) 的 saga 一段。
+「commit 之後入列」大多數時候夠用。outbox 在跨服務流程裡的角色，見 [分散式基礎](#/skill/distributed-basics) 的 saga 一段。
 
 ## 重試、退避與死信
 
@@ -294,12 +294,10 @@ Kafka 的強項是「事件被保留下來，新的消費者可以從頭讀」�
 
 上表寫的是 Kafka 傳統的 consumer group。Kafka 4.2 起把 share group（KIP-932，「Queues for Kafka」）列為可用於正式環境：同一個 partition 的訊息可以分給多個消費者、逐筆確認，超過投遞次數上限就不再重投，較新的版本再加上死信 topic（KIP-1191）。已經有 Kafka、又想用它跑背景任務時可以評估；各項功能在你用的版本是否可用，以 Apache Kafka 該版本的升級說明為準（2026 年 11 月核對到 4.4.0）。
 
-## 常見錯誤與錯誤訊息
+## 其他常見錯誤與錯誤訊息
 
 | 現象或訊息（類似） | 原因 | 修法 |
 |---|---|---|
-| worker 查不到剛建立的資料（例如 `DoesNotExist`、`user not found`） | 在交易 commit 前入列 | commit 後入列、outbox，或資料庫佇列 |
-| 同一封信寄兩次、點數加兩次 | at-least-once 重新投遞，消費者不冪等 | 去重紀錄與效果同一交易；外部呼叫帶冪等鍵 |
 | 同一個長任務被兩個 worker 同時執行 | visibility timeout 比執行時間短 | 調長 timeout，或讓 worker 執行中定期延長（SQS 可以 `ChangeMessageVisibility`） |
 | 佇列裡同一批任務一直失敗、一直重試 | 永久性錯誤也在重試、沒有次數上限 | 區分暫時與永久錯誤；設上限與死信佇列 |
 | Celery worker 被砍掉後任務消失 | 預設在執行前 ack | `task_acks_late = True`，並確保任務冪等 |

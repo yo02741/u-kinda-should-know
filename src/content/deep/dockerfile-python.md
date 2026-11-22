@@ -141,8 +141,6 @@ docs/
 
 ## 基底映像：slim、alpine 與其他
 
-官方 `python` 映像有幾種變體：
-
 | tag 例子 | 底層 | 特性 | 適合 |
 |---|---|---|---|
 | `python:3.12` | Debian 完整版 | 有 gcc、標頭檔與大量工具，可以編譯原始碼套件；體積最大 | 建置階段，或確實需要這些工具時 |
@@ -183,7 +181,7 @@ COPY app/ ./app/
 RUN uv sync --locked --no-dev
 ```
 
-`--locked` 要求 `uv.lock` 和 `pyproject.toml` 一致，不一致就失敗，避免「lock 檔忘了更新、image 裡裝的是另一組版本」。`--no-dev` 不裝測試與開發工具。`--no-install-project` 讓第 2 步只裝依賴。uv 的鎖檔與版本規則見 [uv 與專案管理](#/skill/uv-packaging)。
+`--locked` 要求 `uv.lock` 和 `pyproject.toml` 一致，不一致就失敗，避免「lock 檔忘了更新、image 裡裝的是另一組版本」。`--no-dev` 不裝測試與開發工具。uv 的鎖檔與版本規則見 [uv 與專案管理](#/skill/uv-packaging)。
 
 BuildKit（目前 `docker build` 的預設建置器）還支援**快取掛載**，把 uv 的下載快取留在建置機器上、不進 image。依賴變了要重裝時，已經下載過的套件不用再抓一次：
 
@@ -206,7 +204,7 @@ runtime 階段：python:3.12-slim + 非 root 使用者      ← 這個才是輸�
 （builder 階段本身被丟掉，裡面的 uv、快取、編譯工具都不會出現在最終 image）
 ```
 
-一個容易踩到的細節：虛擬環境裡的 `python` 是一個指向建立它的那個直譯器的符號連結（在官方映像裡是 `/usr/local/bin/python3`）。所以 builder 與 runtime 要用**同一個 Python 基底**，把 `.venv` 搬到一個 Python 路徑或版本不同的映像，執行時會出現找不到檔案的錯誤。
+虛擬環境裡的 `python` 是一個指向建立它的那個直譯器的符號連結（在官方映像裡是 `/usr/local/bin/python3`）。所以 builder 與 runtime 要用**同一個 Python 基底**，把 `.venv` 搬到一個 Python 路徑或版本不同的映像，執行時會出現找不到檔案的錯誤。
 
 ## 非 root 使用者
 
@@ -236,7 +234,7 @@ USER app
 | exec form（JSON 陣列） | `CMD ["uvicorn", "app.main:app"]` | 直接執行 `uvicorn`，它就是 PID 1 |
 | shell form（一般字串） | `CMD uvicorn app.main:app` | 執行 `/bin/sh -c "uvicorn app.main:app"`，**sh 是 PID 1** |
 
-shell form 讓 `docker stop` 的 SIGTERM 送到 sh。sh 是否轉送給 uvicorn 依 shell 實作而定，不能依賴；常見結果是 uvicorn 收不到、等滿逾時被 SIGKILL，進行中的請求被硬切斷。**一律用 exec form**。exec form 不經過 shell，所以 `$PORT` 這類變數不會被展開；需要展開時用一個啟動腳本，最後一行用 `exec` 把自己換成真正的程式：
+shell form 讓 `docker stop` 的 SIGTERM 送到 sh，uvicorn 常常收不到、等滿逾時被 SIGKILL，進行中的請求被硬切斷（PID 1 與訊號見 [Docker：image、container、layer](#/skill/docker-basics)）。**一律用 exec form**。exec form 不經過 shell，所以 `$PORT` 這類變數不會被展開；需要展開時用一個啟動腳本，最後一行用 `exec` 把自己換成真正的程式：
 
 ```bash
 #!/bin/sh
@@ -245,7 +243,7 @@ set -eu
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
 ```
 
-組合規則可以直接跑下面這段模擬看結果：
+組合規則的模擬：
 
 ```python run
 # 模擬 Docker 決定容器實際執行什麼：ENTRYPOINT / CMD 的 exec form（list）與 shell form（str）
@@ -284,7 +282,7 @@ ENV PYTHONUNBUFFERED=1 \
 ```
 
 - `PYTHONUNBUFFERED=1`：stdout 不緩衝，log 立刻出現在 `docker logs`，程式崩潰時最後幾行也不會留在緩衝區裡遺失。
-- `PYTHONDONTWRITEBYTECODE=1`：執行時不寫 `.pyc`（程式碼目錄是唯讀的，寫了也會失敗）；依賴的 bytecode 可以在建置時用 `UV_COMPILE_BYTECODE=1` 先編好，縮短啟動時間。
+- `PYTHONDONTWRITEBYTECODE=1`：執行時不寫 `.pyc`（程式碼目錄是唯讀的，寫了也會失敗）；依賴的 bytecode 在建置時由 `UV_COMPILE_BYTECODE=1` 先編好。
 - `PATH` 把虛擬環境放最前面，`uvicorn` 指的就是 `.venv/bin/uvicorn`，不需要在 CMD 裡寫 `uv run`（最終 image 裡也不必有 uv）。
 - **設定值不要寫在這裡**。資料庫網址、金鑰在執行時注入，見 [環境設定與 12-factor](#/skill/config-12factor)。
 
@@ -328,7 +326,7 @@ docker image ls shop/api
 docker image history --no-trunc shop/api:8d1e7f40     # 每一層的大小與產生它的指令
 ```
 
-常見的瘦身來源：基底從完整版換成 slim、dev 依賴不裝、多階段讓編譯工具留在 builder、`.dockerignore` 排除 `.git` 與資料檔、在同一個 `RUN` 裡安裝並清掉套件管理器的快取（`apt-get install … && rm -rf /var/lib/apt/lists/*`）。
+必讀那張表以外的瘦身來源：`.dockerignore` 排除 `.git` 與資料檔、在同一個 `RUN` 裡安裝並清掉套件管理器的快取（`apt-get install … && rm -rf /var/lib/apt/lists/*`）。
 
 漏洞掃描器比對 image 裡的作業系統套件與 Python 套件版本和已知漏洞資料庫，常見的有 Trivy、Grype、Docker Scout：
 
@@ -349,7 +347,7 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shop/api:8d1
 | 訊息 | 原因 | 怎麼修 |
 |---|---|---|
 | uv 回報 lockfile 需要更新、但指定了 `--locked` | `pyproject.toml` 改了，`uv.lock` 沒跟著更新 | 本機 `uv lock` 後一起 commit |
-| `ModuleNotFoundError: No module named 'fastapi'` | 執行的是系統的 Python，不是 `.venv` 裡的 | 同上；在容器裡 `which python` 確認 |
+| `ModuleNotFoundError: No module named 'fastapi'` | 執行的是系統的 Python，不是 `.venv` 裡的 | 設 `ENV PATH="/app/.venv/bin:$PATH"`；在容器裡 `which python` 確認 |
 | `exec /app/.venv/bin/uvicorn: no such file or directory`（檔案明明在） | 這個腳本第一行指定的直譯器不存在：builder 與 runtime 的 Python 路徑或版本不同 | 兩個階段用同一個 Python 基底 |
 | `PermissionError: [Errno 13] Permission denied: '/app/…'` | 非 root 使用者要寫入 root 擁有的目錄 | 不要寫程式碼目錄；需要寫的目錄明確建立並 `chown`，或掛 volume / tmpfs |
 | `error while attempting to bind on address ('0.0.0.0', 80): permission denied` | 非 root 不能聽 1024 以下的埠 | 容器裡改聽 8000，對外由 `-p 80:8000` 或 nginx 處理 |

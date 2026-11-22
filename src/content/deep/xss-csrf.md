@@ -72,7 +72,7 @@ cookie 的 `SameSite` 屬性決定跨站請求時要不要附上它：
 
 | 值 | 跨站時 | 備註 |
 |---|---|---|
-| `Strict` | 一律不帶 | 從外部連結點進來也不帶，看起來像沒登入 |
+| `Strict` | 一律不帶 | 從外部連結點進來也不帶，看起來像沒登入；留給高敏感操作的第二把 cookie |
 | `Lax` | 只有「頂層導覽的 GET」（點連結）會帶；跨站的 POST 表單、fetch、iframe 不帶 | 擋掉大多數 CSRF；一般 session 用這個，並明確寫出來 |
 | `None` | 一律帶，必須同時有 `Secure` | 只有需要跨站使用時才設 |
 
@@ -139,25 +139,23 @@ Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-R4nd0mPerR
 
 `HttpOnly` 讓 JavaScript 讀不到這個 cookie（`document.cookie` 看不到）。XSS 時攻擊者**偷不走** session cookie，無法在自己的機器上冒用。
 
-但它擋不住攻擊者**在受害者的頁面裡**發請求：script 呼叫 `fetch('/account/email', { method: 'POST', … })`，瀏覽器照樣附上 HttpOnly cookie，伺服器看到的就是合法使用者。HttpOnly 限制的是「cookie 被帶走」，不是「XSS 能造成的傷害」。同理，把 token 放在 `localStorage` 讓 XSS 能直接讀走，傷害範圍更大。
+但它擋不住攻擊者**在受害者的頁面裡**發請求：script 呼叫 `fetch('/account/email', { method: 'POST', … })`，瀏覽器照樣附上 HttpOnly cookie，伺服器看到的就是合法使用者。同理，把 token 放在 `localStorage` 讓 XSS 能直接讀走，傷害範圍更大。
 
 ## CSRF 的細節：SameSite 的盲點、token、Origin
 
 ### 成立的三個條件
 
-CSRF 成立需要三個條件：
-
 1. 伺服器用**瀏覽器會自動附上**的憑證認人：cookie、HTTP Basic、用戶端憑證。
 2. 請求的效果有價值：改資料、轉帳、改權限。
 3. 請求裡沒有攻擊者無法得知或無法偽造的值。
 
-只用 `Authorization: Bearer …` 標頭認證的 API 不符合第 1 點：別的網站沒辦法讓瀏覽器自動帶這個標頭。純 token 的 API 不受 CSRF 影響，但要更注意 XSS 把 token 讀走（取捨見 [驗證基礎：Session vs Token](#/skill/authn-basics)）。
+只用 `Authorization: Bearer …` 標頭認證的 API 不符合第 1 點，但要更注意 XSS 把 token 讀走（取捨見 [驗證基礎：Session vs Token](#/skill/authn-basics)）。
 
 有 XSS 時，CSRF 防護基本上失效：script 在你的頁面裡執行，可以先讀出頁面上的 CSRF token 再送請求。
 
 ### SameSite 的兩個盲點
 
-沒寫 SameSite 的 cookie，Chromium 系瀏覽器預設當作 Lax，其他瀏覽器行為不一，所以要明確設定。盲點有兩個：
+沒寫 SameSite 的 cookie，Chromium 系瀏覽器預設當作 Lax，其他瀏覽器行為不一，所以要明確設定。
 
 - **用 GET 改狀態**：`Lax` 允許頂層 GET 帶 cookie，`GET /account/delete` 這類端點照樣會被觸發。改狀態的操作一律用 POST／PUT／DELETE。
 - **同站不等於同源**：`site` 是指可註冊網域（例如 `example.com`），`a.example.com` 和 `b.example.com` 是同站。任何一個子網域被攻陷或能放使用者內容，SameSite 就攔不住它發出的請求。SameSite 的細節見 [CORS、Cookie 與同源](#/skill/cors-cookies)。
@@ -236,7 +234,6 @@ for label, m, h, f in cases:
 |---|---|---|
 | Chrome 主控台：`Refused to execute inline script because it violates the following Content Security Policy directive: …` | CSP 生效，擋下了 inline script；可能是攻擊，也可能是自己的 inline script 沒帶 nonce | 自己的 script 改成外部檔案或加 nonce；不要為了消除訊息加 `'unsafe-inline'` |
 | 模板用了 safe 過濾器（Jinja2、Django）、`Markup()`、React 的 `dangerouslySetInnerHTML` | 關掉了自動跳脫 | 只用在 sanitizer 處理過的內容上；在程式碼審查中搜尋這些關鍵字 |
-| 登入後從外部連結點進來顯示未登入 | cookie 設成 `SameSite=Strict` | 一般 session 用 `Lax`；Strict 留給高敏感操作的第二把 cookie |
 | 跨站嵌入的登入功能失效，cookie 沒送出 | 第三方 cookie 被瀏覽器限制，或沒設 `SameSite=None; Secure` | 重新設計流程（例如改用頂層導覽或 token），不要依賴第三方 cookie |
 | 加了安全標頭，但 `/api/` 的回應沒有 | nginx 在 location 裡另寫了 `add_header`，上層的不繼承 | 把共用標頭放進 include 檔，在每個有 `add_header` 的區塊都引入 |
 

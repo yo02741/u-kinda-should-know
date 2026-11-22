@@ -228,11 +228,9 @@ export const useSessionStore = create((set) => ({
 
 | 訊息或現象 | 原因 | 修法 |
 |---|---|---|
-
 | `[🍍]: "getActivePinia()" was called but there was no active Pinia. Are you trying to use a store before calling "app.use(pinia)"?` | 在安裝 Pinia 之前、或模組頂層呼叫 store | 移進守衛、元件 setup 或函式裡 |
 | `🍍: Store "session" is built using the setup syntax and does not implement $reset().` | 對 setup store 呼叫 `$reset()` | 自己寫 `reset()` action |
 | DevTools 的 Pinia 分頁看不到某個 state | setup store 沒有 `return` 那個 ref | 全部 `return` |
-
 | `storeToRefs()` 的結果少了某個值 | 那個值在 store 裡是普通變數（不是 `ref`、`computed`），或是函式 | 狀態宣告成 `ref`；函式直接從 store 解構 |
 
 ## 動手

@@ -136,7 +136,7 @@ EXPLAIN ANALYZE SELECT id FROM big_orders WHERE id BETWEEN 1 AND 100;
 
 估計與實際的 rows 差很多的原因：統計資料過期、條件之間有相關性、函數讓規劃器猜不到。
 
-> `EXPLAIN ANALYZE` 會真的執行語句。分析 `UPDATE`、`DELETE` 時要包在交易裡：`BEGIN; EXPLAIN ANALYZE DELETE …; ROLLBACK;`。
+> 分析 `UPDATE`、`DELETE` 時要包在交易裡：`BEGIN; EXPLAIN ANALYZE DELETE …; ROLLBACK;`。
 
 必讀那段 10 萬筆的計畫有兩個細節：
 
@@ -248,13 +248,14 @@ FROM pg_index WHERE indrelid = 'big_orders'::regclass ORDER BY 1;
 
 | 寫法 | 為什麼用不到 `(email)` 或 `(user_id)` 的索引 | 改法 |
 |---|---|---|
-| `WHERE lower(email) = 'a@x.com'` | 索引裡存的是 `email`，不是 `lower(email)` | 建表達式索引 `CREATE INDEX ON t (lower(email))`，查詢寫法要一模一樣 |
 | `WHERE email LIKE '%@example.com'` | B-tree 依開頭排序，萬用字元在前面就無從定位 | 前綴搜尋（`LIKE 'abc%'`）才能用 B-tree；中間比對用 `pg_trgm` 的 GIN 索引或全文檢索 |
 | `WHERE user_id::text = '42'` | 欄位被轉型，等於被函數包住 | 轉換參數，不要轉換欄位：`WHERE user_id = 42` |
 | `WHERE user_id = 42.0` | `bigint` 被提升成 `numeric` 來比較，索引的型別對不上 | 參數用跟欄位相同的型別；ORM 綁參數時特別注意 |
 | `WHERE id + 1 = 43` | 運算在欄位那一側 | 移到常數那一側：`WHERE id = 42` |
 | `WHERE created_at::date = '2026-03-01'` | 同樣是函數包住欄位 | 改成範圍：`created_at >= '2026-03-01' AND created_at < '2026-03-02'` |
 | 估計列數離實際很遠 | 統計過期，規劃器以為條件會留很多列 | `ANALYZE 表名`；條件之間有相關性時考慮 `CREATE STATISTICS` |
+
+表達式索引（`lower(email)`）的查詢寫法要和索引的表達式一模一樣。
 
 ```sql run
 CREATE TABLE big_orders AS
@@ -280,8 +281,6 @@ EXPLAIN SELECT * FROM big_orders WHERE lower(email) = 'user42@example.com';
 關於 `LIKE 'abc%'`：B-tree 能不能服務前綴比對，取決於資料庫的 collation。本站的 PGlite 用 `C` collation，一般的 B-tree 索引就可以；資料庫用 `en_US.UTF-8` 這類 collation 時，要用 `text_pattern_ops` 運算子類別建索引（`CREATE INDEX ON t (email text_pattern_ops)`），或替欄位指定 `COLLATE "C"`。
 
 ## 索引的寫入成本
-
-索引讓讀變快，代價落在寫入和空間：
 
 - 每次 `INSERT` 要在**每一個**索引裡插入一筆；每次 `DELETE` 之後的清理也要處理每一個索引。
 - `UPDATE` 時，如果改到的欄位有任何索引，或新版本放不進原本的頁，就要在所有索引裡新增指向新版本的項目。沒有改到索引欄位、而且同一頁還有空間時，PostgreSQL 可以做 HOT update，省掉索引維護。所以索引建在常被更新的欄位上（例如 `last_seen_at`）特別貴。
