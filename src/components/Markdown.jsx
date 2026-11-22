@@ -117,9 +117,11 @@ function List({ items }) {
    headingOffset：標題降級（技能頁的深入內容放在 h2「深入」底下，md 裡的 ## 要變成 h3）
    codeAction(block)：程式碼區塊下方的動作（例如「在 Playground 開啟」）
    stopId(n)：第 n 個停靠點（1 起）的 id，預設 stop-n */
-export default function Markdown({ text, className = '', idFor, after, headingOffset = 0, codeAction, stopId = (n) => `stop-${n}` }) {
-  const blocks = React.useMemo(() => parse(text), [text])
-  const stops = blocks.filter((b) => b.type === 'stop')
+/* blocks：已經 parse 好的區塊（課頁把深入內容切成章節時用），給了就不看 text；allStops：全文的停靠點（編號用） */
+export default function Markdown({ text, blocks: given, allStops, className = '', idFor, after, headingOffset = 0, codeAction, stopId = (n) => `stop-${n}` }) {
+  const parsed = React.useMemo(() => (given ? null : parse(text || '')), [given, text])
+  const blocks = given || parsed
+  const stops = allStops || blocks.filter((b) => b.type === 'stop')
   return (
     <div className={`mdoc ${className}`}>
       {blocks.map((b, i) => {
@@ -162,6 +164,8 @@ export default function Markdown({ text, className = '', idFor, after, headingOf
     </div>
   )
 }
+
+export { slug }
 
 /* 停靠點的數量（課頁目錄的連結用） */
 export const countStops = (md) => (md ? md.split('\n').filter((l) => STOP_RE.test(l)).length : 0)

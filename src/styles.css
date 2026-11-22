@@ -1087,3 +1087,26 @@ h1.display, h2.section-title, .lesson-head h1, .domain-block-head h2, .track-tab
   .ex-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .ex-split .fp { margin-top: 0; }
 }
+
+/* ============ 深入內容的章節（一章一個可收合的區塊） ============ */
+.deep-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; margin-bottom: 10px; }
+.deep-head h2 { margin: 0; }
+.deep-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0; font-size: 0.82rem; color: var(--ink-3); max-width: none; }
+.deep-ch { border: var(--bw) solid var(--line); border-radius: 14px; background: var(--surface-1); margin: 12px 0; scroll-margin-top: 120px; }
+.deep-ch[open] { box-shadow: 5px 5px 0 var(--shade); padding-bottom: 6px; }
+.deep-ch > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 16px; cursor: pointer; list-style: none; }
+.deep-ch > summary::-webkit-details-marker { display: none; }
+.deep-ch > summary::after { content: '＋'; margin-left: auto; font-weight: 800; color: var(--ink-2); }
+.deep-ch[open] > summary::after { content: '－'; }
+.deep-ch > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.deep-ch > summary h3 { margin: 0; font-size: 1.08rem; flex: 1 1 14em; min-width: 0; }
+.deep-ch-no { font-family: var(--mono); font-size: 0.8rem; font-weight: 700; color: var(--ink-3); }
+.deep-ch-tag { font-size: 0.7rem; font-weight: 800; padding: 1px 9px; border: 1.5px solid var(--line); border-radius: 999px; background: var(--st-yellow); color: var(--on-sticker); white-space: nowrap; }
+.deep-ch-tag.opt { background: transparent; color: var(--ink-2); border-style: dashed; }
+.deep-ch-min { font-size: 0.78rem; color: var(--ink-3); white-space: nowrap; }
+.deep-ch-done { font-size: 0.78rem; font-weight: 700; color: var(--c-green); white-space: nowrap; }
+.deep-ch.read > summary h3 { color: var(--ink-2); }
+.deep-ch > .deep-body { padding: 0 16px; min-width: 0; }
+.deep-ch > .deep-body > :first-child { margin-top: 4px; }
+.deep-ch-next { margin: 14px 16px 10px; display: flex; justify-content: flex-end; max-width: none; }
+@media (max-width: 560px) { .deep-ch > summary { padding: 10px 12px; } .deep-ch > .deep-body { padding: 0 12px; } }

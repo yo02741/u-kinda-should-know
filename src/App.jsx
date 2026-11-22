@@ -115,10 +115,16 @@ function useInPageAnchors() {
       const a = e.target.closest?.('a[href^="#"]')
       const href = a?.getAttribute('href') || ''
       if (!href || href === '#' || href.startsWith('#/')) return
-      const el = document.getElementById(decodeURIComponent(href.slice(1)))
-      if (!el) return
+      const id = decodeURIComponent(href.slice(1))
+      // 目標可能在收起來的章節裡（課頁的深入內容）：先請它打開，下一格再找元素
+      window.dispatchEvent(new CustomEvent('atlas:reveal', { detail: id }))
       e.preventDefault()
-      el.scrollIntoView({ block: 'start' })
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const el = document.getElementById(id)
+        if (!el) return
+        el.closest('details:not([open])')?.setAttribute('open', '')
+        el.scrollIntoView({ block: 'start' })
+      }))
     }
     document.addEventListener('click', on)
     return () => document.removeEventListener('click', on)

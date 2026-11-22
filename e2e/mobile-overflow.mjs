@@ -32,6 +32,9 @@ async function worker() {
     const r = queue.shift()
     await page.goto(base + r, { waitUntil: 'networkidle' }).catch(() => {})
     await page.waitForTimeout(700)
+    // 收起來的章節（課頁的深入內容）也要量：全部打開再檢查
+    await page.evaluate(() => document.querySelectorAll('details').forEach((d) => { d.open = true }))
+    await page.waitForTimeout(150)
     const res = await page.evaluate(() => {
       const W = document.documentElement.clientWidth
       const scrollable = (el) => { const s = getComputedStyle(el); return /(auto|scroll)/.test(s.overflowX) }

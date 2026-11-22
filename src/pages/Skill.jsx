@@ -4,7 +4,8 @@ import { findTrack } from '../content/tracks.js'
 import { withTrack } from '../components/TrackFilter.jsx'
 import { readSkillBody } from '../content/skillBody.js'
 import { readSkillDeep, preloadSkillDeep, hasDeep } from '../content/skillDeep.js'
-import Markdown, { countStops } from '../components/Markdown.jsx'
+import Markdown, { countStops, parse as parseMd, inline as inlineMd, slug } from '../components/Markdown.jsx'
+import { useLocalChecks } from '../localStore.js'
 import Challenge from '../components/Challenge.jsx'
 import { WEEK_OF } from '../content/curriculum-weeks.js'
 import { playgroundHref, runLangOf } from '../playgroundLink.js'
@@ -170,17 +171,96 @@ export default function Skill({ id }) {
   )
 }
 
-/* 深入內容：md 的 ## 變成 h3（放在 h2「深入」底下）；標記 run 的 python / sql / js 範例可以在 Playground 開 */
+/* 深入內容：依 md 的 ## 切成章節，一章一個可收合的區塊，預設只打開第一章。
+   第一個停靠點之前的章是必讀，之後是選讀；每章標出大約幾分鐘，讀完按「讀完，下一章」會收起這章、打開下一章（紀錄只存在這個瀏覽器）。
+   標記 run 的 python / sql / js 範例可以在 Playground 開。 */
+const minutesOf = (blocks) => {
+  let chars = 0, code = 0
+  for (const b of blocks) {
+    if (b.type === 'code') code++
+    else if (b.type === 'list') chars += b.items.reduce((n, it) => n + it.text.length, 0)
+    else if (b.type === 'table') chars += [b.header, ...b.body].flat().join('').length
+    else if (b.type === 'quote') chars += b.lines.join('').length
+    else chars += (b.text || '').length
+  }
+  return Math.max(1, Math.round(chars / 450 + code * 0.5))
+}
+function splitChapters(blocks) {
+  const intro = [], chapters = []
+  let cur = null, afterStop = false
+  for (const b of blocks) {
+    if (b.type === 'h' && b.level === 2) { cur = { title: b.text, id: `deep-${slug(b.text)}`, blocks: [], optional: afterStop, stop: null }; chapters.push(cur); continue }
+    if (b.type === 'stop') afterStop = true
+    ;(cur ? cur.blocks : intro).push(b)
+  }
+  // 章尾的停靠點拿出來放在兩章之間，章收起來時也看得到
+  for (const c of chapters) if (c.blocks.at(-1)?.type === 'stop') c.stop = c.blocks.pop()
+  for (const c of chapters) c.minutes = minutesOf(c.blocks)
+  return { intro, chapters }
+}
 function Deep({ id }) {
   const text = readSkillDeep(id)
+  const blocks = React.useMemo(() => (text ? parseMd(text) : []), [text])
+  const { intro, chapters } = React.useMemo(() => splitChapters(blocks), [blocks])
+  const allStops = React.useMemo(() => blocks.filter((b) => b.type === 'stop'), [blocks])
+  const [read, toggleRead] = useLocalChecks(`deep:${id}`, chapters.length)
+  const [open, setOpen] = React.useState(() => new Set([0]))
+  React.useEffect(() => { setOpen(new Set([0])) }, [id])
+  // 頁內錨點或停靠點連到收起來的章：先打開那一章
+  React.useEffect(() => {
+    const on = (e) => {
+      const k = chapters.findIndex((c) => c.id === e.detail || c.blocks.some((b) => b.type === 'h' && `deep-${slug(b.text)}` === e.detail))
+      if (k >= 0) setOpen((o) => new Set(o).add(k))
+    }
+    window.addEventListener('atlas:reveal', on)
+    return () => window.removeEventListener('atlas:reveal', on)
+  }, [chapters])
   if (!text) return null
   const action = (b) => (runLangOf(b)
     ? <a className="btn ghost small" href={playgroundHref(runLangOf(b), b.text)}>在 Playground 開啟 ↗</a>
     : null)
+  const md = (bs) => <Markdown blocks={bs} allStops={allStops} className="deep-body" headingOffset={1} idFor={(_, sl) => `deep-${sl}`} codeAction={action} stopId={(n) => `deep-stop-${n}`} />
+  const must = chapters.filter((c) => !c.optional), opt = chapters.filter((c) => c.optional)
+  const sum = (cs) => cs.reduce((n, c) => n + c.minutes, 0)
+  const allOpen = open.size === chapters.length
+  const setOne = (k, on) => setOpen((o) => { const n = new Set(o); on ? n.add(k) : n.delete(k); return n })
+  const finish = (k) => {
+    if (!read[k]) toggleRead(k)
+    setOpen((o) => { const n = new Set(o); n.delete(k); if (k + 1 < chapters.length) n.add(k + 1); return n })
+    requestAnimationFrame(() => document.getElementById(chapters[Math.min(k + 1, chapters.length - 1)].id)?.scrollIntoView({ block: 'start' }))
+  }
   return (
     <section className="deep">
-      <h2 id="deep">深入</h2>
-      <Markdown text={text} className="deep-body" headingOffset={1} idFor={(_, slug) => `deep-${slug}`} codeAction={action} stopId={(n) => `deep-stop-${n}`} />
+      <div className="deep-head">
+        <h2 id="deep">深入</h2>
+        {chapters.length > 0 && (
+          <p className="deep-meta">
+            <span>必讀 {must.length} 章 · 約 {sum(must)} 分鐘</span>
+            {opt.length > 0 && <span>選讀 {opt.length} 章 · 約 {sum(opt)} 分鐘</span>}
+            <span>讀完 {read.filter(Boolean).length} / {chapters.length}</span>
+            <button type="button" className="btn ghost small" onClick={() => setOpen(allOpen ? new Set() : new Set(chapters.map((_, k) => k)))}>{allOpen ? '全部收合' : '全部展開'}</button>
+          </p>
+        )}
+      </div>
+      {intro.length > 0 && md(intro)}
+      {chapters.map((c, k) => (
+        <React.Fragment key={c.id}>
+          <details className={`deep-ch${read[k] ? ' read' : ''}`} id={c.id} open={open.has(k)} onToggle={(e) => setOne(k, e.currentTarget.open)}>
+            <summary>
+              <span className="deep-ch-no">{String(k + 1).padStart(2, '0')}</span>
+              <h3>{inlineMd(c.title)}</h3>
+              <span className={`deep-ch-tag${c.optional ? ' opt' : ''}`}>{c.optional ? '選讀' : '必讀'}</span>
+              <span className="deep-ch-min">約 {c.minutes} 分鐘</span>
+              {read[k] && <span className="deep-ch-done">✓ 讀完</span>}
+            </summary>
+            {md(c.blocks)}
+            <p className="deep-ch-next">
+              <button type="button" className="btn small" onClick={() => finish(k)}>{k + 1 < chapters.length ? '讀完，下一章 →' : '讀完'}</button>
+            </p>
+          </details>
+          {c.stop && md([c.stop])}
+        </React.Fragment>
+      ))}
     </section>
   )
 }
