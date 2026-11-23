@@ -154,8 +154,8 @@ deploy-production:
 
 ## artifacts 與 cache 的差別、SSH 主機金鑰
 
-- `artifacts` 是這條 pipeline 的產出，保證傳給後面的 job；`cache` 是加速用的，不保證存在（不同 Runner 之間預設不共享），不能拿來傳 build 結果。
-- 範例的 `StrictHostKeyChecking=yes` 需要事先把主機金鑰放進 `known_hosts`，例如用另一個 File 型變數；不要為了省事改成 `no`，那等於不驗證連到的是不是真的那台主機。
+- 用 `artifacts` 傳 build 產物。`cache` 只加速下載，不保證存在，各 Runner 預設也不共用。
+- `StrictHostKeyChecking=yes` 要先提供 `known_hosts`（例如 File 型變數），用它驗證部署主機。
 
 ## 執行順序：stages 的時間線與 needs
 
@@ -168,9 +168,7 @@ deploy-production:
 | t2 | `test` 完成 | `build-image` 開始 | 等待 |
 | t3 | | `build-image` 完成 | `deploy-production` 出現「手動執行」按鈕 |
 
-- `needs` 形成的依賴關係是 DAG：不等同一 stage 或前一 stage 的其他 job。job 數多的 pipeline 用它能明顯縮短總時間。
-- `needs: []` 代表不等任何 job，pipeline 一開始就跑。
-- 寫了 `needs` 的 job 預設只下載 needs 裡那些 job 的 artifacts。
+- `needs` 按 DAG 依賴開跑，預設只下載列出的 job 的 artifacts。`needs: []` 在 pipeline 開始時就跑。
 
 ## rules 常用的預定義變數、MR pipeline 與分支 pipeline
 
@@ -187,13 +185,13 @@ deploy-production:
 
 ### MR pipeline 與分支 pipeline
 
-push 一個分支會觸發分支 pipeline；這個分支有開著的 MR 時，GitLab 還可以觸發 MR pipeline（`CI_PIPELINE_SOURCE == "merge_request_event"`）。兩者都設定時，同一個 commit 會跑兩次。範例開頭的 `workflow: rules` 讓有開著的 MR 時只跑 MR pipeline，沒有 MR 時跑分支 pipeline。
+分支有開啟的 MR 時，同一次 push 可能各觸發一次分支和 MR pipeline（`CI_PIPELINE_SOURCE == "merge_request_event"`）。範例的 `workflow: rules` 在有 MR 時只跑 MR pipeline，否則跑分支 pipeline。
 
-在專案設定的 Merge requests 裡勾選「Pipelines must succeed」，MR 的 pipeline 沒有通過就不能合併。main 要保持可部署，靠的主要是這個設定。
+在 Merge requests 設定勾選「Pipelines must succeed」，要求 MR 通過 pipeline 才能合併。
 
 ## Runner：job 真正在哪裡執行
 
-GitLab 本身只負責排程與記錄；job 由 **GitLab Runner** 執行。Runner 是另外安裝的程式，向 GitLab 輪詢有沒有待執行的 job。
+GitLab 排程並記錄，GitLab Runner 輪詢並執行 job。
 
 ### 範圍
 
@@ -203,7 +201,7 @@ GitLab 本身只負責排程與記錄；job 由 **GitLab Runner** 執行。Runne
 | group runner | 某個群組底下的專案 | 部門共用、需要特定網路位置的 Runner |
 | project runner | 指定的專案 | 部署用、能連到正式環境的 Runner |
 
-Runner 可以設成 **protected**：只執行受保護分支或 tag 的 job。能連到正式環境、握有部署權限的 Runner 應該設成 protected，否則任何人都能從自己的分支在它上面執行任意指令。
+將能連正式環境、持有部署權限的 Runner 設成 protected，只接受保護分支或 tag 的 job。
 
 ### executor
 
@@ -216,13 +214,9 @@ Runner 可以設成 **protected**：只執行受保護分支或 tag 的 job。�
 
 `image:` 和 `services:` 只在 docker、kubernetes 這類容器型 executor 有作用；shell executor 會忽略它們。
 
-用 `tags` 讓 job 指定 Runner：Runner 註冊時帶標籤（例如 `docker`、`prod-network`），job 寫 `tags: [prod-network]`，就只會被帶這個標籤的 Runner 接走。
+job 的 `tags: [prod-network]` 會選有相符標籤的 Runner。新版先在 GitLab 建立 Runner，取得 `glrt-` authentication token，再執行 `gitlab-runner register`。舊的 registration token 已棄用。
 
-新版 GitLab 建立 Runner 的流程是在介面上先建立 Runner、取得 authentication token（`glrt-` 開頭），再在主機上執行 `gitlab-runner register`；舊的 registration token 方式已被標為棄用。
-
-### 自架 GitLab 的網路位置
-
-Runner 要能連到 GitLab（輪詢 job、上傳 log 與 artifact），也要能連到 job 需要的東西：套件來源、Container Registry、要部署的主機。內網環境常見的問題是 Runner 不能直接連外網，`pip install` 或 `docker pull` 逾時，要設定 proxy 或內部的套件鏡像，排查方式見 [網路通不通](#/skill/network-troubleshooting)。
+Runner 要能連 GitLab、套件來源、registry 和部署主機。內網的 `pip install` 或 `docker pull` 逾時時，查 proxy 或內部鏡像，見 [網路通不通](#/skill/network-troubleshooting)。
 
 ## 變數與機密：protected、masked
 
@@ -235,11 +229,9 @@ Runner 要能連到 GitLab（輪詢 job、上傳 log 與 artifact），也要能
 | Masked and hidden（專案與群組變數 GitLab 17.4 起，17.6 正式提供） | 除了遮蔽，建立後在設定頁面上也看不到值 | 有專案設定權限的人看到值 |
 | File 型 | 值寫進一個暫存檔，變數內容是檔案路徑 | SSH 金鑰、kubeconfig 這類工具要求以檔案提供的機密 |
 
-masked 的值要符合格式限制：單行、不含空格、至少 8 個字元；開啟「Expand variable reference」時特殊字元只能用少數幾種。不符合時介面不允許選。GitLab 18.3 起在介面新增變數時，預設的可見度就是 Masked（2026 年 11 月依 GitLab 官方文件核對；自架版以所用版本的文件為準）。
+Masked 值須為單行、無空格且至少 8 字元。開啟「Expand variable reference」時另有限制。GitLab 18.3 起新增變數預設為 Masked（2026 年 11 月核對，自架版看對應文件）。
 
-**受保護分支**在 Settings → Repository → Protected branches 設定：誰可以 push、誰可以合併、能不能 force push。protected 變數、protected Runner 都依賴這個設定：main 沒有設成受保護分支，protected 變數在 main 上也拿不到。
-
-masked 不是完整的保護：值被 base64 編碼後印出、或被寫進 artifact，就不會被遮蔽。擋得住的是 protected：讓只有經過 review、合進受保護分支的程式碼，才拿得到正式環境的機密。
+在 Settings → Repository → Protected branches 設定 push、合併與 force push 權限，供 protected 變數、Runner 使用。Masked 只遮蔽 log 的原始值，編碼後或寫入 artifact 仍會洩漏。部署金鑰應限制在受保護 ref 使用。
 
 GitLab 也會自動提供一些不用自己設定的機密，例如 `CI_JOB_TOKEN`（這個 job 的短期權杖）、`CI_REGISTRY_PASSWORD`（登入本專案 Container Registry 用）。它們只在 job 執行期間有效。
 
@@ -253,22 +245,21 @@ docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
 docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
 ```
 
-- 用 `--password-stdin` 而不是 `-p`：密碼不會出現在程序列表與指令紀錄裡。
-- 只用 `latest` 當 tag 時，無法知道正式環境跑的是哪一版，也無法指定退回哪一版。
-- **同一個 image 一路晉升**：staging 驗過的 image tag，就是 production 要部署的 tag，不要每個環境重 build。見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
-- 在 Settings → Packages and registries 設定**清理政策**，否則每個 commit 一個 image，儲存空間會一直長。
+- `--password-stdin` 可讓密碼避開程序列表與指令紀錄。
+- staging 驗過的固定 tag 直接部署到 production，便於追查與回退。見 [環境、secrets 與 artifact](#/skill/environments-secrets)。
+- 在 Settings → Packages and registries 設定清理政策，移除累積的舊映像。
 
-`docker:dind`（Docker in Docker）需要 Runner 以 privileged 模式執行容器，等於給 job 很大的主機權限。Runner 由多個專案共用時，這是要評估的風險；也有不需要 privileged 的 image 建置工具（例如 Buildah），適用性依環境而定。
+`docker:dind` 需要 privileged Runner。共用 Runner 時評估主機權限，或選不需 privileged 的工具如 Buildah。
 
 ## environments 與手動部署
 
-job 加上 `environment:` 之後，GitLab 會在 Operate → Environments 記錄每個環境的部署歷史：哪個 commit、誰觸發、什麼時候。在環境頁面可以對過去某次部署按「重新部署」，這是最直接的回退方式，前提是部署 job 用的是固定的 image tag，而不是 `latest` 或 `git pull`。
+加 `environment:` 後，Operate → Environments 會記錄 commit、觸發者和時間。部署使用固定 image tag 時，可從歷史重新部署以回退。
 
 - `when: manual`：寫在 `rules` 裡的 manual job，預設不允許失敗（`allow_failure: false`），pipeline 會停在等待狀態，直到有人執行。
 - `resource_group`：同一個 resource group 的 job 一次只跑一個，避免兩條 pipeline 同時部署到 production。
-- **Protected environments**：限制誰能部署到某個環境，並可要求核准（deployment approvals）。這兩個功能在 GitLab 的付費方案（Premium、Ultimate）才有；免費版可以用 protected 變數加受保護分支，達到「只有合進 main 的程式碼能部署」的效果；受保護分支上的手動 job，依 GitLab 的權限規則，需要有合併到該分支的權限才能執行。方案與功能的對應會隨版本調整，採用前以官方文件為準。
+- **Protected environments** 和部署核准屬 GitLab Premium、Ultimate，採用前查官方功能表。免費版可以用 protected 變數加受保護分支限制部署，執行該分支手動 job 的人還需要合併權限。
 
-部署需要審核紀錄的環境（例如需要變更管理的系統），MR 的核准紀錄、pipeline 紀錄、environment 的部署歷史串在一起，就是一份完整的變更證據。見 [受監管環境的變更管理](#/skill/change-management)。
+把 MR 核准、pipeline 和部署歷史串起來當稽核證據，見 [受監管環境的變更管理](#/skill/change-management)。
 
 ## 與 GitHub Actions 對照
 

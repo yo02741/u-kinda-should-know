@@ -137,13 +137,7 @@ Enter 與 Space 在原生 `<button>` 上本來就會觸發 `click`，所以按�
 
 ## role 是承諾：沒兌現比不寫更糟
 
-「A role is a promise」出自 APG 的 Read Me First 頁（ARIA 角色也不提供樣式）。同一頁的標題是「No ARIA is better than Bad ARIA」：角色寫錯或沒兌現，對螢幕閱讀器使用者的傷害比完全不寫還大。
-
-上面的選單把三件事承諾給輔助科技：這是一顆會開出選單的按鈕（`aria-haspopup="menu"`），它目前是收合的（`aria-expanded`），選單裡的項目要用方向鍵移動（`role="menu"`、`role="menuitem"`）。程式一件都沒做到。
-
-螢幕閱讀器使用者的狀況更糟：按鈕被念成類似「更多操作，選單按鈕，已收合」的句子，按了 Enter 之後聽不到任何變化，選單裡的項目也走不進去。
-
-Menu Button 屬性的部分：
+APG 的 Read Me First 把 ARIA 角色稱為承諾。按鈕宣告選單已收合時，按 Enter 應開啟選單，讓使用者能用方向鍵在選項間移動。ARIA 屬性本身只提供語意。Menu Button 的標記如下。
 
 - 按鈕是 `button`（原生 `<button>` 就好），有 `aria-haspopup`（值是 `menu` 或 `true`）；`aria-controls` 指向選單是選用的。
 - 選單是 `role="menu"`，名稱來自 `aria-labelledby` 指向按鈕，或 `aria-label`。
@@ -151,9 +145,7 @@ Menu Button 屬性的部分：
 
 ## composite widget：Tab 進入時停在哪一項
 
-「Tab 在元件之間、方向鍵在元件裡面」是 APG 的 Developing a Keyboard Interface 頁說明的共用慣例。含有多個可聚焦項目的元件（Tabs、Menu、Listbox、Radio group、Grid）在 ARIA 規格裡叫 composite widget。
-
-Tab 進入時停在哪一項，依元件而定：
+APG 的 Developing a Keyboard Interface 說明這類 composite widget 的共用慣例。Tab 在元件之間移動，方向鍵在元件內移動。
 
 | 元件 | Tab 進入時的焦點 |
 |---|---|
@@ -162,7 +154,7 @@ Tab 進入時停在哪一項，依元件而定：
 | Menubar、Toolbar | 第一項 |
 | Menu（由按鈕開出來） | Tab 不會進入選單，開選單時由程式把焦點移進去 |
 
-連按 Tab 時每一項都停一次，原因是整組都設成了 `tabindex="0"`，或全是原生按鈕。
+若 Tab 停在每一項，檢查整組是否都是原生按鈕或 `tabindex="0"`。
 
 ## roving tabindex 與 aria-activedescendant 的差別
 
@@ -173,13 +165,11 @@ Tab 進入時停在哪一項，依元件而定：
 | 捲動 | 瀏覽器會把取得焦點的元素捲進畫面 | 程式要自己捲動 |
 | 反白樣式 | 用 `:focus-visible` | 程式自己加 class，焦點框不會自動出現 |
 
-`aria-activedescendant` 指到的元素有位置限制：要在容器的 DOM 裡面、或被 `aria-owns` 收進來；Combobox 這類輸入框的例外是透過 `aria-controls` 指到清單，選項在清單裡。
+`aria-activedescendant` 應指向 DOM 子代或由 `aria-owns` 擁有的元素。Combobox 可透過 `aria-controls` 指向含該選項的清單。
 
 ## 焦點與選取是兩件事
 
-APG 特別區分 focus 與 selection。焦點是目前操作的位置，同一時間只有一個（`document.activeElement`）；選取是一種狀態，例如 `aria-selected="true"` 的 tab、`aria-checked="true"` 的選項，離開元件後仍然保留。
-
-單選的 Tabs 與 Listbox 可以讓「選取跟著焦點」（自動切換）；什麼時候改成手動切換見 [導覽元件](#/skill/navigation-ui)。驗收時兩件事分開看：焦點有沒有移動、`aria-selected` 有沒有換到對的那一個。
+焦點是 `document.activeElement`。選取狀態如 `aria-selected="true"` 或 `aria-checked="true"`，離開元件後仍會保留。單選 Tabs 和 Listbox 可讓選取跟著焦點，也可 [手動切換](#/skill/navigation-ui)。分別測兩個狀態。
 
 ## 各模式的驗收重點
 
@@ -191,9 +181,9 @@ APG 特別區分 focus 與 selection。焦點是目前操作的位置，同一�
 | Dialog（modal） | 焦點移進 Dialog | Tab 不會走到背景；Esc 關閉；焦點回到觸發的按鈕 | Role 是 `dialog`、Name 是標題 | [浮層](#/skill/overlays) |
 | Disclosure、Accordion | 每顆按鈕都在 Tab 順序裡 | Enter、Space 切換 | `aria-expanded` 跟著切換；Accordion 的按鈕包在標題元素裡 | 本課 |
 
-Disclosure 是最簡單也最常被做壞的一個：一顆按鈕控制一塊內容顯示與否，按鈕有 `aria-expanded`，選用的 `aria-controls` 指向那塊內容。Accordion 是一組 disclosure，APG 要求每顆標題按鈕包在一個標題元素裡（例如 `<h3><button aria-expanded="false">看診須知</button></h3>`），而且按鈕是標題裡唯一的元素：螢幕閱讀器的使用者常用「跳到下一個標題」瀏覽頁面，按鈕沒有包在 `h2`、`h3` 裡就跳不到。AI 常見的寫法是 `<div class="accordion-header" @click>`：不在 Tab 順序裡，也沒有 `aria-expanded`。
+Disclosure 用按鈕切換內容，`aria-controls` 可指向內容。Accordion 的每顆按鈕是標題元素的唯一子元素，方便螢幕閱讀器依標題瀏覽。客製行為用原生按鈕保留 Tab 操作。
 
-不需要客製行為時，Disclosure 與 Accordion 直接用原生的 `<details>` 與 `<summary>`（Baseline Widely available），不必寫 `aria-expanded` 與按鍵處理；瀏覽器替它做的事見 [語意化 HTML 與表單元素](#/skill/semantic-html)。同一組只能開一個時，每個 `<details>` 寫同樣的 `name="faq"`，這是 Baseline 2024（2024-09 起），舊瀏覽器上退化成可以同時展開幾個，內容照樣看得到。要驗的只剩 `<summary>` 的文字念不念得懂，以及標題層級合不合理。
+一般情況用 [原生 `<details>` 與 `<summary>`](#/skill/semantic-html)（Baseline Widely available）。同組設 `name="faq"` 可限制同時只開一項（Baseline 2024，自 2024-09 起），舊版可同時展開多項。驗收 `<summary>` 的朗讀文字與標題層級。
 
 ## 每種工具抓得到什麼
 
@@ -205,23 +195,15 @@ Disclosure 是最簡單也最常被做壞的一個：一顆按鈕控制一塊內
 | Playwright、Vitest Browser Mode | 上面全部，加上真的 `<dialog>`、焦點回復、可見性 | 念出來聽不聽得懂 |
 | NVDA、VoiceOver 實測 | 角色、名稱、狀態變化念出來的樣子，跨元件的操作流程 | 不會留下可以重跑的紀錄 |
 
-axe 的結果只能當「結構沒錯」的證據。
-
 ## Menu Button 的細節：aria-expanded 的綁定、Popover、Dialog 的焦點回復
 
-`aria-expanded` 寫成 `'true'`、`'false'` 字串。Vue 3 綁定 `false` 到 `aria-*` 這類非布林屬性時，會輸出成 `aria-expanded="false"`（要移除屬性得綁 `null`），寫成字串讀起來比較不會誤會。
+Vue 3 把綁定的 `false` 輸出成 `aria-expanded="false"`，要移除屬性時綁 `null`。選單可用 `<ul popover>` 取代 `v-show`，取得點外關閉與 top layer（Baseline 2025-01）。
 
-上面的版本用 `v-show` 藏選單，點選單外面不會關閉，選單也可能被外層的 `overflow: hidden` 裁掉。選單容器可以改成 `<ul popover>`（Popover API，Baseline 2025-01 起）：
+- 呼叫 `showPopover()`、`hidePopover()`，在 `toggle` 更新 `aria-expanded` 並移動焦點。
+- 方向鍵、Home、End 仍須自行處理。Modern Web Guidance 建議的 `focusgroup` 從 Chrome、Edge 150 起支援（Limited availability）。
+- iOS Safari 18.3 在 2025-01 補齊 Popover，較舊版本可沿用 `v-show`，或偵測 `HTMLElement.prototype` 上的 `popover` 後按需載入 `@oddbird/popover-polyfill`。
 
-- 瀏覽器提供點外面關閉（light dismiss）與 top layer；開關改呼叫 `showPopover()`、`hidePopover()`，在 `toggle` 事件裡更新 `aria-expanded` 並把焦點移進選單。
-- 方向鍵、Home、End 仍然要自己寫：Chrome 團隊的 Modern Web Guidance 建議的 `focusgroup` 屬性目前只有 Chrome、Edge 150 起支援（Limited availability），不支援的瀏覽器要照上面的方式補 `role="menu"` 與按鍵處理。
-- Popover 到 2025-01 才在 iOS Safari 18.3 補齊，要支援更舊的瀏覽器時也要退路（例如 `@oddbird/popover-polyfill`，只在 `HTMLElement.prototype` 沒有 `popover` 時載入），或維持 `v-show` 寫法。
-
-修好鍵盤之後，測試抓到第二個問題：從選單選「取消預約」會開一個確認用的 `<dialog>`，按 Esc 關掉 Dialog 後，焦點掉到了 `body`，下一次 Tab 從頁首重新開始。`choose()` 裡兩行的順序是它的修法。原本先 `emit` 再 `closeMenu()`：
-
-1. 父元件收到事件立刻呼叫 `showModal()`，瀏覽器把當時有焦點的選單項目記成「開啟前的元素」。
-2. 選單被 `v-show` 藏起來，`button.focus()` 也因為 Dialog 讓背景 inert 而沒有作用。
-3. 關閉 Dialog 時，瀏覽器想把焦點還給那個已經隱藏的選單項目，焦點就掉到了 `body`。
+若 `choose()` 先 `emit`，父元件呼叫 `showModal()` 時會記住目前的選單項目。接著選單隱藏，背景進入 inert，`button.focus()` 無效。關閉時焦點掉到 `body`，下次 Tab 從頁首開始。先呼叫 `closeMenu()` 把焦點還給按鈕，再 `emit` 開 Dialog。
 
 ## 元件測試：一列驗收表一個斷言
 
@@ -272,9 +254,7 @@ describe('MoreActions：APG 的 Menu Button 模式', () => {
 })
 ```
 
-`screen.queryByRole('menu')` 在選單用 `v-show` 藏起來時回傳 `null`：Testing Library 預設排除不在 accessibility tree 裡的元素（`display: none`、`hidden`、`aria-hidden="true"`），和螢幕閱讀器看到的一致。
-
-這兩個測試在 `choose()` 順序寫錯的版本上也會通過：jsdom 31 的 `<dialog>` 沒有 `showModal()`，元件測試開不了 Dialog。焦點回復要在真的瀏覽器裡測。
+Testing Library 的 `queryByRole` 預設排除由 `display: none`、`hidden` 或 `aria-hidden="true"` 隱藏的元素。jsdom 31 的 Dialog 沒有 `showModal()`，`choose()` 的焦點回復要在瀏覽器測。
 
 ## Playwright：跨元件的焦點回復
 
@@ -317,7 +297,7 @@ test('axe：選單打開的狀態也掃一次', async ({ page }) => {
 })
 ```
 
-`toMatchAriaSnapshot` 比對的是 accessibility tree 的角色、名稱與狀態（`[selected]`），結構寫錯（tab 不在 tablist 底下、少了名稱）會直接失敗。axe 只掃當下的 DOM，選單、Dialog、錯誤訊息這類要操作才出現的部分，要先操作到那個狀態再掃。
+`toMatchAriaSnapshot` 比對 accessibility tree 的角色、名稱與狀態（如 `[selected]`）。用 axe 檢查選單、Dialog 或錯誤訊息時，先操作到該狀態。
 
 ## axe 的錯誤訊息
 
@@ -352,9 +332,7 @@ Received: inactive
 
 ## 動手
 
-1. 在自己的專案挑一個自製的元件（選單、Tabs、手風琴），打開 APG 對應的模式頁，把 Keyboard Interaction 與 Roles, States, and Properties 改寫成本課那種三欄的驗收表，標出 Optional 的列決定做不做。
-2. 在 Console 建立 live expression `document.activeElement`，照驗收表一列一列按，記下哪一列的焦點或屬性不對。
-3. Elements 分頁選取元件，打開 Accessibility 分頁勾 `Show accessibility tree`，確認 tab 在 tablist 底下、menuitem 在 menu 底下、每個節點都有 Name。
-4. 跑一次 Lighthouse 的 Accessibility，再用 `@axe-core/playwright` 在「選單打開」「Dialog 打開」的狀態各掃一次，比較兩者抓到的東西。
-5. 把驗收表的每一列寫成測試：鍵盤與屬性用 Testing Library 加 user-event（寫法見 [元件測試的寫法](#/skill/component-tests)），牽涉 `<dialog>` 與焦點回復的用 Playwright（見 [Playwright E2E](#/skill/e2e-playwright)）。寫完故意刪掉 `focus()` 或 `aria-expanded` 的綁定，確認測試會變紅。
-6. 開 VoiceOver（macOS 按 Cmd+F5）或 NVDA，操作一次選單，記下按鈕念了什麼、開關時有沒有念出「已展開」。基本的名稱與 live region 回頭看 [無障礙基礎](#/skill/a11y-basics)。
+1. 把選單、Tabs 或手風琴的 APG 規則寫成驗收表，標出採用的選配行為。用 `document.activeElement` 和 DevTools 的 accessibility tree 核對焦點、父子角色與 Name。
+2. 跑 Lighthouse，再用 `@axe-core/playwright` 分別掃描開啟的選單和 Dialog，比較結果。
+3. 用 [Testing Library 與 user-event](#/skill/component-tests) 測按鍵和屬性，並用 [Playwright](#/skill/e2e-playwright) 測 Dialog 焦點回復。移除 `focus()` 或 `aria-expanded` 綁定後重跑，確認測試能抓到。
+4. 開 VoiceOver（macOS 按 Cmd+F5）或 NVDA 操作選單，確認名稱和「已展開」等狀態有念出來。見 [無障礙基礎](#/skill/a11y-basics)。

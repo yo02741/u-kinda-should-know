@@ -105,9 +105,7 @@ docker logs api           # 主行程印了什麼
 
 ## container 的生命週期
 
-`created` → `running` → `exited`。停止的 container 可以用 `docker start` 再跑起來，所以 `docker ps -a` 常常會看到一長串 `Exited` 的舊容器；用 `docker run --rm` 讓容器結束時自動刪除。
-
-「`docker run -d myimage` 之後，`docker ps` 看不到它」多半是主行程啟動後馬上出錯退出了，或者它本來就是一個執行完就結束的指令。`docker ps -a` 會看到 `Exited (1) 3 seconds ago`，`docker logs <容器>` 看它印了什麼。
+容器依序經過 `created`、`running`、`exited`。`docker start` 可重新啟動，`docker run --rm` 讓它結束時自動刪除。背景執行後在 `docker ps` 找不到容器時，用 `docker ps -a` 找 `Exited (1) 3 seconds ago` 等狀態，再用 `docker logs <容器>` 查主行程的輸出。
 
 ## 層的細節：history、copy-on-write 與快取鍵
 
@@ -126,9 +124,7 @@ IMAGE          CREATED        CREATED BY                                      SI
 
 （`<missing>` 只表示那一層沒有對應的本機 image ID，不是缺檔。）
 
-執行時，Docker 用聯合檔案系統（Linux 上通常是 overlayfs）把這些層疊起來，最上面加一層可寫層。讀檔案時從上往下找，第一個找到的就是；寫檔案時，如果檔案在下面的唯讀層，先把整個檔案**複製到可寫層**再改（copy-on-write）。
-
-- **層是共用的**。十個 container 用同一個 image，唯讀層在磁碟上只有一份；兩個 image 用同一個基底，基底的層也只存一份、只下載一次。
+Docker 用聯合檔案系統（Linux 常用 overlayfs）疊起唯讀層，容器最上方再加可寫層。讀檔由上往下找，首次修改唯讀檔案時會整個複製到可寫層（copy-on-write）。不同容器和映像可共用相同唯讀層，下載也只要一次。
 - **後面的層刪檔案不會讓 image 變小**。`RUN rm` 只是在新的一層記錄「這個檔案被刪了」，前一層的內容仍然在 image 裡。要在同一個 `RUN` 裡下載、使用、刪除，或用多階段建置，見 [幫 Python 專案寫好 Dockerfile](#/skill/dockerfile-python)。
 - **大量寫入可寫層又慢又會遺失**，資料要放 volume。
 
@@ -217,7 +213,7 @@ docker volume rm pgdata             # 這才是真的刪資料
 
 （各資料庫映像的資料目錄可能隨大版本調整，以該映像的說明為準。）
 
-bind mount 最常見的問題是權限：容器裡的行程以某個 UID 寫檔，主機上看到的擁有者就是那個 UID 的數字，不管主機上有沒有這個使用者。容器以 UID 10001 執行、掛進去的主機目錄屬於 UID 1000 且權限 `755`，就會得到 `Permission denied`。檢查方式是在兩邊都 `ls -ln`（`-n` 顯示數字 UID），對齊擁有者或權限，見 [Linux 與 shell 基礎](#/skill/linux-basics) 的權限段落。
+容器行程在 bind mount 建立的檔案，擁有者以數字 UID 記錄。容器以 UID 10001 執行時，掛載 UID 1000 擁有、權限 `755` 的目錄會因寫入權限不足得到 `Permission denied`。在兩邊用 `ls -ln` 查 UID，對齊擁有者或權限，見 [Linux 與 shell 基礎](#/skill/linux-basics)。
 
 ## PID 1 與訊號
 

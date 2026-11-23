@@ -150,9 +150,9 @@ Sanitizer 把字串解析成 DOM，依允許清單保留標籤與屬性，其他
 
 預設會保留 `style` 屬性與 `<form>`、`<input>`，也會拿掉 `target`。必讀那組 `ALLOWED_TAGS`、`ALLOWED_ATTR` 設定在 Chromium 實測：`<a href="javascript:alert(1)" title="x">` 變成 `<a>`，`<a href="https://clinic.example/x" onclick="y()">` 只留下 `href`，`<img onerror>` 整個移除。
 
-瀏覽器內建的 Sanitizer API（`element.setHTML()`）在 2026 年 11 月只有 Chrome 146 與 Firefox 148 以上支援，Safari 還沒有，不是 Baseline，目前仍用函式庫。想在支援的瀏覽器先用內建的，就做功能偵測：`'setHTML' in Element.prototype` 成立時呼叫 `el.setHTML(html, { sanitizer: { elements: [...] } })`，不成立時才用 `import('dompurify')` 動態載入函式庫，支援的瀏覽器不必下載它。兩者的行為不同：內建的給了 `elements` 之後，清單以外的元素連同內容一起移除，也會拿掉 `aria-*` 與 `data-*`；DOMPurify 預設保留這些屬性與被移除元素的文字，要對齊得加 `KEEP_CONTENT: false`、`ALLOW_ARIA_ATTR: false`、`ALLOW_DATA_ATTR: false`。
+截至 2026 年 11 月，`element.setHTML()` 需 Chrome 146 或 Firefox 148 以上，Safari 尚未支援。用 `'setHTML' in Element.prototype` 偵測，舊版可動態載入 DOMPurify。若要對齊內建的 `elements` 允許清單，DOMPurify 要設 `KEEP_CONTENT: false`、`ALLOW_ARIA_ATTR: false`、`ALLOW_DATA_ATTR: false`。
 
-過濾放在哪一邊：後端存檔時過濾，保護所有讀這份資料的地方（App、Email、匯出）；前端在 `v-html` 之前再過濾一次，因為放進頁面的是前端。兩者不衝突。
+後端存檔時過濾，保護 App、Email、匯出等讀取端。前端在 `v-html` 寫入之前再過濾。
 
 ## 網址的另外兩個設定：`target="_blank"` 與站內轉址
 
@@ -174,11 +174,11 @@ Sanitizer 把字串解析成 DOM，依允許清單保留標籤與屬性，其他
 - 記憶體（Pinia store）：頁面開著時用它發請求；要讀走得剛好在它存在時執行。
 - `HttpOnly` cookie：讀不到 cookie，但能在頁面裡發請求，瀏覽器自動帶上；要處理 CSRF 與跨網域的 `credentials`。
 
-各位置在重新整理、跨分頁時的差別見 [登入狀態與 401](#/skill/auth-frontend) 與 [瀏覽器裡的儲存](#/skill/browser-storage)，伺服器那一側見後端的 [驗證基礎](#/skill/authn-basics)。最有效的仍是不讓 XSS 發生。
+重新整理、跨分頁見 [登入狀態與 401](#/skill/auth-frontend) 與 [瀏覽器裡的儲存](#/skill/browser-storage)。伺服器端見 [驗證基礎](#/skill/authn-basics)。
 
 ## CSP：伺服器限制前端程式能做什麼
 
-CSP（Content-Security-Policy）是伺服器隨 HTML 送出的回應標頭，限制頁面能執行哪些來源的 script、套用哪些樣式、連到哪些網址；各指令的作用見後端的 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)。自己的程式也要照它的規矩寫：`script-src 'self'` 之下，下列寫法都會被擋。訊息取自 Chromium 153 的 Console：
+CSP 回應標頭限制 script、樣式與連線的來源。各指令見 [XSS、CSRF 與安全標頭](#/skill/xss-csrf)。以下是 Chromium 153 在 `script-src 'self'` 下的訊息。
 
 | 被擋的寫法 | Console 訊息的開頭 | 改法 |
 |---|---|---|
@@ -191,25 +191,25 @@ CSP（Content-Security-Policy）是伺服器隨 HTML 送出的回應標頭，限
 
 | 情況 | 結果 | 處理 |
 |---|---|---|
-| Vite 8 建置出的 `index.html` | 只有 `<script type="module" crossorigin src="/assets/index-….js">` 與一個 `<link rel="stylesheet">`，沒有 inline script。Vue 3.5 的 SFC 專案在 `default-src 'self'; script-src 'self'; style-src 'self'` 之下完整運作，Console 沒有任何違規 | 不用改 |
-| `style-src 'self'` | 擋 HTML 裡的 `style="…"` 屬性、`<style>` 標籤與 `setAttribute('style', …)`，訊息是 `Applying inline style violates the following Content Security Policy directive 'style-src 'self''`。Vue 的 `:style` 與 SFC 裡 CSS 的 `v-bind()` 用 CSSOM（`el.style.setProperty`）設定，不會被擋 | 樣式放 CSS 檔 |
-| Vite 開發伺服器 | 用 `<style>` 標籤注入 CSS 以支援 HMR，嚴格的 `style-src` 會擋掉它 | 設定 `html.cspNonce` 佔位字串，建置與開發的 HTML 會加上 `<meta property="csp-nonce" nonce="…">` 與每個標籤的 `nonce` 屬性；伺服器每次回應把佔位字串換成新的隨機值 |
-| 載入含編譯器的 `vue.global.js`，在 HTML 裡寫模板 | 畫面空白，Console 出現 `[Vue warn]: Template compilation error: Error parsing JavaScript expression: Evaluating a string as JavaScript violates …` | 用 SFC 在建置時編譯。編譯器需要 `'unsafe-eval'`，加了它 CSP 就少了一大半作用 |
-| 小於 `build.assetsInlineLimit`（預設 4096 bytes）的圖片與字型 | Vite 轉成 `data:` 網址寫進 CSS 或 JS，`img-src 'self'` 擋下：`Loading the image 'data:image/png;base64,…' violates the following Content Security Policy directive: "img-src 'self'"` | `img-src`、`font-src` 加 `data:`，或把上限設成 0 |
-| API 在另一個網域、沒列進 `connect-src` | Console 是 `Connecting to 'https://api.example.com/…' violates the following Content Security Policy directive: "default-src 'self'". Note that 'connect-src' was not explicitly set, so 'default-src' is used as a fallback.`，程式拿到 `TypeError: Failed to fetch`，和 CORS 錯誤一樣 | 加進 `connect-src`；看 Console 才分得出來（見 [從前端看同源與 CORS](#/skill/same-origin-frontend)） |
+| Vite 8 建置的 Vue 3.5 SFC 專案 | `index.html` 以外部 module 和樣式表載入，可用 `default-src 'self'; script-src 'self'; style-src 'self'` | 沿用建置產物 |
+| `style-src 'self'` | 擋 `style="…"`、`<style>`、`setAttribute('style', …)`。Vue 的 `:style` 與 CSS `v-bind()` 經 CSSOM 的 `el.style.setProperty`，仍可用 | 靜態樣式放 CSS 檔 |
+| Vite 開發伺服器 | HMR 注入的 `<style>` 會被嚴格的 `style-src` 擋下 | 設 `html.cspNonce`，Vite 會產生 `<meta property="csp-nonce" nonce="…">` 和標籤的 `nonce`。伺服器每次回應替換成新的隨機值 |
+| 含編譯器的 `vue.global.js` | 在瀏覽器編譯模板需要 `'unsafe-eval'`，CSP 擋下時畫面空白 | 用 SFC 在建置時編譯 |
+| 低於 `build.assetsInlineLimit`（預設 4096 bytes）的圖片、字型 | Vite 內嵌 `data:` URL，僅允許 `'self'` 時會被擋 | `img-src`、`font-src` 放行 `data:`，或將內嵌上限設成 0 |
+| API 網域未列入 `connect-src` | Console 顯示 CSP 違規，程式收到 `TypeError: Failed to fetch` | 加進 `connect-src`。用 Console 區分 CSP 與 [CORS](#/skill/same-origin-frontend) |
 
 ```nginx
 # 前端靜態檔的 server 區塊；其他安全標頭與 add_header 的繼承規則見後端的 XSS 課
 add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
 ```
 
-導入 CSP 時先送 `Content-Security-Policy-Report-Only`，只回報違規、不阻擋。主機不能設定回應標頭時（例如某些靜態網站服務），可以在 `index.html` 寫 `<meta http-equiv="Content-Security-Policy" content="…">`，但 `frame-ancestors` 與回報功能在 meta 裡無效。
+先用 `Content-Security-Policy-Report-Only` 收集違規。只能改 HTML 時，可用 `<meta http-equiv="Content-Security-Policy" content="…">` 啟用部分規則。回報模式和 `frame-ancestors` 仍要由伺服器送標頭。
 
-更進一步的是 Trusted Types：CSP 加上 `require-trusted-types-for 'script'` 之後，`innerHTML` 這類地方只接受經過自訂 policy 產生的物件，直接給字串會丟出錯誤。Chrome 83、Safari 26、Firefox 148 支援，2026 年 2 月成為 Baseline，舊瀏覽器還沒有，先當成額外的一層：程式照樣透過 policy 寫入，不支援的瀏覽器只是不強制檢查。過濾仍要自己做，不支援的瀏覽器不會替你擋。
+`require-trusted-types-for 'script'` 可要求 `innerHTML` 等寫入點只接收 policy 產生的物件。Chrome 83、Safari 26、Firefox 148 支援，2026 年 2 月成為 Baseline。內容仍應過濾，舊瀏覽器會略過強制檢查。
 
 ## 第三方 script、SRI 與 postMessage
 
-`<script src="https://cdn.example/widget.js">` 載入的程式和你的程式在同一個頁面、同一個來源下執行：讀得到 DOM、表單裡正在輸入的內容、localStorage，也能用使用者的 cookie 發請求。廠商的程式、廠商的 CDN、廠商的帳號，任何一個被入侵都等於你的頁面被入侵。
+第三方 script 以頁面來源執行，可讀 DOM、表單與 localStorage，也能發出附帶使用者 cookie 的請求。供應商的程式、CDN 和發布帳號都在信任範圍內。
 
 - **固定版本加 SRI**：`integrity="sha384-…"` 記錄檔案的雜湊，下載回來的內容不符，瀏覽器拒絕執行。跨來源的檔案要同時加 `crossorigin="anonymous"`。廠商只提供「永遠是最新版」的網址時無法加 SRI，這也表示廠商可以隨時換掉你頁面上執行的程式。
 - **只在需要的頁面載入**：登入、付款、病歷這類頁面不放分析、客服、廣告 script。tag manager 讓行銷人員不經部署就能加 script，它的權限要當成程式部署來管。
@@ -242,7 +242,7 @@ window.addEventListener('message', (event) => {
 
 ## 前端沒有秘密
 
-前端程式會整份下載到使用者的瀏覽器。`VITE_` 開頭的變數在建置時寫死進 bundle，`.env` 裡的地圖金鑰、寫在程式裡的 API key、註解掉的測試帳號，在 `dist/assets/*.js` 都搜得到。需要金鑰的服務由後端代為呼叫，細節見 [建置時設定與執行時設定](#/skill/env-config) 與後端的 [秘密管理](#/skill/secrets)。
+`VITE_` 變數和寫在程式裡的金鑰會隨 `dist/assets/*.js` 下載。需要私密金鑰時由後端呼叫服務。見 [環境設定](#/skill/env-config) 與 [秘密管理](#/skill/secrets)。
 
 ## 其他錯誤訊息與 AI 常產生的寫法
 
@@ -251,7 +251,7 @@ window.addEventListener('message', (event) => {
 | `Failed to find a valid digest in the 'integrity' attribute …` | CDN 上的檔案和 `integrity` 記錄的不同 | 確認版本；廠商換了檔案就重新審查再更新雜湊 |
 | bundle 搜得到金鑰 | 金鑰放在 `VITE_` 變數或程式裡 | 移到後端；已經外流的金鑰作廢重發 |
 
-AI 產生的前端除了必讀那兩個錯誤（`v-html` 放使用者內容、API 給的網址直接綁 `:href`），還常為了讓 CSP 不報錯，在 `script-src` 加上 `'unsafe-inline'` 與 `'unsafe-eval'`。這等於把 CSP 拿掉，要改的是程式的寫法。
+遇到 CSP 違規時依上表調整程式，讓 `script-src` 繼續禁用 `'unsafe-inline'` 與 `'unsafe-eval'`。
 
 ## 動手
 

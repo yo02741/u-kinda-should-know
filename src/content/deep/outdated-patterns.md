@@ -104,13 +104,11 @@ Baseline 標示在 MDN 每個功能頁上方：
 
 ## AI 為什麼給舊寫法，又為什麼會給太新的寫法
 
-`<dialog>` 在 2022 年 3 月就已經是主要瀏覽器都支援的功能，到 2024 年 9 月變成 Baseline Widely available。模型從大量既有程式學習，網路上的 modal 教學與元件庫原始碼，多數寫在 `<dialog>` 普及之前。Modern Web Guidance 的 README 也直接寫明這一點：訓練資料裡舊寫法的量遠多於新寫法，模型就算知道某個 API 存在，也常常用錯或不用。
-
-AI 被要求「用新的寫法」時，可能把只有 Chrome 支援的 API 當成唯一的寫法，結果在 Safari 上直接 `TypeError`。兩種情況都是程式沒有對照專案實際要支援的瀏覽器。
+`<dialog>` 在 2022 年 3 月獲主要瀏覽器支援，2024 年 9 月成為 Baseline Widely available。Modern Web Guidance 的 README 指出，模型訓練資料偏向舊寫法。要求改用新 API 時，也要核對目標瀏覽器，避免在 Safari 等環境遇到 `TypeError`。
 
 ## Baseline 的來源與專案的瀏覽器目標
 
-Baseline 的狀態可以直接查 web-features 的 `data.json`。專案規範寫「Baseline 2024」時，2024 年以前變成 Newly available 的功能都在範圍內。院內有舊電腦時，Baseline 不夠，要寫出具體版本（見 [瀏覽器支援與 Baseline](#/skill/browser-support)）。
+用 web-features 的 `data.json` 查狀態。Baseline 2024 涵蓋截至 2024 年成為 Newly available 的功能。院內舊電腦要列出具體版本，見 [瀏覽器支援與 Baseline](#/skill/browser-support)。
 
 ## 對照表：舊寫法與現在的寫法
 
@@ -174,11 +172,10 @@ Invoker Commands（`<button command="show-modal" commandfor="notice">`）連必�
 
 ## Modern Web Guidance 的指南和標準不一樣時
 
-Modern Web Guidance 由 GoogleChrome 在 npm 發布（README 寫明由 Chrome、Edge、Firefox 與 MDN 團隊共同維護），內容是建議，不是 WHATWG 或 W3C 的規範。幾個要自己判斷的地方：
+GoogleChrome 在 npm 發布 Modern Web Guidance，由 Chrome、Edge、Firefox 與 MDN 團隊共同維護。指南的建議要依瀏覽器目標和標準驗收。
 
-- 指南推薦的功能可能只有 Chromium 支援：送分析資料的指南要求自己的程式只呼叫 `fetchLater()`，退路交給它附的 polyfill；選單的指南用 `focusgroup`（Chrome、Edge 150 起）推導角色，不在標記裡寫 `role="menu"`。專案要支援 Safari 時，這些都只能當加分寫法。
-- 和 WAI-ARIA APG 的細節不同：選單指南說用滑鼠點開選單時焦點留在按鈕，APG 的 Menu Button 範例則是開選單時把焦點移到第一項。無障礙的行為以 APG 與 WCAG 為準，再看指南有沒有更好的實作方式。
-- 指南寫的支援狀態跟著它的資料版本，可能和最新的 web-features 不同；真正決定能不能用的是查證當天的資料與專案的瀏覽器目標。
+- `fetchLater()` 指南把退路交給 polyfill。`focusgroup` 從 Chrome、Edge 150 才支援。用最新 web-features 查支援狀態，並依 Safari 等目標瀏覽器安排退路。
+- 指南用滑鼠開選單時把焦點留在按鈕。APG 的 Menu Button 範例會移到第一項。以 APG 與 WCAG 驗收無障礙行為。
 
 ## 讓 AI 先查再寫
 
@@ -202,13 +199,11 @@ AI 每次都要先知道「能用到多新」。把這段放進 `AGENTS.md`（�
 - 交付時列出用到的新功能、Baseline 狀態與指南 id。
 ```
 
-Modern Web Guidance 的 SKILL.md 也是這樣解讀政策：沒有寫政策時只把 Widely available 當成可以直接用，其他照指南附的退路做；寫了「Baseline 2024」這類目標，功能的 Baseline 年份不晚於目標年份，就可以省略退路。
+Modern Web Guidance 未讀到專案政策時，只直接採用 Widely available。若目標寫為 Baseline 2024，可直接採用截至該年納入 Baseline 的功能。
 
 ### 2. 給 agent 裝 Modern Web Guidance
 
-它是一份給 coding agent 讀的 skill：一個 `SKILL.md` 告訴 agent 什麼時候要查、怎麼查，加上約兩百份指南（1.0.1 版有 209 份），分 HTML、CSS、表單、UI 元件、效能、資安、無障礙、JS 等類。每份指南是一般的 Markdown，最後一節列出用到的功能的 Baseline 狀態、支援的瀏覽器版本與退路。
-
-安裝與使用（需要 Node.js 22 以上，執行時要連網下載套件）：
+Modern Web Guidance 1.0.1 有 209 份 Markdown 指南，列出 Baseline 狀態、瀏覽器版本和退路。CLI 需要 Node.js 22 以上，下載套件需連網。
 
 ```bash
 # 互動式安裝到自己用的 agent
@@ -222,19 +217,17 @@ npx -y modern-web-guidance@latest search "prevent page scroll under modal"
 npx -y modern-web-guidance@latest retrieve "dialog,prevent-page-scroll-under-modal-dialog"
 ```
 
-`search` 回傳 `[{ id, description }]`，agent 看 `description` 挑出相關的指南，再用 `retrieve` 讀全文；SKILL.md 要求 agent 交付時加一節列出用了哪些指南、各自避開了什麼錯。另外有 `legacy-scan` 指令掃整個專案的舊寫法，只涵蓋一部分指南，SKILL.md 明說只在要求大範圍現代化時才用。
-
-在沙箱或要核准網路的環境（Claude Code、Codex 這類）裡，第一次執行前要先放行 `npx modern-web-guidance` 的網路存取，否則指令會卡住或逾時；離線時它無法下載。
+從 `search` 的 `[{ id, description }]` 挑指南，用 `retrieve` 讀全文。交付時列出指南與避開的錯誤。`legacy-scan` 只涵蓋部分指南，大範圍現代化時才用。沙箱需允許套件下載，離線時查 MDN。
 
 ### 3. 審查清單加一條：有沒有原生替代
 
-就算規範寫了、skill 也裝了，AI 仍可能照舊寫法。審查時（順序見 [審 AI 的改動](#/skill/ai-review-diff)）在 diff 裡搜尋幾個訊號：
+在 diff 搜尋舊寫法，對照 [審 AI 的改動](#/skill/ai-review-diff)。
 
 ```bash
 git diff main...HEAD | grep -nE "JSON\.parse\(JSON\.stringify|role=\"dialog\"|aria-modal|overflow ?= ?'hidden'|addEventListener\('(scroll|resize)'|\.innerHTML ?="
 ```
 
-每一筆都問兩個問題：有沒有原生替代？那個替代在不在專案的瀏覽器目標內？第二個問題也要反過來問：AI 用到的每個新功能，都要查得到 Baseline 狀態。
+對每個舊寫法查原生替代，並核對新 API 的 Baseline 狀態與專案瀏覽器目標。
 
 ## 深拷貝：`structuredClone` 與 JSON 的差別
 
@@ -256,7 +249,7 @@ viaClone.doctor.name = '王醫師'
 console.log('改了副本，原本的醫師還是', appt.doctor.name)
 ```
 
-JSON 的版本把 `Date` 變成字串、`Set` 變成空物件；`structuredClone` 保留型別，也是深拷貝。例外是函式與 DOM 節點：`structuredClone` 遇到它們會丟 `DataCloneError`，而 JSON 會靜靜地把函式丟掉。程式要的是「送出去的 JSON 長什麼樣」（例如要把 `Date` 轉成字串）時，留著 JSON 的寫法，指南也提醒這種情況不要換。
+JSON 會把 `Date` 轉成字串、`Set` 轉成空物件，並省略函式。`structuredClone` 保留前兩種型別，遇到函式或 DOM 節點會丟 `DataCloneError`。要驗證實際送出的 JSON 時，用 JSON 序列化。
 
 ## 其他錯誤訊息
 
