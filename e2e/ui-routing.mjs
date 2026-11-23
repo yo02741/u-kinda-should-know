@@ -2,6 +2,7 @@
 // 用 CDP 把網路調慢，讓 chunk 下載真的需要時間，才看得到過渡狀態。
 // 前置：npm run build && npm run preview
 import { chromium } from 'playwright'
+import packageInfo from '../package.json' with { type: 'json' }
 
 const base = process.env.E2E_BASE || 'http://localhost:4173/'
 const browser = await chromium.launch()
@@ -30,6 +31,7 @@ t('home lists the three tracks', (await page.$$eval('.track-card h2', (hs) => hs
 t('home does not load skill body chunks', !homeChunks.some((n) => /^d\d+-[a-z]+-/.test(n)))
 t('home does not load the Firebase SDK (only after 登入 or a restored session)', !homeChunks.some((n) => /^firebase-/.test(n)))
 t('home title', await page.title() === 'u kinda should know', await page.title())
+t('home footer shows the website version', await page.locator('footer').getByText(`版本 ${packageInfo.version}`, { exact: true }).isVisible())
 t('home does not load the sandbox runtime (frame chunk, vendor/)', !sandboxLoaded(), requested.filter((u) => u.includes('/vendor/')).join(','))
 t('home does not request Pyodide or PGlite', !requested.some((u) => /\/pyodide\/|pglite/i.test(u)))
 
@@ -94,6 +96,7 @@ await page.goto(base + '#/scenario/cache', { waitUntil: 'networkidle' })
 await page.waitForSelector('section.lab', { timeout: 30000 })
 t('deep link to lazy page renders', /API 快取/.test(await page.textContent('h1')))
 t('scenario title', await page.title() === 'API 快取 · u kinda should know', await page.title())
+t('deep link footer shows the website version', await page.locator('footer').getByText(`版本 ${packageInfo.version}`, { exact: true }).isVisible())
 
 // 課綱：每週標題下掛該週的情境；?week=10 會捲到第 10 週
 await page.goto(base + '#/curriculum?week=10', { waitUntil: 'networkidle' })

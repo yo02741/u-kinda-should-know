@@ -438,6 +438,10 @@ push 到 `main` 觸發 `.github/workflows/deploy.yml`：`npm ci` → 同步 READ
 
 `.github/workflows/docs-sync.yml` 在 push 後檢查 README 與課綱的產生段落，沒同步就自動補一個 commit（用 `GITHUB_TOKEN` 推送，不會再觸發部署）。
 
+### 版本與部署確認
+
+每次發布網站變更都依 [網站版本規則](AGENTS.md#網站版本) 調升 `package.json` 的 `MAJOR.MINOR.PATCH`。部署後重新整理 GitHub Pages 與 Firebase Hosting，分別確認頁尾 GitHub 連結旁的「版本」符合這次發布的版本號。
+
 ### Firebase Hosting
 
 `firebase.json` 的 `hosting` 以 `dist/` 為根目錄（hash 路由，不需要 rewrite）；`/assets/**` 檔名帶 hash，快取一年；`/pyodide/**` 快取一天；`index.html` 不快取。`.firebaserc` 的預設專案是 `u-kinda-should-know`。

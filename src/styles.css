@@ -551,6 +551,7 @@ h2.section-title { font-family: var(--serif); font-weight: 700; font-size: clamp
 /* ============ 雜項 ============ */
 .status-msg { padding: 60px 0; text-align: center; color: var(--ink-3); }
 .colophon { margin-top: 64px; padding-top: 16px; border-top: 1px solid var(--hairline); font-size: 0.74rem; color: var(--ink-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.colophon-meta { display: flex; align-items: baseline; gap: 12px; }
 .colophon a { color: var(--ink-3); }
 .back-to-top {
   position: fixed; right: 18px; bottom: 26px; z-index: 10;

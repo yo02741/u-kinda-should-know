@@ -2,6 +2,10 @@
 
 純靜態的學習網站，三條路線：前端、後端、AI（Vite + React 18，沒有自己的後端；選配的 Google 登入同步用 Firebase Auth + Firestore，沒設定時整段不出現）。內容與程式分離：**內容在 `src/content/`，互動實驗室在 `src/labs/`，執行環境在 `src/runtime/`**。細節見 `README.md`。push 到 `main` 就部署到 GitHub Pages 與 Firebase Hosting。
 
+## 網站版本
+
+每次發布網站變更前都要調升版本，包含課文與題庫等使用者看得到的內容。破壞既有相容性用 `major`，新增向後相容的功能用 `minor`，修正錯誤、調整樣式與更新教材用 `patch`。在專案根目錄執行 `npm version patch --no-git-tag-version`，依這次發布範圍把 `patch` 換成對應層級。將 `package.json` 與 `package-lock.json` 的版本變更一起送出。頁尾在建置時讀取 `package.json` 的版本。
+
 ## 指令
 
 ```bash

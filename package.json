@@ -1,7 +1,7 @@
 {
   "name": "u-kinda-should-know",
   "private": true,
-  "version": "0.2.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "predev": "node scripts/copy-pyodide.mjs && node scripts/copy-vendor.mjs",

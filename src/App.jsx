@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState, useTransition } from 'react'
+import { version } from '../package.json'
 import Home from './pages/Home.jsx'
 import { findSkill, findDomain, domainsOf } from './content/roadmap.js'
 import { TRACKS, SITE as SITE_INFO, findTrack } from './content/tracks.js'
@@ -219,7 +220,10 @@ function Shell({ theme, toggleTheme, view, track, pending, children }) {
       {children}
       <footer className="colophon">
         <span>{SITE}：叫得出名字、說得出要求、驗得出對錯。{cloudEnabled ? '進度存在你的瀏覽器，登入後同步到你的帳號。' : '進度只存在你的瀏覽器。'}</span>
-        <span><a href={SITE_INFO.repo} target="_blank" rel="noreferrer">GitHub</a></span>
+        <span className="colophon-meta">
+          <span>版本 {version}</span>
+          <a href={SITE_INFO.repo} target="_blank" rel="noreferrer">GitHub</a>
+        </span>
       </footer>
       <BackToTop />
     </div>
